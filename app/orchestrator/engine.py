@@ -12,12 +12,9 @@ Key changes:
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any, Optional
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Any, Callable, Optional
 
 from app.database import AsyncSessionLocal
-from app.models import Task, Project
 from app.orchestrator.scanner import Scanner
 from app.orchestrator.router import Router
 from app.orchestrator.worker import WorkerManager
@@ -42,7 +39,11 @@ class OrchestratorEngine:
     - Handle task routing
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        session_factory: Optional[Callable[[], Any]] = None,
+    ):
+        self._session_factory = session_factory or AsyncSessionLocal
         self.router = Router()
         self._running = False
         self._paused = False
@@ -63,7 +64,7 @@ class OrchestratorEngine:
         logger.info("[ENGINE] Orchestrator started")
         logger.info("=" * 60)
 
-    async def stop(self) -> None:
+    async def stop(self, timeout: Optional[float] = None) -> None:
         """Stop the orchestrator engine."""
         if not self._running:
             return
@@ -74,12 +75,19 @@ class OrchestratorEngine:
         if self._task:
             self._task.cancel()
             try:
-                await self._task
+                if timeout is not None:
+                    await asyncio.wait_for(self._task, timeout=timeout)
+                else:
+                    await self._task
             except asyncio.CancelledError:
                 pass
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[ENGINE] Timed out waiting for orchestrator loop to stop"
+                )
 
         # Shutdown workers
-        async with AsyncSessionLocal() as db:
+        async with self._session_factory() as db:
             worker_manager = WorkerManager(db)
             await worker_manager.shutdown()
 
@@ -139,7 +147,7 @@ class OrchestratorEngine:
         """
         activity = False
 
-        async with AsyncSessionLocal() as db:
+        async with self._session_factory() as db:
             scanner = Scanner(db)
             worker_manager = WorkerManager(db)
             monitor = Monitor(db)
@@ -248,7 +256,7 @@ class OrchestratorEngine:
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
-        async with AsyncSessionLocal() as db:
+        async with self._session_factory() as db:
             worker_manager = WorkerManager(db)
             agent_tracker = AgentTracker(db)
             
@@ -265,7 +273,7 @@ class OrchestratorEngine:
 
     async def get_worker_details(self) -> list[dict[str, Any]]:
         """Get details of all active workers."""
-        async with AsyncSessionLocal() as db:
+        async with self._session_factory() as db:
             worker_manager = WorkerManager(db)
             
             workers = []
