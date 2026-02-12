@@ -58,7 +58,7 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_opens_after_threshold(self, db_session: AsyncSession):
         """Test that circuit opens after threshold failures."""
-        circuit = CircuitBreaker(db, threshold=3, cooldown_seconds=60)
+        circuit = CircuitBreaker(db_session, threshold=3, cooldown_seconds=60)
         
         # Record 3 infrastructure failures
         for i in range(3):
@@ -82,7 +82,7 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_resets_on_success(self, db_session: AsyncSession):
         """Test that circuit resets after successful task."""
-        circuit = CircuitBreaker(db, threshold=3)
+        circuit = CircuitBreaker(db_session, threshold=3)
         
         # Record 2 infrastructure failures
         for i in range(2):
@@ -107,7 +107,7 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_project_level_circuit(self, db_session: AsyncSession):
         """Test that project-level circuits work independently."""
-        circuit = CircuitBreaker(db, threshold=2)
+        circuit = CircuitBreaker(db_session, threshold=2)
         
         # Fail project A 2 times
         for i in range(2):
@@ -130,7 +130,7 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_agent_level_circuit(self, db_session: AsyncSession):
         """Test that agent-level circuits work independently."""
-        circuit = CircuitBreaker(db, threshold=2)
+        circuit = CircuitBreaker(db_session, threshold=2)
         
         # Fail programmer agent 2 times
         for i in range(2):
@@ -153,7 +153,7 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_circuit_status(self, db_session: AsyncSession):
         """Test that circuit status is reported correctly."""
-        circuit = CircuitBreaker(db, threshold=2)
+        circuit = CircuitBreaker(db_session, threshold=2)
         
         # Record failure
         await circuit.record_failure(
