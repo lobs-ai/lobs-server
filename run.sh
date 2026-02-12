@@ -9,5 +9,21 @@ fi
 # Ensure log directory exists
 mkdir -p logs
 
+# Resolve bind mode: local -> localhost only, lan -> all interfaces
+HOST="0.0.0.0"
+MODE="${1:-lan}"
+case "$MODE" in
+    local)
+        HOST="127.0.0.1"
+        ;;
+    lan)
+        HOST="0.0.0.0"
+        ;;
+    *)
+        echo "Usage: $0 [lan|local]"
+        exit 1
+        ;;
+esac
+
 # Start uvicorn server
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --log-level warning
+uvicorn app.main:app --host "$HOST" --port 8000 --log-level warning
