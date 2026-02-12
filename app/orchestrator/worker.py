@@ -31,6 +31,7 @@ from app.orchestrator.config import (
 )
 from app.orchestrator.escalation import EscalationManager
 from app.orchestrator.agent_tracker import AgentTracker
+from app.orchestrator.prompter import Prompter
 
 logger = logging.getLogger(__name__)
 
@@ -133,12 +134,26 @@ class WorkerManager:
 
             # Build OpenClaw command
             task_title = task.get("title", task_id[:8])
-            task_notes = task.get("notes", "")
             
-            # Create workspace prompt file
+            # Build prompt using Prompter (with agent context, rules, etc)
             prompt_file = WORKER_RESULTS_DIR / f"{task_id}.prompt.txt"
-            prompt_content = f"{task_title}\n\n{task_notes}".strip()
-            prompt_file.write_text(prompt_content, encoding="utf-8")
+            try:
+                # TODO: Load global engineering rules from config/DB
+                global_rules = ""
+                prompt_content = Prompter.build_task_prompt(
+                    item=task,
+                    project_path=repo_path,
+                    agent_type=agent_type,
+                    rules=global_rules
+                )
+                prompt_file.write_text(prompt_content, encoding="utf-8")
+                logger.info(f"[WORKER] Built structured prompt for {task_id[:8]} (agent={agent_type})")
+            except Exception as e:
+                # Fallback to simple prompt if Prompter fails
+                logger.warning(f"[WORKER] Prompter failed for {task_id[:8]}: {e}. Using fallback.")
+                task_notes = task.get("notes", "")
+                prompt_content = f"{task_title}\n\n{task_notes}".strip()
+                prompt_file.write_text(prompt_content, encoding="utf-8")
 
             # OpenClaw command (simplified - adjust based on your setup)
             cmd = [
