@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Migration script to import data from ~/lobs-control into lobs-server SQLite database.
-Usage: cd ~/lobs-server && source .venv/bin/activate && python scripts/migrate_from_git.py
+Migration script to import data from a lobs-control repo into lobs-server SQLite database.
+Usage: cd ~/lobs-server && source .venv/bin/activate && python scripts/migrate_from_git.py [/path/to/lobs-control]
 """
 
 import json
@@ -633,10 +633,15 @@ class Migrator:
 
 def main():
     """Main entry point."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Migrate lobs-control git repo data into lobs-server SQLite database.')
+    parser.add_argument('control_path', nargs='?', default=str(Path.home() / 'lobs-control'),
+                        help='Path to the lobs-control repo (default: ~/lobs-control)')
+    args = parser.parse_args()
+
     # Resolve paths
-    home = Path.home()
-    control_dir = home / 'lobs-control'
-    db_path = home / 'lobs-server' / 'data' / 'lobs.db'
+    control_dir = Path(args.control_path).expanduser().resolve()
+    db_path = Path(__file__).parent.parent / 'data' / 'lobs.db'
     
     # Ensure data directory exists
     db_path.parent.mkdir(parents=True, exist_ok=True)
