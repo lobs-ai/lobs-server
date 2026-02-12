@@ -30,6 +30,8 @@ from app.orchestrator.config import (
     WORKER_KILL_TIMEOUT,
 )
 from app.orchestrator.escalation import EscalationManager
+from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
+from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 
@@ -308,6 +310,9 @@ class WorkerManager:
                 db_task.status = "completed"
                 db_task.finished_at = datetime.now(timezone.utc)
                 db_task.updated_at = datetime.now(timezone.utc)
+                # Reset escalation on success
+                db_task.escalation_tier = 0
+                db_task.retry_count = 0
                 await self.db.commit()
 
             # Update agent tracker
@@ -316,6 +321,10 @@ class WorkerManager:
                 task_id=task_id,
                 duration_seconds=duration
             )
+            
+            # Record success in circuit breaker
+            circuit_breaker = CircuitBreaker(self.db)
+            await circuit_breaker.record_success(project_id, agent_type)
 
         else:
             # Failure
@@ -324,24 +333,56 @@ class WorkerManager:
                 f"(task={task_id[:8]}, exit_code={exit_code})"
             )
 
-            # Update task
-            db_task = await self.db.get(Task, task_id)
-            if db_task:
-                db_task.work_state = "blocked"
-                db_task.status = "active"  # Keep active for retry
-                db_task.updated_at = datetime.now(timezone.utc)
-                await self.db.commit()
-
             # Update agent tracker
             await self.agent_tracker.mark_failed(agent_type, task_id)
-
-            # Create escalation alert
-            await self.escalation.create_failure_alert(
+            
+            # Check if this is infrastructure failure
+            circuit_breaker = CircuitBreaker(self.db)
+            is_infra_failure = await circuit_breaker.record_failure(
                 task_id=task_id,
                 project_id=project_id,
+                agent_type=agent_type,
                 error_log=log_tail,
-                severity="medium"
+                failure_reason=f"exit_code_{exit_code}"
             )
+            
+            # Use enhanced escalation manager
+            escalation_enhanced = EscalationManagerEnhanced(self.db)
+            
+            if is_infra_failure:
+                # Infrastructure failure - just create alert, don't escalate
+                logger.warning(
+                    f"[WORKER] Infrastructure failure detected for {task_id[:8]}, "
+                    f"pausing further spawning"
+                )
+                await escalation_enhanced.create_simple_alert(
+                    task_id=task_id,
+                    project_id=project_id,
+                    error_log=log_tail,
+                    severity="high"
+                )
+                
+                # Mark task as blocked
+                db_task = await self.db.get(Task, task_id)
+                if db_task:
+                    db_task.work_state = "blocked"
+                    db_task.status = "active"
+                    db_task.failure_reason = "Infrastructure failure detected"
+                    db_task.updated_at = datetime.now(timezone.utc)
+                    await self.db.commit()
+            else:
+                # Task-level failure - use multi-tier escalation
+                escalation_result = await escalation_enhanced.handle_failure(
+                    task_id=task_id,
+                    project_id=project_id,
+                    agent_type=agent_type,
+                    error_log=log_tail,
+                    exit_code=exit_code
+                )
+                
+                logger.info(
+                    f"[WORKER] Escalation result for {task_id[:8]}: {escalation_result}"
+                )
 
         # Record worker run
         await self._record_worker_run(

@@ -22,6 +22,9 @@ from app.orchestrator.scanner import Scanner
 from app.orchestrator.router import Router
 from app.orchestrator.worker import WorkerManager
 from app.orchestrator.monitor import Monitor
+from app.orchestrator.monitor_enhanced import MonitorEnhanced
+from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
+from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.config import POLL_INTERVAL
 
@@ -140,6 +143,9 @@ class OrchestratorEngine:
             scanner = Scanner(db)
             worker_manager = WorkerManager(db)
             monitor = Monitor(db)
+            monitor_enhanced = MonitorEnhanced(db)
+            circuit_breaker = CircuitBreaker(db)
+            escalation = EscalationManagerEnhanced(db)
             agent_tracker = AgentTracker(db)
 
             # 1. Check active workers
@@ -148,16 +154,19 @@ class OrchestratorEngine:
             if len(worker_manager.active_workers) != initial_active:
                 activity = True
 
-            # 2. Monitor health
+            # 2. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
             try:
-                stuck_tasks = await monitor.check_stuck_tasks()
-                if stuck_tasks:
+                monitor_result = await monitor_enhanced.run_full_check()
+                if monitor_result.get("issues_found", 0) > 0:
                     activity = True
-                    logger.warning(
-                        f"[ENGINE] {len(stuck_tasks)} stuck task(s) detected"
+                    logger.info(
+                        f"[ENGINE] Monitor found {monitor_result.get('issues_found')} issue(s): "
+                        f"stuck={monitor_result.get('stuck_tasks', 0)}, "
+                        f"unblocked={monitor_result.get('unblocked_tasks', 0)}, "
+                        f"patterns={monitor_result.get('failure_patterns', 0)}"
                     )
             except Exception as e:
-                logger.error(f"[ENGINE] Monitor check failed: {e}", exc_info=True)
+                logger.error(f"[ENGINE] Enhanced monitor check failed: {e}", exc_info=True)
 
             # 3. Skip work assignment if paused
             if self._paused:
@@ -202,6 +211,18 @@ class OrchestratorEngine:
                         f"Using default (programmer)"
                     )
                     agent_type = "programmer"
+
+                # Check circuit breaker before spawning
+                allowed, reason = await circuit_breaker.should_allow_spawn(
+                    project_id=project_id,
+                    agent_type=agent_type
+                )
+                
+                if not allowed:
+                    logger.warning(
+                        f"[ENGINE] Circuit breaker blocked spawn for {task_id[:8]}: {reason}"
+                    )
+                    continue
 
                 # Try to spawn worker
                 spawned = await worker_manager.spawn_worker(
