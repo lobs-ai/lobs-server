@@ -32,6 +32,7 @@ from app.routers import (
     agents,
     orchestrator,
     backup,
+    chat,
 )
 from app.routers import text_dumps
 
@@ -72,7 +73,19 @@ async def lifespan(app: FastAPI):
     # Store orchestrator in app state for access by routers
     app.state.orchestrator = orchestrator_engine
     
+    # Start chat typing indicator cleanup task
+    from app.services.chat_manager import manager as chat_manager
+    import asyncio
+    cleanup_task = asyncio.create_task(chat_manager.cleanup_typing_indicators())
+    
     yield
+    
+    # Stop chat cleanup task
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     
     # Shutdown
     # Stop backup manager
@@ -124,6 +137,7 @@ app.include_router(text_dumps.router, prefix=settings.API_PREFIX)
 app.include_router(agents.router, prefix=settings.API_PREFIX)
 app.include_router(orchestrator.router, prefix=settings.API_PREFIX)
 app.include_router(backup.router, prefix=settings.API_PREFIX)
+app.include_router(chat.router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

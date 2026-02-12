@@ -1,10 +1,13 @@
 """Task API endpoints."""
 
+import os
+from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
 from app.database import get_db
 from app.models import Task as TaskModel
@@ -12,6 +15,11 @@ from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWork
 from app.config import settings
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
+
+
+class ArtifactContent(BaseModel):
+    """Schema for task artifact content."""
+    content: str
 
 
 @router.get("")
@@ -197,3 +205,30 @@ async def auto_archive_tasks(
     
     await db.flush()
     return {"status": "completed", "archived_count": archived_count}
+
+
+@router.get("/{task_id}/artifact")
+async def get_task_artifact(
+    task_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> ArtifactContent:
+    """Get task artifact content from the artifact_path."""
+    result = await db.execute(select(TaskModel).where(TaskModel.id == task_id))
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if not task.artifact_path:
+        return ArtifactContent(content="")
+    
+    # Expand user home directory if needed
+    artifact_path = Path(os.path.expanduser(task.artifact_path))
+    
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail=f"Artifact file not found: {task.artifact_path}")
+    
+    try:
+        content = artifact_path.read_text(encoding="utf-8")
+        return ArtifactContent(content=content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading artifact: {str(e)}")

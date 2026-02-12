@@ -258,3 +258,27 @@ class ResearchSource(Base):
     title = Column(String)
     tags = Column(JSON)
     added_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class ChatSession(Base):
+    """Chat session model."""
+    __tablename__ = "chat_sessions"
+    
+    id = Column(String, primary_key=True)
+    session_key = Column(String, nullable=False, unique=True, index=True)
+    label = Column(String)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    last_message_at = Column(DateTime)
+
+
+class ChatMessage(Base):
+    """Chat message model."""
+    __tablename__ = "chat_messages"
+    
+    id = Column(String, primary_key=True)
+    session_key = Column(String, ForeignKey("chat_sessions.session_key"), nullable=False, index=True)
+    role = Column(String, nullable=False)  # user/assistant/system
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    message_metadata = Column(JSON)
