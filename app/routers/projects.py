@@ -1,5 +1,6 @@
 """Project API endpoints."""
 
+import subprocess
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,3 +104,67 @@ async def archive_project(
     await db.flush()
     await db.refresh(project)
     return Project.model_validate(project)
+
+
+@router.post("/{project_id}/unarchive")
+async def unarchive_project(
+    project_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> Project:
+    """Unarchive a project."""
+    result = await db.execute(select(ProjectModel).where(ProjectModel.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    project.archived = False
+    await db.flush()
+    await db.refresh(project)
+    return Project.model_validate(project)
+
+
+@router.post("/{project_id}/github-sync")
+async def sync_github_project(
+    project_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Trigger a sync for GitHub-tracked projects."""
+    result = await db.execute(select(ProjectModel).where(ProjectModel.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    if project.tracking != "github" or not project.github_repo:
+        raise HTTPException(
+            status_code=400,
+            detail="Project is not configured for GitHub tracking"
+        )
+    
+    # Use gh CLI to sync GitHub issues
+    # This is a basic implementation - could be enhanced with proper task import logic
+    try:
+        cmd = ["gh", "issue", "list", "--repo", project.github_repo, "--json", "number,title,state,labels"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"GitHub CLI error: {result.stderr}"
+            )
+        
+        # Parse and return the issues
+        import json
+        issues = json.loads(result.stdout)
+        
+        return {
+            "status": "synced",
+            "project_id": project_id,
+            "repo": project.github_repo,
+            "issues_count": len(issues),
+            "issues": issues
+        }
+        
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="GitHub sync timed out")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Sync error: {str(e)}")

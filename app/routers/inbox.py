@@ -157,3 +157,37 @@ async def update_inbox_triage(
     await db.flush()
     await db.refresh(thread)
     return InboxThread.model_validate(thread)
+
+
+@router.patch("/{item_id}/read")
+async def mark_inbox_item_read(
+    item_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> InboxItem:
+    """Mark an inbox item as read."""
+    result = await db.execute(select(InboxItemModel).where(InboxItemModel.id == item_id))
+    item = result.scalar_one_or_none()
+    
+    if not item:
+        raise HTTPException(status_code=404, detail="Inbox item not found")
+    
+    item.is_read = True
+    await db.flush()
+    await db.refresh(item)
+    return InboxItem.model_validate(item)
+
+
+@router.post("/read-state")
+async def update_inbox_read_state(
+    item_ids: list[str],
+    db: AsyncSession = Depends(get_db)
+):
+    """Bulk update read state for multiple inbox items."""
+    for item_id in item_ids:
+        result = await db.execute(select(InboxItemModel).where(InboxItemModel.id == item_id))
+        item = result.scalar_one_or_none()
+        if item:
+            item.is_read = True
+    
+    await db.flush()
+    return {"status": "updated", "count": len(item_ids)}

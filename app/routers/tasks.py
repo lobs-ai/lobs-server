@@ -1,8 +1,9 @@
 """Task API endpoints."""
 
 from typing import Optional
+from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -169,3 +170,30 @@ async def update_task_review_state(
     await db.flush()
     await db.refresh(task)
     return Task.model_validate(task)
+
+
+@router.post("/auto-archive")
+async def auto_archive_tasks(
+    older_than_days: int = 14,
+    db: AsyncSession = Depends(get_db)
+):
+    """Archive completed tasks older than N days."""
+    cutoff_date = datetime.utcnow() - timedelta(days=older_than_days)
+    
+    # Find completed tasks older than cutoff
+    query = select(TaskModel).where(
+        and_(
+            TaskModel.status == "completed",
+            TaskModel.finished_at < cutoff_date
+        )
+    )
+    result = await db.execute(query)
+    tasks = result.scalars().all()
+    
+    archived_count = 0
+    for task in tasks:
+        task.status = "archived"
+        archived_count += 1
+    
+    await db.flush()
+    return {"status": "completed", "archived_count": archived_count}

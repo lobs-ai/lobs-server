@@ -47,6 +47,12 @@ class Task(Base):
     agent = Column(String)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    
+    # Escalation fields
+    escalation_tier = Column(Integer, default=0)  # 0=none, 1=retry, 2=agent_switch, 3=diagnostic, 4=human
+    retry_count = Column(Integer, default=0)
+    failure_reason = Column(Text)
+    last_retry_reason = Column(String)
 
 
 class InboxItem(Base):

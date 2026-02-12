@@ -78,6 +78,27 @@ async def create_research_source(
     return ResearchSource.model_validate(db_source)
 
 
+@router.delete("/{project_id}/sources/{source_id}")
+async def delete_research_source(
+    project_id: str,
+    source_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a research source."""
+    result = await db.execute(
+        select(ResearchSourceModel).where(
+            ResearchSourceModel.id == source_id,
+            ResearchSourceModel.project_id == project_id
+        )
+    )
+    source = result.scalar_one_or_none()
+    if not source:
+        raise HTTPException(status_code=404, detail="Research source not found")
+    
+    await db.delete(source)
+    return {"status": "deleted"}
+
+
 @router.get("/{project_id}/requests")
 async def list_research_requests(
     project_id: str,
