@@ -1,109 +1,104 @@
-"""Documents router."""
+"""Agent documents API endpoints."""
+
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.database import get_db
-from app.models.document import AgentDocument
-from app.schemas.document import (
-    AgentDocument as DocumentSchema,
-    AgentDocumentCreate,
-    AgentDocumentUpdate
-)
+from app.models import AgentDocument as AgentDocumentModel
+from app.schemas import AgentDocument, AgentDocumentCreate, AgentDocumentUpdate
+from app.config import settings
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
-@router.get("", response_model=list[DocumentSchema])
+@router.get("")
 async def list_documents(
-    source: str | None = None,
-    status: str | None = None,
-    project_id: str | None = None,
-    task_id: str | None = None,
-    is_read: bool | None = None,
-    limit: int = 100,
+    limit: int = settings.DEFAULT_LIMIT,
     offset: int = 0,
     db: AsyncSession = Depends(get_db)
-):
-    """List all agent documents."""
-    query = select(AgentDocument)
-    
-    if source:
-        query = query.where(AgentDocument.source == source)
-    if status:
-        query = query.where(AgentDocument.status == status)
-    if project_id:
-        query = query.where(AgentDocument.project_id == project_id)
-    if task_id:
-        query = query.where(AgentDocument.task_id == task_id)
-    if is_read is not None:
-        query = query.where(AgentDocument.is_read == is_read)
-    
-    query = query.order_by(AgentDocument.created_at.desc())
-    query = query.limit(limit).offset(offset)
-    
+) -> list[AgentDocument]:
+    """List agent documents with pagination."""
+    query = select(AgentDocumentModel).offset(offset).limit(min(limit, settings.MAX_LIMIT))
     result = await db.execute(query)
     documents = result.scalars().all()
-    return documents
+    return [AgentDocument.model_validate(d) for d in documents]
 
 
-@router.post("", response_model=DocumentSchema, status_code=201)
+@router.post("")
 async def create_document(
     document: AgentDocumentCreate,
     db: AsyncSession = Depends(get_db)
-):
+) -> AgentDocument:
     """Create a new agent document."""
-    db_document = AgentDocument(**document.model_dump())
+    db_document = AgentDocumentModel(**document.model_dump())
     db.add(db_document)
-    await db.commit()
+    await db.flush()
     await db.refresh(db_document)
-    return db_document
+    return AgentDocument.model_validate(db_document)
 
 
-@router.get("/{document_id}", response_model=DocumentSchema)
+@router.get("/{document_id}")
 async def get_document(
     document_id: str,
     db: AsyncSession = Depends(get_db)
-):
-    """Get a document by ID."""
-    result = await db.execute(select(AgentDocument).where(AgentDocument.id == document_id))
+) -> AgentDocument:
+    """Get a specific agent document."""
+    result = await db.execute(select(AgentDocumentModel).where(AgentDocumentModel.id == document_id))
     document = result.scalar_one_or_none()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
-    return document
+    return AgentDocument.model_validate(document)
 
 
-@router.put("/{document_id}", response_model=DocumentSchema)
+@router.put("/{document_id}")
 async def update_document(
     document_id: str,
     document_update: AgentDocumentUpdate,
     db: AsyncSession = Depends(get_db)
-):
-    """Update a document."""
-    result = await db.execute(select(AgentDocument).where(AgentDocument.id == document_id))
+) -> AgentDocument:
+    """Update an agent document."""
+    result = await db.execute(select(AgentDocumentModel).where(AgentDocumentModel.id == document_id))
     document = result.scalar_one_or_none()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    for key, value in document_update.model_dump(exclude_unset=True).items():
+    update_data = document_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
         setattr(document, key, value)
     
-    await db.commit()
+    await db.flush()
     await db.refresh(document)
-    return document
+    return AgentDocument.model_validate(document)
 
 
-@router.post("/{document_id}/archive", response_model=DocumentSchema)
-async def archive_document(
+@router.delete("/{document_id}")
+async def delete_document(
     document_id: str,
     db: AsyncSession = Depends(get_db)
 ):
-    """Archive a document (set status to approved)."""
-    result = await db.execute(select(AgentDocument).where(AgentDocument.id == document_id))
+    """Delete an agent document."""
+    result = await db.execute(select(AgentDocumentModel).where(AgentDocumentModel.id == document_id))
     document = result.scalar_one_or_none()
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     
-    document.status = "approved"
-    await db.commit()
+    await db.delete(document)
+    return {"status": "deleted"}
+
+
+@router.post("/{document_id}/archive")
+async def archive_document(
+    document_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> AgentDocument:
+    """Archive a document by setting status to archived."""
+    result = await db.execute(select(AgentDocumentModel).where(AgentDocumentModel.id == document_id))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    document.status = "archived"
+    await db.flush()
     await db.refresh(document)
-    return document
+    return AgentDocument.model_validate(document)
