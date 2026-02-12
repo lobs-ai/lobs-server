@@ -130,7 +130,10 @@ async def create_inbox_message(
         db.add(thread)
         await db.flush()
     
-    db_message = InboxMessageModel(**message.model_dump())
+    # Use the actual thread ID, not the one from the request
+    message_data = message.model_dump()
+    message_data["thread_id"] = thread.id
+    db_message = InboxMessageModel(**message_data)
     db.add(db_message)
     await db.flush()
     await db.refresh(db_message)
