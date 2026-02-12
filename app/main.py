@@ -3,9 +3,10 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import logging
 
 from app.config import settings
-from app.database import init_db
+from app.database import init_db, AsyncSessionLocal
 from app.routers import (
     health,
     projects,
@@ -18,19 +19,50 @@ from app.routers import (
     templates,
     reminders,
     agents,
+    orchestrator,
 )
 from app.routers import text_dumps
+
+logger = logging.getLogger(__name__)
+
+# Global orchestrator instance
+orchestrator_engine = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
+    global orchestrator_engine
+    
     # Startup
     settings.ensure_data_dir()
     await init_db()
+    
+    # Start orchestrator if enabled
+    if settings.ORCHESTRATOR_ENABLED:
+        try:
+            from app.orchestrator import OrchestratorEngine
+            orchestrator_engine = OrchestratorEngine(AsyncSessionLocal)
+            await orchestrator_engine.start()
+            logger.info("Orchestrator started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start orchestrator: {e}", exc_info=True)
+            orchestrator_engine = None
+    else:
+        logger.info("Orchestrator disabled via config")
+    
+    # Store orchestrator in app state for access by routers
+    app.state.orchestrator = orchestrator_engine
+    
     yield
+    
     # Shutdown
-    pass
+    if orchestrator_engine:
+        try:
+            await orchestrator_engine.stop(timeout=60.0)
+            logger.info("Orchestrator stopped successfully")
+        except Exception as e:
+            logger.error(f"Error stopping orchestrator: {e}", exc_info=True)
 
 
 app = FastAPI(
@@ -62,6 +94,7 @@ app.include_router(templates.router, prefix=settings.API_PREFIX)
 app.include_router(reminders.router, prefix=settings.API_PREFIX)
 app.include_router(text_dumps.router, prefix=settings.API_PREFIX)
 app.include_router(agents.router, prefix=settings.API_PREFIX)
+app.include_router(orchestrator.router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

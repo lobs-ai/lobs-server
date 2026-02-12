@@ -18,6 +18,11 @@ class Settings:
     DEFAULT_LIMIT: int = 100
     MAX_LIMIT: int = 1000
     
+    # Orchestrator
+    ORCHESTRATOR_ENABLED: bool = os.getenv("ORCHESTRATOR_ENABLED", "true").lower() in ("true", "1", "yes")
+    ORCHESTRATOR_POLL_INTERVAL: int = int(os.getenv("ORCHESTRATOR_POLL_INTERVAL", "10"))
+    ORCHESTRATOR_MAX_WORKERS: int = int(os.getenv("ORCHESTRATOR_MAX_WORKERS", "3"))
+    
     def ensure_data_dir(self):
         """Ensure data directory exists."""
         db_path = Path(self.DATABASE_PATH)
