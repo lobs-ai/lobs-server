@@ -5,8 +5,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 
+# Configure logging FIRST, before any other imports that might log
 from app.config import settings
+from app.logging_config import setup_logging
+
+setup_logging(
+    log_level=settings.LOG_LEVEL,
+    log_format=settings.LOG_FORMAT,
+    log_dir=settings.LOG_DIR,
+)
+
 from app.database import init_db, AsyncSessionLocal
+from app.backup import backup_manager
+from app.middleware import RequestLoggingMiddleware
 from app.routers import (
     health,
     projects,
@@ -20,6 +31,7 @@ from app.routers import (
     reminders,
     agents,
     orchestrator,
+    backup,
 )
 from app.routers import text_dumps
 
@@ -37,6 +49,12 @@ async def lifespan(app: FastAPI):
     # Startup
     settings.ensure_data_dir()
     await init_db()
+    
+    # Start backup manager
+    try:
+        await backup_manager.start()
+    except Exception as e:
+        logger.error(f"Failed to start backup manager: {e}", exc_info=True)
     
     # Start orchestrator if enabled
     if settings.ORCHESTRATOR_ENABLED:
@@ -57,6 +75,13 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
+    # Stop backup manager
+    try:
+        await backup_manager.stop()
+    except Exception as e:
+        logger.error(f"Error stopping backup manager: {e}", exc_info=True)
+    
+    # Stop orchestrator
     if orchestrator_engine:
         try:
             await orchestrator_engine.stop(timeout=60.0)
@@ -71,6 +96,9 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# Request logging middleware
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS
 app.add_middleware(
@@ -95,6 +123,7 @@ app.include_router(reminders.router, prefix=settings.API_PREFIX)
 app.include_router(text_dumps.router, prefix=settings.API_PREFIX)
 app.include_router(agents.router, prefix=settings.API_PREFIX)
 app.include_router(orchestrator.router, prefix=settings.API_PREFIX)
+app.include_router(backup.router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

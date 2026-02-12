@@ -23,6 +23,18 @@ class Settings:
     ORCHESTRATOR_POLL_INTERVAL: int = int(os.getenv("ORCHESTRATOR_POLL_INTERVAL", "10"))
     ORCHESTRATOR_MAX_WORKERS: int = int(os.getenv("ORCHESTRATOR_MAX_WORKERS", "3"))
     
+    # Backup
+    BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
+    BACKUP_INTERVAL_HOURS: int = int(os.getenv("BACKUP_INTERVAL_HOURS", "6"))
+    BACKUP_RETENTION_COUNT: int = int(os.getenv("BACKUP_RETENTION_COUNT", "30"))
+    BACKUP_DIR: str = os.getenv("BACKUP_DIR", "./data/backups")
+    BACKUP_GIT_ENABLED: bool = os.getenv("BACKUP_GIT_ENABLED", "false").lower() in ("true", "1", "yes")
+    
+    # Logging
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
+    LOG_FORMAT: str = os.getenv("LOG_FORMAT", "console").lower()  # "console" or "json"
+    LOG_DIR: str = os.getenv("LOG_DIR", "./logs")
+    
     def ensure_data_dir(self):
         """Ensure data directory exists."""
         db_path = Path(self.DATABASE_PATH)
