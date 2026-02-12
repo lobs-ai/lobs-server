@@ -1,82 +1,114 @@
-"""Main orchestration engine - runs as asyncio background task."""
+"""Orchestrator engine - main async polling loop.
+
+Port of ~/lobs-orchestrator/orchestrator/core/engine.py
+Key changes:
+- Replace all git operations with SQLAlchemy queries
+- Use scanner.py to find eligible tasks
+- Use router.py to route tasks to agents
+- Run as asyncio background task
+- Support pause/resume
+"""
 
 import asyncio
 import logging
-import time
+from datetime import datetime, timezone
 from typing import Any, Optional
-
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import POLL_INTERVAL
-from .scanner import Scanner
-from .router import Router
-from .worker import WorkerManager
-from .agent_tracker import AgentTracker
+from app.database import AsyncSessionLocal
+from app.models import Task, Project
+from app.orchestrator.scanner import Scanner
+from app.orchestrator.router import Router
+from app.orchestrator.worker import WorkerManager
+from app.orchestrator.monitor import Monitor
+from app.orchestrator.agent_tracker import AgentTracker
+from app.orchestrator.config import POLL_INTERVAL
 
 logger = logging.getLogger(__name__)
 
 
 class OrchestratorEngine:
-    """Main orchestration engine.
+    """
+    Main orchestration engine.
     
-    Runs as an asyncio background task, polling for work and spawning workers.
+    Responsibilities:
+    - Poll for work and spawn workers
+    - Track worker lifecycle
+    - Monitor system health
+    - Handle task routing
     """
 
-    def __init__(self, db_session_factory):
-        """Initialize the orchestrator.
-        
-        Args:
-            db_session_factory: Async callable that returns AsyncSession
-        """
-        self.db_session_factory = db_session_factory
+    def __init__(self):
         self.router = Router()
-        self.running = False
-        self.task: Optional[asyncio.Task] = None
-        self.start_time = time.time()
+        self._running = False
+        self._paused = False
+        self._task: Optional[asyncio.Task] = None
+        self.last_poll = 0.0
 
-    async def start(self):
-        """Start the orchestrator background task."""
-        if self.running:
-            logger.warning("Orchestrator already running")
+    async def start(self) -> None:
+        """Start the orchestrator engine as a background task."""
+        if self._running:
+            logger.warning("[ENGINE] Already running")
             return
 
-        self.running = True
-        self.task = asyncio.create_task(self._run_loop())
+        self._running = True
+        self._paused = False
+        self._task = asyncio.create_task(self._run_loop())
+        
         logger.info("=" * 60)
-        logger.info("Orchestrator started")
+        logger.info("[ENGINE] Orchestrator started")
         logger.info("=" * 60)
 
-    async def stop(self, timeout: float = 30.0):
-        """Stop the orchestrator gracefully."""
-        if not self.running:
+    async def stop(self) -> None:
+        """Stop the orchestrator engine."""
+        if not self._running:
             return
 
-        logger.info("Stopping orchestrator...")
-        self.running = False
-
-        if self.task:
+        logger.info("[ENGINE] Stopping orchestrator...")
+        self._running = False
+        
+        if self._task:
+            self._task.cancel()
             try:
-                await asyncio.wait_for(self.task, timeout=timeout)
-            except asyncio.TimeoutError:
-                logger.warning(f"Orchestrator did not stop within {timeout}s, cancelling")
-                self.task.cancel()
-                try:
-                    await self.task
-                except asyncio.CancelledError:
-                    pass
+                await self._task
+            except asyncio.CancelledError:
+                pass
 
-        logger.info("Orchestrator stopped")
+        # Shutdown workers
+        async with AsyncSessionLocal() as db:
+            worker_manager = WorkerManager(db)
+            await worker_manager.shutdown()
 
-    async def _run_loop(self):
+        logger.info("[ENGINE] Orchestrator stopped")
+
+    def pause(self) -> None:
+        """Pause the orchestrator (stop spawning new workers)."""
+        self._paused = True
+        logger.info("[ENGINE] Orchestrator paused")
+
+    def resume(self) -> None:
+        """Resume the orchestrator."""
+        self._paused = False
+        logger.info("[ENGINE] Orchestrator resumed")
+
+    def is_running(self) -> bool:
+        """Check if orchestrator is running."""
+        return self._running
+
+    def is_paused(self) -> bool:
+        """Check if orchestrator is paused."""
+        return self._paused
+
+    async def _run_loop(self) -> None:
         """Main orchestration loop."""
-        iteration = 0
         current_interval = POLL_INTERVAL
+        iteration = 0
 
-        while self.running:
+        while self._running:
             try:
                 iteration += 1
-                async with self.db_session_factory() as db:
-                    activity = await self._run_once(db)
+                activity = await self._run_once()
 
                 if activity:
                     current_interval = POLL_INTERVAL
@@ -85,89 +117,150 @@ class OrchestratorEngine:
                     current_interval = min(current_interval + 2, POLL_INTERVAL * 6, 60)
 
             except Exception as e:
-                logger.error(f"Error in orchestrator loop: {e}", exc_info=True)
+                logger.error(f"[ENGINE] Error in orchestration loop: {e}", exc_info=True)
                 current_interval = POLL_INTERVAL
 
             if current_interval > POLL_INTERVAL:
-                logger.debug(f"Idle, sleeping for {current_interval}s (iteration {iteration})")
+                logger.debug(
+                    f"[ENGINE] Idle, sleeping for {current_interval}s "
+                    f"(iteration {iteration})"
+                )
 
             await asyncio.sleep(current_interval)
 
-    async def _run_once(self, db: AsyncSession) -> bool:
-        """Execute one iteration of the orchestration loop.
+    async def _run_once(self) -> bool:
+        """
+        Execute one iteration of the orchestration loop.
         
         Returns True if there was activity.
         """
         activity = False
 
-        # Initialize components with database session
-        scanner = Scanner(db)
-        agent_tracker = AgentTracker(db)
-        await agent_tracker.init_statuses()
-        worker_manager = WorkerManager(db, agent_tracker)
+        async with AsyncSessionLocal() as db:
+            scanner = Scanner(db)
+            worker_manager = WorkerManager(db)
+            monitor = Monitor(db)
+            agent_tracker = AgentTracker(db)
 
-        # 1. Check active workers
-        initial_active = len(worker_manager.active_workers)
-        await worker_manager.check_workers()
-        if len(worker_manager.active_workers) != initial_active:
-            activity = True
-
-        # 2. Sync agent status to DB (rate-limited internally)
-        await agent_tracker.sync_to_db()
-
-        # 3. Scan for new work
-        projects = await scanner.get_projects()
-        eligible_work = await scanner.get_eligible_tasks()
-
-        if not eligible_work:
-            return activity
-
-        # 4. Assign work
-        for task in eligible_work:
-            project_id = task.get("project_id") or "default"
-
-            # Validate project exists
-            project_ids = [p["id"] for p in projects]
-            if project_id not in project_ids:
-                logger.warning(f"Task {task['id']} has invalid projectId '{project_id}'. Skipping.")
-                continue
-
-            task_id = task["id"]
-            task_title = task.get("title", task_id[:8])
-
-            # Route to agent
-            agent_type = self.router.route(task)
-            logger.info(f"[ROUTER] Selected agent '{agent_type}' for {task_id[:8]}")
-
-            # Try to spawn worker
-            spawned = await worker_manager.spawn_worker(task, project_id, agent_type)
-            if spawned:
+            # 1. Check active workers
+            initial_active = len(worker_manager.active_workers)
+            await worker_manager.check_workers()
+            if len(worker_manager.active_workers) != initial_active:
                 activity = True
-                logger.info(f"Spawned worker for {task_id[:8]} (project={project_id}, agent={agent_type})")
+
+            # 2. Monitor health
+            try:
+                stuck_tasks = await monitor.check_stuck_tasks()
+                if stuck_tasks:
+                    activity = True
+                    logger.warning(
+                        f"[ENGINE] {len(stuck_tasks)} stuck task(s) detected"
+                    )
+            except Exception as e:
+                logger.error(f"[ENGINE] Monitor check failed: {e}", exc_info=True)
+
+            # 3. Skip work assignment if paused
+            if self._paused:
+                return activity
+
+            # 4. Scan for eligible tasks
+            eligible_tasks = await scanner.get_eligible_tasks()
+            
+            if not eligible_tasks:
+                return activity
+
+            # Log queue depth if worker is busy
+            worker_status = await worker_manager.get_worker_status()
+            if worker_status.get("busy") and len(eligible_tasks) > 0:
+                current = worker_status.get("current_task", "unknown")[:8]
+                logger.info(
+                    f"[ENGINE] Worker busy (current: {current}). "
+                    f"{len(eligible_tasks)} task(s) queued."
+                )
+
+            # 5. Process eligible tasks
+            for task_dict in eligible_tasks:
+                activity = True
+                
+                task_id = task_dict.get("id")
+                project_id = task_dict.get("project_id")
+                task_title = task_dict.get("title", task_id[:8] if task_id else "unknown")
+
+                if not task_id or not project_id:
+                    logger.warning("[ENGINE] Task missing ID or project_id, skipping")
+                    continue
+
+                # Route task to agent
+                try:
+                    agent_type = self.router.route(task_dict)
+                    logger.info(
+                        f"[ENGINE] Routing task {task_id[:8]} to {agent_type} agent"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[ENGINE] Failed to route task {task_id[:8]}: {e}. "
+                        f"Using default (programmer)"
+                    )
+                    agent_type = "programmer"
+
+                # Try to spawn worker
+                spawned = await worker_manager.spawn_worker(
+                    task=task_dict,
+                    project_id=project_id,
+                    agent_type=agent_type
+                )
+
+                if spawned:
+                    logger.info(
+                        f"[ENGINE] Spawned worker for task {task_id[:8]} "
+                        f"(project={project_id}, agent={agent_type})"
+                    )
+                    # Only process one task per iteration
+                    break
+                else:
+                    logger.debug(
+                        f"[ENGINE] Worker not spawned for task {task_id[:8]} "
+                        f"(likely queued due to locks/capacity)"
+                    )
 
         return activity
 
-    def get_status(self) -> dict[str, Any]:
+    async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
-        return {
-            "running": self.running,
-            "uptime_seconds": int(time.time() - self.start_time),
-        }
-
-    async def get_worker_status(self) -> dict[str, Any]:
-        """Get current worker status."""
-        async with self.db_session_factory() as db:
+        async with AsyncSessionLocal() as db:
+            worker_manager = WorkerManager(db)
             agent_tracker = AgentTracker(db)
-            await agent_tracker.init_statuses()
-            worker_manager = WorkerManager(db, agent_tracker)
-            return worker_manager.get_worker_status()
+            
+            worker_status = await worker_manager.get_worker_status()
+            agent_statuses = await agent_tracker.get_all_statuses()
 
-    async def pause(self):
-        """Pause the orchestrator (stop accepting new work)."""
-        # TODO: Implement pause logic
-        logger.info("Orchestrator pause requested (not yet implemented)")
+            return {
+                "running": self._running,
+                "paused": self._paused,
+                "worker": worker_status,
+                "agents": agent_statuses,
+                "poll_interval": POLL_INTERVAL
+            }
 
-    async def resume(self):
-        """Resume the orchestrator."""
-        # TODO: Implement resume logic
-        logger.info("Orchestrator resume requested (not yet implemented)")
+    async def get_worker_details(self) -> list[dict[str, Any]]:
+        """Get details of all active workers."""
+        async with AsyncSessionLocal() as db:
+            worker_manager = WorkerManager(db)
+            
+            workers = []
+            for worker_id, (process, task_id, project_id, agent_type, start_time, log_file) in worker_manager.active_workers.items():
+                import time
+                runtime = time.time() - start_time
+                
+                workers.append({
+                    "worker_id": worker_id,
+                    "task_id": task_id,
+                    "project_id": project_id,
+                    "agent_type": agent_type,
+                    "pid": process.pid,
+                    "runtime_seconds": int(runtime),
+                    "started_at": datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat(),
+                    "log_file": str(log_file)
+                })
+
+            return workers
