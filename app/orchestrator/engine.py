@@ -11,6 +11,7 @@ Key changes:
 
 import asyncio
 import logging
+import shutil
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
@@ -56,12 +57,17 @@ class OrchestratorEngine:
             logger.warning("[ENGINE] Already running")
             return
 
+        # Check if OpenClaw is available
+        self._openclaw_available = shutil.which("openclaw") is not None
+        if not self._openclaw_available:
+            logger.warning("[ENGINE] OpenClaw not found on PATH — orchestrator will run in monitoring-only mode (no worker spawning)")
+        
         self._running = True
         self._paused = False
         self._task = asyncio.create_task(self._run_loop())
         
         logger.info("=" * 60)
-        logger.info("[ENGINE] Orchestrator started")
+        logger.info("[ENGINE] Orchestrator started%s", " (monitoring-only, no OpenClaw)" if not self._openclaw_available else "")
         logger.info("=" * 60)
 
     async def stop(self, timeout: Optional[float] = None) -> None:
@@ -176,8 +182,11 @@ class OrchestratorEngine:
             except Exception as e:
                 logger.error(f"[ENGINE] Enhanced monitor check failed: {e}", exc_info=True)
 
-            # 3. Skip work assignment if paused
+            # 3. Skip work assignment if paused or OpenClaw unavailable
             if self._paused:
+                return activity
+            
+            if not self._openclaw_available:
                 return activity
 
             # 4. Scan for eligible tasks
@@ -189,7 +198,7 @@ class OrchestratorEngine:
             # Log queue depth if worker is busy
             worker_status = await worker_manager.get_worker_status()
             if worker_status.get("busy") and len(eligible_tasks) > 0:
-                current = worker_status.get("current_task", "unknown")[:8]
+                current = (worker_status.get("current_task") or "unknown")[:8]
                 logger.info(
                     f"[ENGINE] Worker busy (current: {current}). "
                     f"{len(eligible_tasks)} task(s) queued."

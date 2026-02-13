@@ -69,7 +69,8 @@ class MonitorEnhanced:
                 
                 # If worker exists and has recent heartbeat, task is not stuck
                 if worker and worker.last_heartbeat:
-                    heartbeat_age = (now - worker.last_heartbeat).total_seconds()
+                    hb = worker.last_heartbeat.replace(tzinfo=timezone.utc) if worker.last_heartbeat.tzinfo is None else worker.last_heartbeat
+                    heartbeat_age = (now - hb).total_seconds()
                     if heartbeat_age < self.stuck_timeout:
                         continue
                 
@@ -279,7 +280,8 @@ class MonitorEnhanced:
                 
                 # Check heartbeat timeout
                 if worker.last_heartbeat:
-                    heartbeat_age = (now - worker.last_heartbeat).total_seconds()
+                    hb = worker.last_heartbeat.replace(tzinfo=timezone.utc) if worker.last_heartbeat.tzinfo is None else worker.last_heartbeat
+                    heartbeat_age = (now - hb).total_seconds()
                     if heartbeat_age > 300:  # 5 minutes
                         worker_health["healthy"] = False
                         worker_health["issues"].append(

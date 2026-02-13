@@ -10,7 +10,7 @@ class ProjectBase(BaseModel):
     title: str
     notes: Optional[str] = None
     archived: bool = False
-    type: str  # kanban/research/tracker
+    type: str = "kanban"  # kanban/research/tracker
     sort_order: int = 0
     tracking: Optional[str] = None
     github_repo: Optional[str] = None
