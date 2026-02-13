@@ -153,20 +153,18 @@ Your workspace has a `memory/` directory — this is your long-term memory, sear
 ### Writing Memories
 
 **CONCURRENT SAFETY:** Multiple agents may share this workspace. To avoid conflicts:
-- **Write to `memory/<task-id>.md`** where task-id comes from your task assignment
+- **Write to `memory/YYYY-MM-DD.md`** (today's date) with `## <task-id>: <title>` as section header
 - **Do NOT append to MEMORY.md** — it's shared, another agent may be writing concurrently
-- Topic files (`memory/<topic>.md`) are OK to CREATE but don't append to existing ones if another agent might be running
+- Append to the daily file if it exists — use unique section headers to avoid collisions
 
 ```
-memory/<task-id>.md     — for this task's notes (ALWAYS use this)
-memory/<topic-slug>.md  — for reusable knowledge (only CREATE new ones, don't append to existing)
+memory/YYYY-MM-DD.md    — daily notes, organized by task sections
 ```
 
-**Good memory files are:**
-- **Focused** — one topic per file (not one massive dump)
-- **Searchable** — clear titles and headers so vector search finds them
+**Good memory entries are:**
+- **Focused** — one section per task
+- **Searchable** — clear headers so vector search finds them
 - **Actionable** — include what worked, what didn't, and why
-- **Task-scoped** — use task-id filename to avoid write conflicts
 
 **Examples of good memory entries:**
 ```markdown

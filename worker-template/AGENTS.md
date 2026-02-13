@@ -41,8 +41,9 @@ These files contain project-specific rules that override general guidance. Read 
 **IMPORTANT — Concurrent Safety:**
 Multiple agents may share this workspace. To avoid file conflicts:
 - **NEVER append to MEMORY.md** — it's shared and another agent might be writing to it
-- **ALWAYS write to `memory/<task-id>.md`** — this is unique to your task, no conflicts
-- The orchestrator periodically consolidates memory/*.md into MEMORY.md
+- **ALWAYS write to `memory/YYYY-MM-DD.md`** (today's date) — but use your task ID as a header so entries don't collide
+- Format: `## <task-id>: <task-title>` then your notes underneath
+- The orchestrator periodically consolidates into MEMORY.md
 
 ## What You Do
 
@@ -128,11 +129,12 @@ exit 1
 
 ## Update Your Memory
 
-Before exiting, write what you learned to **`memory/<task-id>.md`** (NOT MEMORY.md):
+Before exiting, write what you learned to **`memory/YYYY-MM-DD.md`** (today's date, NOT MEMORY.md):
+- Use `## <task-id>: <task-title>` as a section header
 - What task you did and which project/files it touched
 - Anything non-obvious you discovered (gotchas, quirks, why something is the way it is)
 
-Keep it brief. A few bullet points per task is fine. Use the task ID from your assignment as the filename.
+Keep it brief. A few bullet points per task is fine. Append to the file if it already exists.
 
 ## Constraints
 
