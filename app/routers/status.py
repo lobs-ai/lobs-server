@@ -1,8 +1,11 @@
 """System status and health API endpoints."""
 
+import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -323,3 +326,148 @@ async def get_costs(
         month=month,
         by_agent=by_agent
     )
+
+
+# MARK: - Software Updates
+
+# Repos to track for updates
+TRACKED_REPOS = {
+    "lobs-server": os.path.expanduser("~/lobs-server"),
+    "lobs-mission-control": os.path.expanduser("~/lobs-mission-control"),
+    "lobs-mobile": os.path.expanduser("~/lobs-mobile"),
+}
+
+
+class RepoUpdateInfo(BaseModel):
+    name: str
+    path: str
+    local_commit: str
+    local_message: str
+    local_date: str
+    remote_commit: str | None = None
+    remote_message: str | None = None
+    remote_date: str | None = None
+    behind: int = 0
+    ahead: int = 0
+    has_update: bool = False
+    branch: str = "main"
+    error: str | None = None
+
+
+class UpdateCheckResponse(BaseModel):
+    repos: list[RepoUpdateInfo]
+    has_updates: bool = False
+    checked_at: str
+
+
+class UpdatePullResponse(BaseModel):
+    repo: str
+    success: bool
+    output: str
+    new_commit: str | None = None
+    needs_restart: bool = False
+
+
+async def _run_git(cwd: str, *args: str, timeout: int = 15) -> tuple[int, str]:
+    """Run a git command and return (returncode, output)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    return proc.returncode or 0, stdout.decode().strip()
+
+
+@router.get("/updates")
+async def check_updates() -> UpdateCheckResponse:
+    """Check all tracked repos for available updates."""
+    repos: list[RepoUpdateInfo] = []
+
+    for name, path in TRACKED_REPOS.items():
+        if not os.path.isdir(os.path.join(path, ".git")):
+            repos.append(RepoUpdateInfo(
+                name=name, path=path,
+                local_commit="", local_message="",
+                local_date="", error="Not a git repo"
+            ))
+            continue
+
+        try:
+            # Get current branch
+            rc, branch = await _run_git(path, "rev-parse", "--abbrev-ref", "HEAD")
+            if rc != 0:
+                branch = "main"
+
+            # Fetch latest from origin (quiet)
+            await _run_git(path, "fetch", "origin", branch, "--quiet")
+
+            # Local HEAD info
+            _, local_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
+            _, local_message = await _run_git(path, "log", "-1", "--format=%s")
+            _, local_date = await _run_git(path, "log", "-1", "--format=%ci")
+
+            # Remote HEAD info
+            _, remote_commit = await _run_git(path, "rev-parse", "--short", f"origin/{branch}")
+            _, remote_message = await _run_git(path, "log", "-1", f"origin/{branch}", "--format=%s")
+            _, remote_date = await _run_git(path, "log", "-1", f"origin/{branch}", "--format=%ci")
+
+            # Count commits behind/ahead
+            _, rev_list = await _run_git(path, "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}")
+            ahead, behind = 0, 0
+            parts = rev_list.split()
+            if len(parts) == 2:
+                ahead, behind = int(parts[0]), int(parts[1])
+
+            repos.append(RepoUpdateInfo(
+                name=name, path=path, branch=branch,
+                local_commit=local_commit, local_message=local_message, local_date=local_date,
+                remote_commit=remote_commit, remote_message=remote_message, remote_date=remote_date,
+                behind=behind, ahead=ahead,
+                has_update=behind > 0,
+            ))
+        except Exception as e:
+            repos.append(RepoUpdateInfo(
+                name=name, path=path,
+                local_commit="", local_message="",
+                local_date="", error=str(e),
+            ))
+
+    return UpdateCheckResponse(
+        repos=repos,
+        has_updates=any(r.has_update for r in repos),
+        checked_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@router.post("/updates/pull")
+async def pull_update(repo: str) -> UpdatePullResponse:
+    """Pull latest changes for a specific repo."""
+    if repo not in TRACKED_REPOS:
+        return UpdatePullResponse(repo=repo, success=False, output=f"Unknown repo: {repo}")
+
+    path = TRACKED_REPOS[repo]
+    if not os.path.isdir(os.path.join(path, ".git")):
+        return UpdatePullResponse(repo=repo, success=False, output="Not a git repo")
+
+    try:
+        rc, branch = await _run_git(path, "rev-parse", "--abbrev-ref", "HEAD")
+        if rc != 0:
+            branch = "main"
+
+        rc, output = await _run_git(path, "pull", "--rebase", "origin", branch, timeout=30)
+        if rc != 0:
+            return UpdatePullResponse(repo=repo, success=False, output=output)
+
+        _, new_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
+
+        return UpdatePullResponse(
+            repo=repo,
+            success=True,
+            output=output,
+            new_commit=new_commit,
+            needs_restart=(repo == "lobs-server"),
+        )
+    except Exception as e:
+        return UpdatePullResponse(repo=repo, success=False, output=str(e))
