@@ -18,6 +18,8 @@ setup_logging(
 from app.database import init_db, AsyncSessionLocal
 from app.backup import backup_manager
 from app.middleware import RequestLoggingMiddleware
+from app.auth import require_auth
+from fastapi import Depends
 from app.routers import (
     health,
     projects,
@@ -128,23 +130,26 @@ app.add_middleware(
 )
 
 # Include routers
+# Health endpoint stays public (no auth)
 app.include_router(health.router, prefix=settings.API_PREFIX)
-app.include_router(projects.router, prefix=settings.API_PREFIX)
-app.include_router(tasks.router, prefix=settings.API_PREFIX)
-app.include_router(inbox.router, prefix=settings.API_PREFIX)
-app.include_router(documents.router, prefix=settings.API_PREFIX)
-app.include_router(research.router, prefix=settings.API_PREFIX)
-app.include_router(tracker.router, prefix=settings.API_PREFIX)
-app.include_router(worker.router, prefix=settings.API_PREFIX)
-app.include_router(templates.router, prefix=settings.API_PREFIX)
-app.include_router(reminders.router, prefix=settings.API_PREFIX)
-app.include_router(text_dumps.router, prefix=settings.API_PREFIX)
-app.include_router(agents.router, prefix=settings.API_PREFIX)
-app.include_router(orchestrator.router, prefix=settings.API_PREFIX)
-app.include_router(backup.router, prefix=settings.API_PREFIX)
-app.include_router(chat.router, prefix=settings.API_PREFIX)
-app.include_router(memories.router, prefix=settings.API_PREFIX)
-app.include_router(status.router, prefix=settings.API_PREFIX)
+
+# All other endpoints require authentication
+app.include_router(projects.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(tasks.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(inbox.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(documents.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(research.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(tracker.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(worker.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(templates.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(reminders.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(text_dumps.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(agents.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(orchestrator.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(backup.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(chat.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(memories.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(status.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 
 
 @app.get("/")

@@ -60,7 +60,21 @@ async def db_session():
 
 
 @pytest_asyncio.fixture
-async def client():
+async def test_token(db_session):
+    """Create a test API token."""
+    import secrets
+    from app.models import APIToken
+    
+    token = secrets.token_urlsafe(32)
+    api_token = APIToken(token=token, name="test-token")
+    db_session.add(api_token)
+    await db_session.commit()
+    
+    return token
+
+
+@pytest_asyncio.fixture
+async def client(test_token):
     """Provide an async HTTP client for testing."""
     # Override the database dependency
     app.dependency_overrides[get_db] = get_test_db
@@ -70,8 +84,11 @@ async def client():
     
     async with AsyncClient(
         transport=ASGITransport(app=app),
-        base_url="http://test"
+        base_url="http://test",
+        headers={"Authorization": f"Bearer {test_token}"}
     ) as ac:
+        # Store test_token as an attribute for WebSocket tests
+        ac.test_token = test_token
         yield ac
     
     # Clean up

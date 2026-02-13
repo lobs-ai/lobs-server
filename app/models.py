@@ -296,3 +296,15 @@ class Memory(Base):
     date = Column(DateTime, nullable=True)  # for daily memories
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class APIToken(Base):
+    """API token model for authentication."""
+    __tablename__ = "api_tokens"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    token = Column(String, unique=True, nullable=False, index=True)
+    name = Column(String, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    last_used_at = Column(DateTime)
+    active = Column(Boolean, default=True, nullable=False)

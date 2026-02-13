@@ -15,7 +15,7 @@ from app.services.chat_manager import manager
 from app.services.openclaw_bridge import bridge
 
 
-router = APIRouter(prefix="/api/chat", tags=["chat"])
+router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 # --- Pydantic Models ---
@@ -130,13 +130,15 @@ async def store_message(
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    session_key: str = Query("main")
+    session_key: str = Query("main"),
+    token: str = Query(..., description="Bearer token for authentication")
 ):
     """
     WebSocket endpoint for real-time chat.
     
     Query params:
     - session_key: Chat session identifier (default: "main")
+    - token: Bearer token for authentication (required)
     
     Events from client:
     - {"type": "send_message", "content": "...", "session_key": "..."}
@@ -152,6 +154,28 @@ async def websocket_endpoint(
     - {"type": "session_list", "data": [...]}
     - {"type": "error", "message": "..."}
     """
+    # Validate token before accepting connection
+    async for db in get_db():
+        try:
+            from sqlalchemy import select
+            from app.models import APIToken
+            result = await db.execute(
+                select(APIToken).where(APIToken.token == token, APIToken.active == True)
+            )
+            api_token = result.scalar_one_or_none()
+            
+            if not api_token:
+                await websocket.close(code=1008, reason="Invalid or inactive token")
+                return
+            
+            # Update last_used_at
+            api_token.last_used_at = datetime.now()
+            await db.commit()
+            break
+        except Exception as e:
+            await websocket.close(code=1011, reason=f"Auth error: {str(e)}")
+            return
+    
     await manager.connect(websocket, session_key)
     
     try:
