@@ -471,3 +471,72 @@ async def pull_update(repo: str) -> UpdatePullResponse:
         )
     except Exception as e:
         return UpdatePullResponse(repo=repo, success=False, output=str(e))
+
+
+class SelfUpdateResponse(BaseModel):
+    success: bool
+    pull_output: str
+    build_output: str
+    new_commit: str | None = None
+    binary_path: str | None = None
+
+
+@router.post("/updates/self-update")
+async def self_update_mission_control() -> SelfUpdateResponse:
+    """Pull + build Mission Control, returning the new binary path for relaunch."""
+    path = TRACKED_REPOS.get("lobs-mission-control")
+    if not path or not os.path.isdir(os.path.join(path, ".git")):
+        return SelfUpdateResponse(success=False, pull_output="Repo not found", build_output="")
+
+    try:
+        # Pull
+        rc, branch = await _run_git(path, "rev-parse", "--abbrev-ref", "HEAD")
+        if rc != 0:
+            branch = "main"
+
+        rc, pull_output = await _run_git(path, "pull", "--rebase", "origin", branch, timeout=30)
+        if rc != 0:
+            return SelfUpdateResponse(success=False, pull_output=pull_output, build_output="")
+
+        _, new_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
+
+        # Build
+        proc = await asyncio.create_subprocess_exec(
+            "swift", "build",
+            cwd=path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
+        build_output = stdout.decode().strip()
+
+        if proc.returncode != 0:
+            return SelfUpdateResponse(
+                success=False,
+                pull_output=pull_output,
+                build_output=build_output,
+                new_commit=new_commit,
+            )
+
+        # Find the built binary
+        find_proc = await asyncio.create_subprocess_exec(
+            "swift", "build", "--show-bin-path",
+            cwd=path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        bin_stdout, _ = await asyncio.wait_for(find_proc.communicate(), timeout=10)
+        bin_path = bin_stdout.decode().strip()
+        binary_path = os.path.join(bin_path, "lobs-mission-control") if bin_path else None
+
+        return SelfUpdateResponse(
+            success=True,
+            pull_output=pull_output,
+            build_output="Build succeeded",
+            new_commit=new_commit,
+            binary_path=binary_path,
+        )
+    except asyncio.TimeoutError:
+        return SelfUpdateResponse(success=False, pull_output="", build_output="Build timed out (120s)")
+    except Exception as e:
+        return SelfUpdateResponse(success=False, pull_output="", build_output=str(e))
