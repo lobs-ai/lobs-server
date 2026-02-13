@@ -17,7 +17,7 @@ setup_logging(
 
 from app.database import init_db, AsyncSessionLocal
 from app.backup import backup_manager
-from app.middleware import RequestLoggingMiddleware
+from app.middleware import RequestLoggingMiddleware, NetworkGuardMiddleware
 from app.auth import require_auth
 from fastapi import Depends
 from app.routers import (
@@ -130,6 +130,7 @@ app = FastAPI(
 
 # Request logging middleware
 app.add_middleware(RequestLoggingMiddleware)
+app.add_middleware(NetworkGuardMiddleware)
 
 # CORS
 app.add_middleware(

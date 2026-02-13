@@ -290,7 +290,8 @@ class MonitorEnhanced:
                 
                 # Check task duration
                 if worker.started_at:
-                    duration = (now - worker.started_at).total_seconds()
+                    started = worker.started_at.replace(tzinfo=timezone.utc) if worker.started_at.tzinfo is None else worker.started_at
+                    duration = (now - started).total_seconds()
                     if duration > self.kill_timeout:
                         worker_health["healthy"] = False
                         worker_health["issues"].append(

@@ -53,6 +53,8 @@ class OrchestratorEngine:
         self.last_poll = 0.0
         self._last_scheduler_check = 0.0
         self._scheduler_interval = 60  # Check events every 60 seconds
+        # Persistent worker manager (survives across ticks)
+        self._worker_manager: Optional[WorkerManager] = None
 
     async def start(self) -> None:
         """Start the orchestrator engine as a background task."""
@@ -96,9 +98,10 @@ class OrchestratorEngine:
                 )
 
         # Shutdown workers
-        async with self._session_factory() as db:
-            worker_manager = WorkerManager(db)
-            await worker_manager.shutdown()
+        if self._worker_manager:
+            async with self._session_factory() as db:
+                self._worker_manager.db = db
+                await self._worker_manager.shutdown()
 
         logger.info("[ENGINE] Orchestrator stopped")
 
@@ -158,7 +161,12 @@ class OrchestratorEngine:
 
         async with self._session_factory() as db:
             scanner = Scanner(db)
-            worker_manager = WorkerManager(db)
+            # Reuse persistent worker manager, just update its db session
+            if self._worker_manager is None:
+                self._worker_manager = WorkerManager(db)
+            else:
+                self._worker_manager.db = db
+            worker_manager = self._worker_manager
             monitor = Monitor(db)
             monitor_enhanced = MonitorEnhanced(db)
             circuit_breaker = CircuitBreaker(db)
@@ -287,10 +295,13 @@ class OrchestratorEngine:
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
         async with self._session_factory() as db:
-            worker_manager = WorkerManager(db)
+            if self._worker_manager is None:
+                self._worker_manager = WorkerManager(db)
+            else:
+                self._worker_manager.db = db
             agent_tracker = AgentTracker(db)
             
-            worker_status = await worker_manager.get_worker_status()
+            worker_status = await self._worker_manager.get_worker_status()
             agent_statuses = await agent_tracker.get_all_statuses()
 
             return {
@@ -304,10 +315,13 @@ class OrchestratorEngine:
     async def get_worker_details(self) -> list[dict[str, Any]]:
         """Get details of all active workers."""
         async with self._session_factory() as db:
-            worker_manager = WorkerManager(db)
+            if self._worker_manager is None:
+                self._worker_manager = WorkerManager(db)
+            else:
+                self._worker_manager.db = db
             
             workers = []
-            for worker_id, (process, task_id, project_id, agent_type, start_time, log_file) in worker_manager.active_workers.items():
+            for worker_id, (process, task_id, project_id, agent_type, start_time, log_file) in self._worker_manager.active_workers.items():
                 import time
                 runtime = time.time() - start_time
                 

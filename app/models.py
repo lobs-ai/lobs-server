@@ -20,6 +20,7 @@ class Project(Base):
     tracking = Column(String)  # local/github
     github_repo = Column(String)
     github_label_filter = Column(JSON)
+    repo_path = Column(String)  # Absolute path to project repo on disk
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

@@ -1,0 +1,61 @@
+#!/bin/bash
+# Manage lobs-server service
+# Usage: server [start|stop|restart|status|logs]
+
+LABEL="com.lobs.server"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG="$HOME/lobs-server/logs/server.log"
+
+if [ -z "$1" ]; then
+    echo "Usage: server [start|stop|restart|status|logs|tail]"
+    exit 0
+fi
+
+case "$1" in
+start)
+    launchctl load "$PLIST" 2>/dev/null
+    launchctl start "$LABEL"
+    sleep 1
+    if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+        echo "✅ Server started (0.0.0.0:8000)"
+    else
+        echo "⏳ Starting... check 'server status' in a moment"
+    fi
+    ;;
+stop)
+    launchctl stop "$LABEL" 2>/dev/null
+    launchctl unload "$PLIST" 2>/dev/null
+    echo "🛑 Server stopped"
+    ;;
+restart)
+    launchctl stop "$LABEL" 2>/dev/null
+    launchctl unload "$PLIST" 2>/dev/null
+    sleep 1
+    launchctl load "$PLIST"
+    launchctl start "$LABEL"
+    sleep 1
+    if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+        echo "✅ Server restarted (0.0.0.0:8000)"
+    else
+        echo "⏳ Restarting... check 'server status' in a moment"
+    fi
+    ;;
+status)
+    if curl -sf http://localhost:8000/api/health > /dev/null 2>&1; then
+        PID=$(pgrep -f "uvicorn app.main:app" | head -1)
+        echo "✅ Running (PID $PID, 0.0.0.0:8000)"
+    else
+        echo "🛑 Not running"
+    fi
+    ;;
+logs)
+    tail -50 "$LOG"
+    ;;
+tail)
+    tail -f "$LOG"
+    ;;
+*)
+    echo "Usage: server [start|stop|restart|status|logs|tail]"
+    exit 1
+    ;;
+esac

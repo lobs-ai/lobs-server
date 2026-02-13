@@ -15,6 +15,7 @@ class ProjectBase(BaseModel):
     tracking: Optional[str] = None
     github_repo: Optional[str] = None
     github_label_filter: Optional[Any] = None
+    repo_path: Optional[str] = None
 
 
 class ProjectCreate(ProjectBase):
@@ -30,6 +31,7 @@ class ProjectUpdate(BaseModel):
     tracking: Optional[str] = None
     github_repo: Optional[str] = None
     github_label_filter: Optional[Any] = None
+    repo_path: Optional[str] = None
 
 
 class Project(ProjectBase):

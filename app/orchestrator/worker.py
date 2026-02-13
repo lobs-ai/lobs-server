@@ -48,8 +48,6 @@ class WorkerManager:
 
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.escalation = EscalationManager(db)
-        self.agent_tracker = AgentTracker(db)
         
         # In-memory tracking
         # worker_id -> (process, task_id, project_id, agent_type, start_time, log_file)
@@ -122,7 +120,11 @@ class WorkerManager:
                 logger.error(f"Project {project_id} not found")
                 return False
 
-            repo_path = BASE_DIR / project_id
+            # Resolve repo path: prefer project.repo_path, fall back to BASE_DIR/project_id
+            if project.repo_path:
+                repo_path = Path(project.repo_path)
+            else:
+                repo_path = BASE_DIR / project_id
             if not repo_path.exists():
                 logger.error(f"Project repo not found: {repo_path}")
                 return False
@@ -157,14 +159,16 @@ class WorkerManager:
                 prompt_content = f"{task_title}\n\n{task_notes}".strip()
                 prompt_file.write_text(prompt_content, encoding="utf-8")
 
-            # OpenClaw command (simplified - adjust based on your setup)
+            # Read prompt content for -m flag
+            prompt_text = prompt_file.read_text(encoding="utf-8")
+
+            # OpenClaw command
             cmd = [
                 "openclaw",
                 "agent",
-                "--agent", "worker",  # Use worker identity
-                "--workspace", str(repo_path),
-                "-f", str(prompt_file),
-                "--session-label", f"task:{task_id[:8]}",
+                "--agent", agent_type,
+                "-m", prompt_text,
+                "--timeout", "900",
             ]
 
             # Spawn process
@@ -204,7 +208,7 @@ class WorkerManager:
                 await self.db.commit()
 
             # Update agent tracker
-            await self.agent_tracker.mark_working(
+            await AgentTracker(self.db).mark_working(
                 agent_type=agent_type,
                 task_id=task_id,
                 project_id=project_id,
@@ -316,7 +320,7 @@ class WorkerManager:
                 await self.db.commit()
 
             # Update agent tracker
-            await self.agent_tracker.mark_completed(
+            await AgentTracker(self.db).mark_completed(
                 agent_type=agent_type,
                 task_id=task_id,
                 duration_seconds=duration
@@ -334,7 +338,7 @@ class WorkerManager:
             )
 
             # Update agent tracker
-            await self.agent_tracker.mark_failed(agent_type, task_id)
+            await AgentTracker(self.db).mark_failed(agent_type, task_id)
             
             # Check if this is infrastructure failure
             circuit_breaker = CircuitBreaker(self.db)
@@ -405,7 +409,7 @@ class WorkerManager:
             await self._update_worker_status(active=False)
 
         # Mark agent idle
-        await self.agent_tracker.mark_idle(agent_type)
+        await AgentTracker(self.db).mark_idle(agent_type)
 
     async def _kill_worker(self, worker_id: str, reason: str) -> None:
         """Kill a worker process."""
@@ -528,7 +532,7 @@ class WorkerManager:
             
             # Construct path to .work-summary
             from app.orchestrator.config import BASE_DIR
-            project_dir = BASE_DIR / project_id
+            project_dir = Path(project.repo_path) if project.repo_path else BASE_DIR / project_id
             summary_file = project_dir / ".work-summary"
             
             if not summary_file.exists():
