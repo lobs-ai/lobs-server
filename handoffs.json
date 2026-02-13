@@ -1,26 +1,10 @@
 [
   {
     "to": "programmer",
-    "initiative": "document-lifecycle",
-    "title": "Add last_maintained_at and merged_from fields to AgentDocument",
-    "context": "See docs/document-lifecycle-design.md Task 1. Add two columns to agent_documents table, update model and all schemas, auto-set last_maintained_at on PUT.",
-    "acceptance": "1) last_maintained_at and merged_from columns exist on AgentDocument model. 2) Both fields in AgentDocumentBase, AgentDocumentUpdate, AgentDocument schemas. 3) PUT /api/docs/{id} sets last_maintained_at=now() on any update. 4) DB migration adds columns. 5) Tests verify fields in responses and auto-update on PUT.",
-    "files": ["docs/document-lifecycle-design.md"]
-  },
-  {
-    "to": "programmer",
-    "initiative": "document-lifecycle",
-    "title": "Implement POST /api/docs/merge endpoint",
-    "context": "See docs/document-lifecycle-design.md Task 2. Merge 2+ same-topic documents into a new document, archive sources. Depends on Task 1 (last_maintained_at field).",
-    "acceptance": "1) POST /api/docs/merge accepts DocumentMergeRequest. 2) Validates min 2 source docs, all exist, all same topic_id. 3) Creates new doc inheriting topic_id/project_id, source='writer', status='pending'. 4) Archives source docs (status='archived'). 5) Sets merged_from on new doc. 6) Returns 400 for cross-topic, missing docs, <2 docs. 7) Tests for happy path and all error cases.",
-    "files": ["docs/document-lifecycle-design.md"]
-  },
-  {
-    "to": "programmer",
-    "initiative": "document-lifecycle",
-    "title": "Knowledge maintenance orchestrator module",
-    "context": "See docs/document-lifecycle-design.md Task 3. New app/orchestrator/knowledge_maintenance.py that checks for topics needing maintenance (3+ active docs or stale last_maintained_at). Creates writer tasks. Wire into engine polling loop like EventScheduler.",
-    "acceptance": "1) KnowledgeMaintenance class in app/orchestrator/knowledge_maintenance.py. 2) Finds topics with 3+ active docs or last_maintained_at >14 days old. 3) Creates writer task with descriptive prompt. 4) 24h cooldown between checks. 5) Won't create duplicate maintenance tasks for same topic. 6) Wired into OrchestratorEngine polling loop. 7) Tests for task creation triggers and cooldown.",
-    "files": ["docs/document-lifecycle-design.md"]
+    "initiative": "researcher-topic-creation",
+    "title": "Process .new-topics.json in worker finalization + update researcher prompt",
+    "context": "See docs/researcher-topic-creation-design.md. Two changes: (1) In worker finalization (where .work-summary is read), also read .new-topics.json if present. For each entry, check for duplicate title (case-insensitive), create Topic with auto_created=True if new. (2) Update researcher prompt in prompter.py to include topic creation instructions and list existing topic titles for context.",
+    "acceptance": "1) Worker finalization reads .new-topics.json from workspace if present. 2) Creates topics with auto_created=True, generated UUID. 3) Case-insensitive duplicate title check — skips existing. 4) Missing/malformed file doesn't crash finalization. 5) Researcher prompt includes topic creation guidance with .new-topics.json format. 6) Researcher prompt includes list of existing topic titles (queried from DB). 7) Tests for topic creation, duplicate skip, missing file, and prompt content.",
+    "files": ["docs/researcher-topic-creation-design.md"]
   }
 ]
