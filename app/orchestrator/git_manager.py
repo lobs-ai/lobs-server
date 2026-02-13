@@ -230,15 +230,39 @@ class GitManager:
             )
             
             if result.returncode != 0:
-                # Merge conflict
-                logger.warning(
-                    f"[GIT] Merge conflict for {branch_name}. "
-                    f"Aborting merge, branch preserved for manual resolution."
+                # Try auto-resolving trivial conflicts (.work-summary etc.)
+                conflict_result = self._run_git(
+                    "diff", "--name-only", "--diff-filter=U",
+                    check=False
                 )
-                self._run_git("merge", "--abort", check=False)
-                # Go back to task branch so repo isn't in weird state
-                self._run_git("checkout", branch_name, check=False)
-                return False
+                conflicting_files = [
+                    f.strip() for f in conflict_result.stdout.split("\n") if f.strip()
+                ]
+                
+                # Auto-resolvable files (take theirs)
+                auto_resolve = {".work-summary", ".work-summary.md"}
+                unresolvable = [f for f in conflicting_files if f not in auto_resolve]
+                
+                if not unresolvable and conflicting_files:
+                    # All conflicts are auto-resolvable
+                    for f in conflicting_files:
+                        self._run_git("checkout", "--theirs", f, check=False)
+                        self._run_git("add", f, check=False)
+                    self._run_git("commit", "--no-edit", check=False)
+                    logger.info(
+                        f"[GIT] Auto-resolved trivial conflicts in: "
+                        f"{', '.join(conflicting_files)}"
+                    )
+                else:
+                    # Real conflicts
+                    logger.warning(
+                        f"[GIT] Merge conflict for {branch_name} in: "
+                        f"{', '.join(unresolvable)}. "
+                        f"Aborting merge, branch preserved."
+                    )
+                    self._run_git("merge", "--abort", check=False)
+                    self._run_git("checkout", branch_name, check=False)
+                    return False
             
             # Push merged main
             result = self._run_git("push", "origin", default_branch, check=False)
