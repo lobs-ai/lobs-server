@@ -120,6 +120,12 @@ class WorkerManager:
             )
             return False
 
+        # Track for cleanup on exception
+        git_manager = None
+        config_manager = None
+        task_id_short = task_id[:8]
+        config_overridden = False
+        
         try:
             # Get project details
             project = await self.db.get(Project, project_id)
@@ -144,14 +150,12 @@ class WorkerManager:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             
             # Git setup (only if project has repo_path)
-            git_manager = None
             config_manager = OpenClawConfigManager()
             
             if project.repo_path:
                 git_manager = GitManager(repo_path)
                 
                 # Create git branch
-                task_id_short = task_id[:8]
                 if not git_manager.create_task_branch(task_id_short):
                     logger.error(f"Failed to create git branch for task {task_id_short}")
                     return False
@@ -180,6 +184,8 @@ class WorkerManager:
                     logger.error("Failed to override workspace config")
                     git_manager.cleanup_on_failure(task_id_short, has_commits=False)
                     return False
+                
+                config_overridden = True
                 
                 logger.info(
                     f"[WORKER] Git setup complete for {task_id_short}: "
@@ -281,6 +287,22 @@ class WorkerManager:
 
         except Exception as e:
             logger.error(f"Failed to spawn worker for task {task_id[:8]}: {e}", exc_info=True)
+            
+            # Cleanup on exception: restore config if it was overridden
+            if config_overridden and config_manager:
+                try:
+                    await config_manager.restore_workspace(agent_type)
+                    logger.info(f"[WORKER] Restored workspace config after spawn failure")
+                except Exception as restore_error:
+                    logger.error(f"[WORKER] Failed to restore config: {restore_error}")
+            
+            # Git cleanup
+            if git_manager:
+                try:
+                    git_manager.cleanup_on_failure(task_id_short, has_commits=False)
+                except Exception as cleanup_error:
+                    logger.error(f"[WORKER] Failed git cleanup: {cleanup_error}")
+            
             return False
 
     async def check_workers(self) -> None:

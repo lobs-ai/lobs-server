@@ -131,6 +131,11 @@ class GitManager:
             # Stage all changes
             self._run_git("add", "-A")
             
+            # Unstage template files to prevent them from being committed
+            # (in case they were accidentally added/modified by the agent)
+            for filename in TEMPLATE_FILES:
+                self._run_git("reset", "HEAD", filename, check=False)
+            
             # Get diff stat
             result = self._run_git(
                 "diff", "--cached", "--stat",

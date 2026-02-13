@@ -167,6 +167,8 @@ class InboxProcessor:
             f"(title: {inbox_item.title[:50]})"
         )
 
+        response_message = None
+
         if action["type"] == "create_task":
             task = await self._create_task(
                 inbox_item=inbox_item,
@@ -175,18 +177,24 @@ class InboxProcessor:
             )
             if task:
                 stats["tasks_created"] = 1
+                agent_name = task.agent or "programmer"
+                response_message = f"✅ Created task: {task.title} (assigned to {agent_name})"
             thread.triage_status = "resolved"
             stats["resolved"] = 1
 
         elif action["type"] == "resolve":
             thread.triage_status = "resolved"
             stats["resolved"] = 1
+            response_message = "👍 Resolved — no action needed"
 
         elif action["type"] == "pending":
             thread.triage_status = "pending"
             stats["marked_pending"] = 1
+            response_message = "⏸️ Marked as pending"
 
-        # else: leave as needs_response
+        # Add response message to thread
+        if response_message:
+            await self._add_thread_message(thread.id, "lobs", response_message)
 
         # Track last processed message
         if hasattr(thread, "last_processed_message_id"):
@@ -196,58 +204,71 @@ class InboxProcessor:
         return stats
 
     def _analyze_response(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
-        """Determine action from user's response. Conservative rule-based approach."""
+        """Determine action from user's response. More permissive pattern matching."""
         msg = user_message.strip().lower()
 
-        # Approval: short affirmative responses
-        approval_patterns = [
-            r'^(yes|yep|yeah|sure|ok|okay|approved?|do it|go ahead)[\s.!]*$',
-            r'^(yes\s+)?do\s+(these?|it|all|them)[\s.!]*$',
-            r'^(let\'?s?\s+)?do\s+(it|these?|all|them)[\s.!]*$',
-            r'^(sounds?\s+good|lgtm|ship\s+it)[\s.!]*$',
-            r'^(create|make)\s+(these?\s+)?tasks?[\s.!]*$',
+        # Approval patterns - more permissive, allow conversational responses
+        # Match messages starting with approval words
+        if re.match(r'^yes\b', msg):
+            # Any message starting with "yes" = approval
+            project_id = self._extract_project_id(inbox_item)
+            return {"type": "create_task", "project_id": project_id}
+        
+        if re.match(r'^do\b', msg):
+            # Any message starting with "do" (do this, do that, do it) = approval
+            project_id = self._extract_project_id(inbox_item)
+            return {"type": "create_task", "project_id": project_id}
+        
+        # Check for approval phrases anywhere in message
+        approval_phrases = [
+            r'looks?\s+good',
+            r'sounds?\s+good', 
+            r'go\s+ahead',
+            r'lgtm',
+            r'ship\s+it',
+            r'approved?',
         ]
-
-        # Rejection: short negative responses
-        rejection_patterns = [
-            r'^(no|nope|nah|skip|ignore|pass|reject)[\s.!]*$',
-            r'^(don\'?t|do\s+not)\s+(do|create|make)',
-            r'^not\s+(now|interested|needed)',
-        ]
-
-        # Pending: deferral responses
-        pending_patterns = [
-            r'^(later|maybe|not\s+sure|let\s+me\s+think)[\s.!]*$',
-            r'^(i\'?ll?\s+)?(think|decide)\s+(about|on|later)',
-        ]
-
-        # Check approval
-        for pattern in approval_patterns:
+        for pattern in approval_phrases:
             if re.search(pattern, msg):
                 project_id = self._extract_project_id(inbox_item)
                 return {"type": "create_task", "project_id": project_id}
 
-        # Check rejection
+        # Rejection: more natural patterns
+        rejection_patterns = [
+            r'^(no|nope|nah)\b',  # Start with no
+            r'^skip\b',
+            r'^ignore\b',
+            r'^pass\b',
+            r'^reject',
+            r'(don\'?t|do\s+not)\s+(do|create|make)',
+            r'not\s+(now|interested|needed|necessary)',
+        ]
         for pattern in rejection_patterns:
             if re.search(pattern, msg):
                 return {"type": "resolve"}
 
-        # Check pending
+        # Pending: deferral responses
+        pending_patterns = [
+            r'^(later|maybe|not\s+sure|let\s+me\s+think)\b',
+            r'(i\'?ll?\s+)?(think|decide)\s+(about|on|later)',
+        ]
         for pattern in pending_patterns:
             if re.search(pattern, msg):
                 return {"type": "pending"}
 
-        # Longer messages with specific instructions → create a task with those instructions
+        # Longer messages with action verbs → create task
+        # This catches conversational instructions like "integrate this with..."
         words = user_message.split()
         if len(words) >= 3:
             action_verbs = ['create', 'make', 'add', 'build', 'implement', 'fix',
-                           'update', 'write', 'change', 'remove', 'refactor']
+                           'update', 'write', 'change', 'remove', 'refactor', 
+                           'integrate', 'intergrate',  # typo that appears in real data
+                           'investigate', 'try', 'test']
             if any(v in msg for v in action_verbs):
                 project_id = self._extract_project_id(inbox_item)
                 return {"type": "create_task", "project_id": project_id}
 
         # Default: don't act (leave as needs_response)
-        # This is conservative — better to do nothing than create wrong tasks
         logger.debug(f"[INBOX] No clear action from: {user_message[:50]}")
         return {"type": "no_action"}
 
@@ -266,6 +287,62 @@ class InboxProcessor:
                 return pid
 
         return "default"
+
+    def _infer_agent_type(self, inbox_item: InboxItem, user_message: str) -> str | None:
+        """Infer agent type from inbox item and user message.
+        
+        Uses same logic as router.py for consistency.
+        Returns None if no clear agent type (defaults to programmer in router).
+        """
+        # Build searchable text
+        text = f"{inbox_item.title}\n{inbox_item.content or ''}\n{user_message}".lower()
+        
+        # Research keywords
+        research_keywords = [
+            "research", "investigate", "explore", "compare alternatives",
+            "ideas", "analysis", "analyze", "evaluate", "study",
+            "proof of concept", "proof-of-concept", "feasibility",
+            "batch", "suggestions", "propose", "proposal",
+        ]
+        if any(kw in text for kw in research_keywords):
+            return "researcher"
+        
+        # Writer keywords (specific phrases)
+        writer_patterns = [
+            r'write\s+(?:a\s+)?(?:doc|summary|report|guide|readme)',
+            r'draft\s+(?:doc|summary|report|guide|readme)',
+            r'write\s+up',
+            r'documentation\s+for',
+        ]
+        if any(re.search(p, text) for p in writer_patterns):
+            return "writer"
+        
+        # Architect keywords
+        architect_keywords = [
+            "design system", "architect", "rework architecture", "restructure",
+            "design proposal", "system design", "framework",
+        ]
+        if any(kw in text for kw in architect_keywords):
+            return "architect"
+        
+        # Reviewer keywords
+        reviewer_keywords = [
+            "code review", "audit code", "review pr",
+            "failure analysis", "hygiene", "cleanup",
+        ]
+        if any(kw in text for kw in reviewer_keywords):
+            return "reviewer"
+        
+        # Programmer keywords (explicit check, though it's default)
+        programmer_keywords = [
+            "implement", "fix", "build", "code", "develop",
+            "create", "add feature", "integrate", "refactor",
+        ]
+        if any(kw in text for kw in programmer_keywords):
+            return "programmer"
+        
+        # No clear match - return None (router will default to programmer)
+        return None
 
     async def _create_task(
         self,
@@ -291,6 +368,9 @@ class InboxProcessor:
             notes += content
         notes += f"\n\n---\n**User direction:** {user_message}"
 
+        # Infer agent type from content
+        agent_type = self._infer_agent_type(inbox_item, user_message)
+
         task = Task(
             id=task_id,
             title=f"{inbox_item.title[:80]}",
@@ -298,11 +378,32 @@ class InboxProcessor:
             work_state="not_started",
             owner="lobs",
             project_id=project_id,
+            agent=agent_type,  # Set agent field for router
             notes=notes,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
 
         self.db.add(task)
-        logger.info(f"[INBOX] Created task {task_id[:8]}: {task.title[:50]} (project={project_id})")
+        logger.info(
+            f"[INBOX] Created task {task_id[:8]}: {task.title[:50]} "
+            f"(project={project_id}, agent={agent_type or 'default'})"
+        )
         return task
+
+    async def _add_thread_message(
+        self,
+        thread_id: str,
+        author: str,
+        text: str
+    ) -> None:
+        """Add a message to an inbox thread."""
+        message = InboxMessageModel(
+            id=str(uuid.uuid4()),
+            thread_id=thread_id,
+            author=author,
+            text=text,
+            created_at=datetime.now(timezone.utc),
+        )
+        self.db.add(message)
+        logger.debug(f"[INBOX] Added message to thread {thread_id[:8]}: {text[:50]}")
