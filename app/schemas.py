@@ -46,7 +46,7 @@ class Project(ProjectBase):
 class TaskBase(BaseModel):
     title: str
     status: str
-    owner: Optional[str] = None
+    owner: Optional[str] = "lobs"
     work_state: Optional[str] = None
     review_state: Optional[str] = None
     project_id: Optional[str] = None
