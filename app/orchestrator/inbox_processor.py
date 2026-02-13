@@ -403,8 +403,8 @@ class InboxProcessor:
         if text.endswith(':'):
             return False
         
-        # Filter out very short items (likely not tasks)
-        if len(text.split()) < 3:
+        # Filter out very short items (likely not tasks) - but allow 2+ words
+        if len(text.split()) < 2:
             return False
 
         # Filter out common non-task phrases
