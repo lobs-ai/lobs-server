@@ -54,9 +54,9 @@ class TaskBase(BaseModel):
     artifact_path: Optional[str] = None
     started_at: Optional[datetime] = None
     finished_at: Optional[datetime] = None
-    sort_order: int = 0
+    sort_order: Optional[int] = 0
     blocked_by: Optional[list[str]] = None
-    pinned: bool = False
+    pinned: Optional[bool] = False
     shape: Optional[str] = None
     github_issue_number: Optional[int] = None
     agent: Optional[str] = None
