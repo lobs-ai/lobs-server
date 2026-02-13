@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect"}
+VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "inbox-responder"}
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,6 +1,7 @@
 """Agent status API endpoints."""
 
 import os
+import subprocess
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -13,6 +14,13 @@ from app.schemas import AgentStatus, AgentStatusUpdate
 from app.config import settings
 
 router = APIRouter(prefix="/agents", tags=["agents"])
+
+
+class AgentSetupResponse(BaseModel):
+    """Response for agent setup operation."""
+    success: bool
+    message: str
+    agents_setup: list[str]
 
 
 class AgentFileContent(BaseModel):
@@ -116,3 +124,61 @@ async def update_agent_file(
         return file_content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error writing file: {str(e)}")
+
+
+@router.post("/setup")
+async def setup_agents() -> AgentSetupResponse:
+    """
+    Run the setup-agents script to configure all agent workspaces.
+    
+    This creates workspace directories, copies template files, 
+    and registers agents with OpenClaw.
+    """
+    # Find the setup script
+    server_dir = Path(__file__).resolve().parent.parent.parent
+    setup_script = server_dir / "bin" / "setup-agents"
+    
+    if not setup_script.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Setup script not found at {setup_script}"
+        )
+    
+    try:
+        # Run the setup script
+        result = subprocess.run(
+            [str(setup_script)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True
+        )
+        
+        # Parse output to find which agents were setup
+        agents_setup = []
+        for line in result.stdout.split("\n"):
+            if line.startswith("🔧 "):
+                agent_name = line.split("🔧 ")[1].rstrip(":")
+                agents_setup.append(agent_name)
+        
+        return AgentSetupResponse(
+            success=True,
+            message="Agent workspaces configured successfully",
+            agents_setup=agents_setup
+        )
+        
+    except subprocess.TimeoutExpired:
+        raise HTTPException(
+            status_code=500,
+            detail="Setup script timed out"
+        )
+    except subprocess.CalledProcessError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Setup script failed: {e.stderr}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error running setup script: {str(e)}"
+        )

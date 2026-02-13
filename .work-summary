@@ -1,0 +1,64 @@
+# Orchestrator Git Management Implementation
+
+## Summary
+Implemented comprehensive git workflow for worker agents so they can create branches, commit code changes, and push to remote repos.
+
+## What Changed
+
+### New File: `app/orchestrator/git_manager.py`
+- **GitManager class**: Handles all git operations for a project repo
+  - `create_task_branch()`: Creates `task/<id>` branch from main/master
+  - `copy_template_files()`: Copies agent personality files (AGENTS.md, SOUL.md, etc.) into repo
+  - `cleanup_template_files()`: Removes personality files after completion
+  - `has_changes()`: Checks for staged changes with `git diff --cached --stat`
+  - `commit_and_push()`: Commits with message `task(<id>): <title>` and pushes branch
+  - `cleanup_on_failure()`: Resets changes and deletes branch if no commits
+
+- **OpenClawConfigManager class**: Manages workspace overrides
+  - `override_workspace()`: Temporarily changes agent workspace to project repo (with async lock)
+  - `restore_workspace()`: Restores original workspace path
+  - Uses `asyncio.Lock` to prevent concurrent config file modifications
+
+### Updated: `app/orchestrator/worker.py`
+
+**Before spawn:**
+1. Create git branch `task/<task-id-short>` in project repo
+2. Copy agent template files into repo root
+3. Override agent workspace in `~/.openclaw/openclaw.json` to point to repo
+
+**After completion (success):**
+1. Restore workspace config
+2. Clean up template files
+3. Stage all changes with `git add -A`
+4. Check if changes exist with `git diff --cached --stat`
+5. If changes: commit with message `task(<id>): <title>` and push
+6. Record commit SHA and modified files in `worker_runs` table
+
+**After completion (failure):**
+1. Restore workspace config
+2. Check if branch has commits
+3. Clean up template files
+4. Reset uncommitted changes
+5. Delete branch if no commits were made
+
+**Key implementation details:**
+- Skip git operations for projects without `repo_path`
+- Use git config: `user.name=Lobs`, `user.email=thelobsbot@gmail.com`
+- Track git/config managers per worker in `self.worker_git_managers`
+- Store commit info in `WorkerRun.commit_shas` and `WorkerRun.files_modified` (JSON columns)
+- Template files copied from agent workspace (e.g., `/Users/lobs/.openclaw/workspace-programmer/`)
+
+## Testing
+- ✅ Syntax check passes: `python3 -c "import ast; ast.parse(open('app/orchestrator/worker.py').read())"`
+- ✅ Existing tests pass: `pytest tests/test_orchestrator.py`
+- ✅ Committed: `81f3d11` - "feat: orchestrator git management for worker agents"
+
+## Files Changed
+- `app/orchestrator/git_manager.py` (new, 332 lines)
+- `app/orchestrator/worker.py` (+131 lines)
+
+## Next Steps
+1. Test with a real worker task to verify end-to-end flow
+2. Monitor logs for git operations during worker execution
+3. Verify branches are created/pushed correctly
+4. Check that template files don't get committed to project repos

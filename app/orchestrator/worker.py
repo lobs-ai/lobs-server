@@ -65,8 +65,8 @@ class WorkerManager:
         # Domain locks: one worker per project
         self.project_locks: dict[str, str] = {}  # project_id -> task_id
         
-        # Per-agent-type limiting
-        self.agent_locks: dict[str, str] = {}  # agent_type -> task_id
+        # Per-agent-type limiting (DISABLED — session isolation via --session-id allows concurrency)
+        # self.agent_locks: dict[str, str] = {}  # agent_type -> task_id
 
         self.max_workers = MAX_WORKERS
 
@@ -111,14 +111,8 @@ class WorkerManager:
             )
             return False
 
-        # Check agent type lock (one worker per agent at a time)
-        if agent_type in self.agent_locks:
-            locked_task = self.agent_locks[agent_type]
-            logger.info(
-                f"[WORKER] Agent type {agent_type} locked by task {locked_task[:8]}. "
-                f"Task {task_id[:8]} queued."
-            )
-            return False
+        # Agent type lock removed — session isolation via --session-id allows
+        # multiple workers of the same agent type concurrently
 
         # Track for cleanup on exception
         git_manager = None
@@ -225,11 +219,15 @@ class WorkerManager:
             # Read prompt content for -m flag
             prompt_text = prompt_file.read_text(encoding="utf-8")
 
+            # Generate unique session ID for complete isolation
+            session_id = f"worker-{agent_type}-{task_id[:8]}-{int(time.time())}"
+
             # OpenClaw command
             cmd = [
                 "openclaw",
                 "agent",
                 "--agent", agent_type,
+                "--session-id", session_id,
                 "-m", prompt_text,
                 "--timeout", "900",
             ]
@@ -251,7 +249,7 @@ class WorkerManager:
                 process, task_id, project_id, agent_type, start_time, log_file
             )
             self.project_locks[project_id] = task_id
-            self.agent_locks[agent_type] = task_id
+            # agent_locks removed — concurrent same-type agents supported
 
             # Update DB: worker status
             await self._update_worker_status(
@@ -377,7 +375,7 @@ class WorkerManager:
         # Remove from tracking
         self.active_workers.pop(worker_id, None)
         self.project_locks.pop(project_id, None)
-        self.agent_locks.pop(agent_type, None)
+        # agent_locks removed — concurrent same-type agents supported
 
         # Read log tail for error detection
         log_tail = self._read_log_tail(log_file, lines=50)

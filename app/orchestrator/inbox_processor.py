@@ -6,11 +6,14 @@ analyzes the response, and determines actions:
 - resolve: Mark thread as resolved (no further action needed)
 - pending: Mark as pending (acknowledged but not actionable yet)
 
-Uses rule-based analysis (keyword matching). Can be upgraded to AI-based later.
+Uses LLM-based analysis via inbox-responder agent. Falls back to regex on failure.
 """
 
+import asyncio
+import json
 import logging
 import re
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -159,38 +162,50 @@ class InboxProcessor:
             return stats
         latest = rafe_msgs[-1]
 
-        # Analyze response
-        action = self._analyze_response(latest.text, inbox_item)
+        # Analyze response using LLM agent
+        action = await self._analyze_response(latest.text, inbox_item, thread.id)
 
         logger.info(
             f"[INBOX] Thread {thread.id[:8]} → {action['type']} "
             f"(title: {inbox_item.title[:50]})"
         )
 
-        response_message = None
+        response_message = action.get("response_message")
 
         if action["type"] == "create_task":
-            task = await self._create_task(
+            # Use LLM-provided task details if available
+            task_title = action.get("task_title") or inbox_item.title
+            task_notes = action.get("task_notes")
+            agent_type = action.get("agent_type")
+            project_id = action.get("project_id", "default")
+            
+            task = await self._create_task_from_action(
                 inbox_item=inbox_item,
                 user_message=latest.text,
-                project_id=action.get("project_id", "default"),
+                task_title=task_title,
+                task_notes=task_notes,
+                agent_type=agent_type,
+                project_id=project_id,
             )
             if task:
                 stats["tasks_created"] = 1
-                agent_name = task.agent or "programmer"
-                response_message = f"✅ Created task: {task.title} (assigned to {agent_name})"
+                if not response_message:
+                    agent_name = task.agent or "programmer"
+                    response_message = f"✅ Created task: {task.title} (assigned to {agent_name})"
             thread.triage_status = "resolved"
             stats["resolved"] = 1
 
         elif action["type"] == "resolve":
             thread.triage_status = "resolved"
             stats["resolved"] = 1
-            response_message = "👍 Resolved — no action needed"
+            if not response_message:
+                response_message = "👍 Resolved — no action needed"
 
         elif action["type"] == "pending":
             thread.triage_status = "pending"
             stats["marked_pending"] = 1
-            response_message = "⏸️ Marked as pending"
+            if not response_message:
+                response_message = "⏸️ Marked as pending"
 
         # Add response message to thread
         if response_message:
@@ -203,7 +218,121 @@ class InboxProcessor:
 
         return stats
 
-    def _analyze_response(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
+    async def _analyze_response(
+        self, user_message: str, inbox_item: InboxItem, thread_id: str
+    ) -> dict[str, Any]:
+        """
+        Analyze user response using LLM agent.
+        Falls back to regex on failure.
+        """
+        try:
+            # Get available projects
+            valid_projects = await self._get_valid_project_ids()
+            
+            # Build payload for inbox-responder agent
+            payload = {
+                "inbox_item": {
+                    "title": inbox_item.title,
+                    "content": inbox_item.content or "",
+                    "summary": inbox_item.summary or "",
+                },
+                "user_response": user_message,
+                "available_projects": list(valid_projects),
+            }
+            
+            # Use isolated session per thread
+            session_id = f"inbox-{thread_id[:8]}"
+            
+            # Call OpenClaw agent in executor for async compatibility
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                self._call_inbox_agent,
+                json.dumps(payload),
+                session_id
+            )
+            
+            if result:
+                # Parse and validate response
+                try:
+                    response = json.loads(result)
+                    action_type = response.get("action")
+                    
+                    # Map LLM action to internal action type
+                    if action_type == "create_task":
+                        return {
+                            "type": "create_task",
+                            "agent_type": response.get("agent_type"),
+                            "project_id": response.get("project_id", "default"),
+                            "task_title": response.get("task_title"),
+                            "task_notes": response.get("task_notes"),
+                            "response_message": response.get("response_message"),
+                        }
+                    elif action_type == "resolve":
+                        return {
+                            "type": "resolve",
+                            "response_message": response.get("response_message"),
+                        }
+                    elif action_type == "pending":
+                        return {
+                            "type": "pending",
+                            "response_message": response.get("response_message"),
+                        }
+                    else:
+                        # no_action or invalid
+                        return {"type": "no_action"}
+                        
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[INBOX] Failed to parse LLM response: {e}")
+                    # Fall through to regex fallback
+        
+        except Exception as e:
+            logger.warning(f"[INBOX] LLM analysis failed: {e}, falling back to regex")
+        
+        # Fallback to regex-based analysis
+        logger.debug("[INBOX] Using regex fallback for response analysis")
+        return self._analyze_response_fallback(user_message, inbox_item)
+    
+    def _call_inbox_agent(self, payload_json: str, session_id: str) -> str | None:
+        """
+        Call inbox-responder agent via subprocess.
+        Synchronous method meant to be called in executor.
+        """
+        try:
+            cmd = [
+                "openclaw",
+                "agent",
+                "--agent", "inbox-responder",
+                "--session-id", session_id,
+                "-m", payload_json,
+                "--json",
+                "--timeout", "60",
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=70,  # Slightly longer than openclaw timeout
+            )
+            
+            if result.returncode == 0:
+                return result.stdout.strip()
+            else:
+                logger.warning(
+                    f"[INBOX] inbox-responder agent failed with exit code {result.returncode}: "
+                    f"{result.stderr[:200]}"
+                )
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("[INBOX] inbox-responder agent timed out")
+            return None
+        except Exception as e:
+            logger.error(f"[INBOX] Error calling inbox-responder agent: {e}")
+            return None
+
+    def _analyze_response_fallback(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
         """Determine action from user's response. More permissive pattern matching."""
         msg = user_message.strip().lower()
 
@@ -344,13 +473,16 @@ class InboxProcessor:
         # No clear match - return None (router will default to programmer)
         return None
 
-    async def _create_task(
+    async def _create_task_from_action(
         self,
         inbox_item: InboxItem,
         user_message: str,
-        project_id: str,
+        task_title: str | None = None,
+        task_notes: str | None = None,
+        agent_type: str | None = None,
+        project_id: str = "default",
     ) -> Task | None:
-        """Create ONE task from an inbox item."""
+        """Create ONE task from an inbox item with LLM-provided details."""
         # Validate project exists
         valid = await self._get_valid_project_ids()
         if project_id not in valid:
@@ -358,22 +490,29 @@ class InboxProcessor:
 
         task_id = str(uuid.uuid4())
 
-        # Build concise notes
-        notes = f"## From Inbox\n**{inbox_item.title}**\n\n"
-        if inbox_item.content:
-            # Truncate long content
-            content = inbox_item.content
-            if len(content) > 2000:
-                content = content[:2000] + "\n\n[truncated]"
-            notes += content
-        notes += f"\n\n---\n**User direction:** {user_message}"
+        # Use LLM-provided title or fallback
+        title = task_title or inbox_item.title[:80]
 
-        # Infer agent type from content
-        agent_type = self._infer_agent_type(inbox_item, user_message)
+        # Use LLM-provided notes or build default
+        if task_notes:
+            notes = task_notes
+        else:
+            notes = f"## From Inbox\n**{inbox_item.title}**\n\n"
+            if inbox_item.content:
+                # Truncate long content
+                content = inbox_item.content
+                if len(content) > 2000:
+                    content = content[:2000] + "\n\n[truncated]"
+                notes += content
+            notes += f"\n\n---\n**User direction:** {user_message}"
+
+        # Use LLM-provided agent type or infer
+        if not agent_type:
+            agent_type = self._infer_agent_type(inbox_item, user_message)
 
         task = Task(
             id=task_id,
-            title=f"{inbox_item.title[:80]}",
+            title=title,
             status="active",
             work_state="not_started",
             owner="lobs",

@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""Setup agent workspaces in ~/.openclaw/workspace-{agent}.
+
+Copies template files from agents/{type}/ as read-only.
+Creates writable memory/ directory for agent-specific memories.
+Registers agents with OpenClaw if they don't exist.
+Idempotent — safe to re-run.
+"""
+
+import os
+import sys
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+SERVER_DIR = Path(__file__).resolve().parent.parent
+AGENTS_DIR = SERVER_DIR / "agents"
+OPENCLAW_DIR = Path.home() / ".openclaw"
+WORKER_TEMPLATE_DIR = SERVER_DIR / "worker-template"
+
+# Files that come from agent templates (read-only, managed by orchestrator)
+TEMPLATE_FILES = ["AGENTS.md", "SOUL.md", "TOOLS.md", "USER.md", "IDENTITY.md"]
+
+# Files from worker-template that are shared across all agents
+SHARED_FILES = ["HEARTBEAT.md", "WORKER_RULES.md"]
+
+AGENT_TYPES = ["programmer", "researcher", "architect", "reviewer", "writer", "inbox-responder"]
+
+# Agent model configurations
+AGENT_MODELS = {
+    "programmer": "anthropic/claude-sonnet-4-5",
+    "researcher": "anthropic/claude-sonnet-4-5",
+    "architect": "anthropic/claude-sonnet-4-5",
+    "reviewer": "anthropic/claude-sonnet-4-5",
+    "writer": "anthropic/claude-sonnet-4-5",
+    "inbox-responder": "anthropic/claude-haiku-4-5",
+}
+
+
+def register_agent(agent_type: str) -> bool:
+    """Register agent with OpenClaw if it doesn't exist."""
+    workspace = OPENCLAW_DIR / f"workspace-{agent_type}"
+    model = AGENT_MODELS.get(agent_type, "anthropic/claude-sonnet-4-5")
+    
+    # Check if agent already exists
+    result = subprocess.run(
+        ["openclaw", "agents", "list"],
+        capture_output=True,
+        text=True,
+    )
+    
+    if agent_type in result.stdout:
+        print(f"  ✓ OpenClaw agent '{agent_type}' already registered")
+        return True
+    
+    # Register the agent
+    cmd = [
+        "openclaw", "agents", "add", agent_type,
+        "--model", model,
+        "--workspace", str(workspace),
+        "--non-interactive"
+    ]
+    
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    if result.returncode == 0:
+        print(f"  ✅ Registered OpenClaw agent '{agent_type}' with model {model}")
+        return True
+    else:
+        print(f"  ⚠️  Failed to register agent '{agent_type}': {result.stderr}")
+        return False
+
+
+def setup_agent_workspace(agent_type: str, force: bool = False) -> None:
+    """Setup workspace for a single agent type."""
+    workspace = OPENCLAW_DIR / f"workspace-{agent_type}"
+    agent_template = AGENTS_DIR / agent_type
+    
+    if not agent_template.exists():
+        print(f"  ⚠️  Template not found: {agent_template}")
+        return
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    
+    # Copy template files as read-only
+    for filename in TEMPLATE_FILES:
+        src = agent_template / filename
+        dst = workspace / filename
+        
+        if not src.exists():
+            continue
+        
+        # Remove existing file (even if read-only) before copying
+        if dst.exists():
+            dst.chmod(stat.S_IRUSR | stat.S_IWUSR)  # make writable to delete
+            dst.unlink()
+        
+        shutil.copy2(src, dst)
+        # Set read-only (owner read only)
+        dst.chmod(stat.S_IRUSR | stat.S_IRGRP)
+        print(f"  📄 {filename} (read-only)")
+    
+    # Copy shared files from worker-template
+    for filename in SHARED_FILES:
+        src = WORKER_TEMPLATE_DIR / filename
+        dst = workspace / filename
+        
+        if not src.exists():
+            continue
+            
+        if dst.exists():
+            dst.chmod(stat.S_IRUSR | stat.S_IWUSR)
+            dst.unlink()
+        
+        shutil.copy2(src, dst)
+        dst.chmod(stat.S_IRUSR | stat.S_IRGRP)
+        print(f"  📄 {filename} (read-only, shared)")
+    
+    # Create writable memory directory
+    memory_dir = workspace / "memory"
+    memory_dir.mkdir(exist_ok=True)
+    print(f"  📁 memory/ (writable)")
+    
+    # Create MEMORY.md if it doesn't exist (writable, agent-owned)
+    memory_file = workspace / "MEMORY.md"
+    if not memory_file.exists():
+        memory_file.write_text(
+            f"# {agent_type.title()} Agent Memory\n\n"
+            "Write lessons learned, patterns discovered, and notes here.\n"
+            "This file persists across tasks.\n",
+            encoding="utf-8",
+        )
+        print(f"  📝 MEMORY.md (created, writable)")
+    else:
+        print(f"  📝 MEMORY.md (exists, writable)")
+    
+    # Register with OpenClaw
+    register_agent(agent_type)
+
+
+def main():
+    force = "--force" in sys.argv
+    agents = [a for a in sys.argv[1:] if not a.startswith("--")]
+    
+    if not agents:
+        agents = AGENT_TYPES
+    
+    print(f"Setting up agent workspaces in {OPENCLAW_DIR}/\n")
+    
+    for agent_type in agents:
+        if agent_type not in AGENT_TYPES:
+            print(f"❌ Unknown agent type: {agent_type}")
+            continue
+        print(f"🔧 {agent_type}:")
+        setup_agent_workspace(agent_type, force)
+        print()
+    
+    print("✅ Done. Template files are read-only; MEMORY.md and memory/ are writable.")
+
+
+if __name__ == "__main__":
+    main()
