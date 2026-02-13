@@ -17,6 +17,8 @@ from app.schemas import (
     MemorySearchResult,
 )
 from app.config import settings
+from app.services.memory_sync import sync_agent_memories, get_agent_memory_counts
+from app.auth import require_auth
 
 router = APIRouter(prefix="/memories", tags=["memories"])
 
@@ -24,6 +26,7 @@ router = APIRouter(prefix="/memories", tags=["memories"])
 class QuickCaptureRequest(BaseModel):
     """Schema for quick capture endpoint."""
     content: str
+    agent: str = "main"
 
 
 def generate_snippet(text: str, query: str, max_length: int = 200) -> str:
@@ -52,13 +55,18 @@ def generate_snippet(text: str, query: str, max_length: int = 200) -> str:
 
 @router.get("")
 async def list_memories(
+    agent: Optional[str] = None,
     type: Optional[str] = None,
     limit: int = settings.DEFAULT_LIMIT,
     offset: int = 0,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> list[MemoryListItem]:
-    """List all memories (returns MemoryListItem[], sorted by date desc)."""
+    """List memories (optionally filtered by agent/type, sorted by date desc)."""
     query = select(MemoryModel)
+    
+    if agent:
+        query = query.where(MemoryModel.agent == agent)
     
     if type:
         query = query.where(MemoryModel.memory_type == type)
@@ -74,9 +82,11 @@ async def list_memories(
 @router.get("/search")
 async def search_memories(
     q: str,
+    agent: Optional[str] = None,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> list[MemorySearchResult]:
-    """Full-text search across title and content."""
+    """Full-text search across title and content (optionally filtered by agent)."""
     if not q or len(q.strip()) == 0:
         return []
     
@@ -89,6 +99,9 @@ async def search_memories(
             MemoryModel.content.ilike(f"%{q}%")
         )
     )
+    
+    if agent:
+        query = query.where(MemoryModel.agent == agent)
     
     result = await db.execute(query)
     memories = result.scalars().all()
@@ -108,6 +121,7 @@ async def search_memories(
         results.append(MemorySearchResult(
             id=memory.id,
             path=memory.path,
+            agent=memory.agent,
             title=memory.title,
             snippet=snippet,
             memory_type=memory.memory_type,
@@ -121,9 +135,38 @@ async def search_memories(
     return results
 
 
+@router.get("/agents")
+async def list_agents(
+    _token: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db)
+) -> list[dict]:
+    """List all agents with memory counts."""
+    return await get_agent_memory_counts(db)
+
+
+@router.post("/sync")
+async def sync_all_memories(
+    _token: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Sync all agent memories from filesystem to database."""
+    return await sync_agent_memories(db)
+
+
+@router.post("/sync/{agent}")
+async def sync_agent(
+    agent: str,
+    _token: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db)
+) -> dict:
+    """Sync a specific agent's memories from filesystem to database."""
+    return await sync_agent_memories(db, agent=agent)
+
+
 @router.get("/{memory_id}")
 async def get_memory(
     memory_id: int,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> Memory:
     """Get full memory by ID."""
@@ -137,13 +180,20 @@ async def get_memory(
 @router.get("/by-path/{path:path}")
 async def get_memory_by_path(
     path: str,
+    agent: str = "main",
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> Memory:
-    """Get memory by path (e.g., 'memory/2026-02-12.md')."""
-    result = await db.execute(select(MemoryModel).where(MemoryModel.path == path))
+    """Get memory by path and agent (e.g., 'memory/2026-02-12.md')."""
+    result = await db.execute(
+        select(MemoryModel).where(
+            MemoryModel.path == path,
+            MemoryModel.agent == agent
+        )
+    )
     memory = result.scalar_one_or_none()
     if not memory:
-        raise HTTPException(status_code=404, detail=f"Memory not found at path: {path}")
+        raise HTTPException(status_code=404, detail=f"Memory not found at path: {path} (agent: {agent})")
     return Memory.model_validate(memory)
 
 
@@ -151,6 +201,7 @@ async def get_memory_by_path(
 async def update_memory(
     memory_id: int,
     memory_update: MemoryUpdate,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> Memory:
     """Update memory content/title."""
@@ -171,6 +222,7 @@ async def update_memory(
 @router.post("")
 async def create_memory(
     memory: MemoryCreate,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> Memory:
     """Create new memory."""
@@ -191,13 +243,19 @@ async def create_memory(
             raise HTTPException(status_code=400, detail="path is required for custom memories")
         path = memory.path
     
-    # Check if path already exists
-    existing = await db.execute(select(MemoryModel).where(MemoryModel.path == path))
+    # Check if path already exists for this agent
+    existing = await db.execute(
+        select(MemoryModel).where(
+            MemoryModel.path == path,
+            MemoryModel.agent == memory.agent
+        )
+    )
     if existing.scalar_one_or_none():
-        raise HTTPException(status_code=409, detail=f"Memory with path '{path}' already exists")
+        raise HTTPException(status_code=409, detail=f"Memory with path '{path}' already exists for agent '{memory.agent}'")
     
     db_memory = MemoryModel(
         path=path,
+        agent=memory.agent,
         title=memory.title,
         content=memory.content,
         memory_type=memory.memory_type,
@@ -212,23 +270,30 @@ async def create_memory(
 @router.post("/capture")
 async def quick_capture(
     request: QuickCaptureRequest,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ) -> Memory:
-    """Quick capture: append text to today's daily memory."""
+    """Quick capture: append text to today's daily memory for specified agent."""
     # Get today's date
     today = date.today()
     today_datetime = datetime(today.year, today.month, today.day)
     path = f"memory/{today.isoformat()}.md"
     
-    # Find or create today's memory
-    result = await db.execute(select(MemoryModel).where(MemoryModel.path == path))
+    # Find or create today's memory for this agent
+    result = await db.execute(
+        select(MemoryModel).where(
+            MemoryModel.path == path,
+            MemoryModel.agent == request.agent
+        )
+    )
     memory = result.scalar_one_or_none()
     
     if not memory:
         # Create new daily memory
         memory = MemoryModel(
             path=path,
-            title=f"Daily Memory - {today.isoformat()}",
+            agent=request.agent,
+            title=f"{request.agent.capitalize()} Daily Memory - {today.isoformat()}",
             content=f"# {today.isoformat()}\n\n",
             memory_type="daily",
             date=today_datetime
@@ -250,6 +315,7 @@ async def quick_capture(
 @router.delete("/{memory_id}")
 async def delete_memory(
     memory_id: int,
+    _token: str = Depends(require_auth),
     db: AsyncSession = Depends(get_db)
 ):
     """Delete a memory."""

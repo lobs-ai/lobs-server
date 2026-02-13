@@ -58,6 +58,17 @@ async def lifespan(app: FastAPI):
     settings.ensure_data_dir()
     await init_db()
     
+    # Sync memories from filesystem on startup
+    try:
+        from app.services.memory_sync import sync_agent_memories
+        async with AsyncSessionLocal() as db:
+            logger.info("Syncing agent memories from filesystem...")
+            stats = await sync_agent_memories(db)
+            await db.commit()
+            logger.info(f"Memory sync completed: {stats}")
+    except Exception as e:
+        logger.error(f"Failed to sync memories on startup: {e}", exc_info=True)
+    
     # Start backup manager
     try:
         await backup_manager.start()

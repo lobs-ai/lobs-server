@@ -485,6 +485,7 @@ class ResearchSource(ResearchSourceBase):
 # Memory schemas
 class MemoryBase(BaseModel):
     path: str
+    agent: str = "main"
     title: str
     content: str
     memory_type: str  # long_term/daily/custom
@@ -495,6 +496,7 @@ class MemoryCreate(BaseModel):
     title: str
     content: str
     memory_type: str
+    agent: str = "main"
     date: Optional[datetime] = None
     path: Optional[str] = None  # auto-generated for daily/long_term
 
@@ -516,6 +518,7 @@ class MemoryListItem(BaseModel):
     """Memory list item without full content."""
     id: int
     path: str
+    agent: str
     title: str
     memory_type: str
     date: Optional[datetime] = None
@@ -528,6 +531,7 @@ class MemorySearchResult(BaseModel):
     """Memory search result with snippet."""
     id: int
     path: str
+    agent: str
     title: str
     snippet: str
     memory_type: str

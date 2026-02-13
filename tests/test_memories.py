@@ -17,6 +17,7 @@ async def test_create_long_term_memory(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert data["path"] == "MEMORY.md"
+    assert data["agent"] == "main"  # default
     assert data["title"] == "Main Memory"
     assert data["memory_type"] == "long_term"
     assert data["date"] is None
@@ -366,3 +367,223 @@ async def test_list_pagination(client: AsyncClient):
     assert response.status_code == 200
     data = response.json()
     assert len(data) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_memory_for_different_agents(client: AsyncClient):
+    """Test creating memories for different agents."""
+    # Main agent
+    response1 = await client.post("/api/memories", json={
+        "title": "Main Memory",
+        "content": "Main agent content",
+        "memory_type": "custom",
+        "path": "test.md",
+        "agent": "main",
+    })
+    assert response1.status_code == 200
+    assert response1.json()["agent"] == "main"
+    
+    # Programmer agent - same path, different agent
+    response2 = await client.post("/api/memories", json={
+        "title": "Programmer Memory",
+        "content": "Programmer agent content",
+        "memory_type": "custom",
+        "path": "test.md",
+        "agent": "programmer",
+    })
+    assert response2.status_code == 200
+    assert response2.json()["agent"] == "programmer"
+
+
+@pytest.mark.asyncio
+async def test_duplicate_path_same_agent_fails(client: AsyncClient):
+    """Test that duplicate path for same agent fails."""
+    await client.post("/api/memories", json={
+        "title": "First",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "dup.md",
+        "agent": "main",
+    })
+    
+    response = await client.post("/api/memories", json={
+        "title": "Second",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "dup.md",
+        "agent": "main",
+    })
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_filter_memories_by_agent(client: AsyncClient):
+    """Test filtering memories by agent."""
+    # Create memories for different agents
+    await client.post("/api/memories", json={
+        "title": "Main Memory 1",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "main1.md",
+        "agent": "main",
+    })
+    await client.post("/api/memories", json={
+        "title": "Main Memory 2",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "main2.md",
+        "agent": "main",
+    })
+    await client.post("/api/memories", json={
+        "title": "Programmer Memory",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "prog1.md",
+        "agent": "programmer",
+    })
+    
+    # Get all memories
+    response_all = await client.get("/api/memories")
+    assert response_all.status_code == 200
+    assert len(response_all.json()) == 3
+    
+    # Filter by main agent
+    response_main = await client.get("/api/memories?agent=main")
+    assert response_main.status_code == 200
+    main_memories = response_main.json()
+    assert len(main_memories) == 2
+    assert all(m["agent"] == "main" for m in main_memories)
+    
+    # Filter by programmer agent
+    response_prog = await client.get("/api/memories?agent=programmer")
+    assert response_prog.status_code == 200
+    prog_memories = response_prog.json()
+    assert len(prog_memories) == 1
+    assert prog_memories[0]["agent"] == "programmer"
+
+
+@pytest.mark.asyncio
+async def test_search_memories_by_agent(client: AsyncClient):
+    """Test searching memories filtered by agent."""
+    # Create memories with similar content for different agents
+    await client.post("/api/memories", json={
+        "title": "Main Python",
+        "content": "Python code for main agent",
+        "memory_type": "custom",
+        "path": "main-py.md",
+        "agent": "main",
+    })
+    await client.post("/api/memories", json={
+        "title": "Programmer Python",
+        "content": "Python code for programmer agent",
+        "memory_type": "custom",
+        "path": "prog-py.md",
+        "agent": "programmer",
+    })
+    
+    # Search all agents
+    response_all = await client.get("/api/memories/search?q=Python")
+    assert response_all.status_code == 200
+    assert len(response_all.json()) == 2
+    
+    # Search only main agent
+    response_main = await client.get("/api/memories/search?q=Python&agent=main")
+    assert response_main.status_code == 200
+    results = response_main.json()
+    assert len(results) == 1
+    assert results[0]["agent"] == "main"
+
+
+@pytest.mark.asyncio
+async def test_get_memory_by_path_and_agent(client: AsyncClient):
+    """Test getting memory by path requires agent specification."""
+    # Create same path for different agents
+    await client.post("/api/memories", json={
+        "title": "Main Shared",
+        "content": "Main agent version",
+        "memory_type": "custom",
+        "path": "shared.md",
+        "agent": "main",
+    })
+    await client.post("/api/memories", json={
+        "title": "Programmer Shared",
+        "content": "Programmer agent version",
+        "memory_type": "custom",
+        "path": "shared.md",
+        "agent": "programmer",
+    })
+    
+    # Get main agent's version
+    response_main = await client.get("/api/memories/by-path/shared.md?agent=main")
+    assert response_main.status_code == 200
+    assert response_main.json()["content"] == "Main agent version"
+    
+    # Get programmer agent's version
+    response_prog = await client.get("/api/memories/by-path/shared.md?agent=programmer")
+    assert response_prog.status_code == 200
+    assert response_prog.json()["content"] == "Programmer agent version"
+
+
+@pytest.mark.asyncio
+async def test_quick_capture_for_different_agents(client: AsyncClient):
+    """Test quick capture with agent parameter."""
+    # Capture for main agent
+    response_main = await client.post("/api/memories/capture", json={
+        "content": "Main agent note",
+        "agent": "main",
+    })
+    assert response_main.status_code == 200
+    assert response_main.json()["agent"] == "main"
+    assert "Main agent note" in response_main.json()["content"]
+    
+    # Capture for programmer agent
+    response_prog = await client.post("/api/memories/capture", json={
+        "content": "Programmer agent note",
+        "agent": "programmer",
+    })
+    assert response_prog.status_code == 200
+    assert response_prog.json()["agent"] == "programmer"
+    assert "Programmer agent note" in response_prog.json()["content"]
+    
+    # They should be separate memories
+    assert response_main.json()["id"] != response_prog.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_list_agents(client: AsyncClient):
+    """Test listing agents with memory counts."""
+    # Create memories for different agents
+    await client.post("/api/memories", json={
+        "title": "Main 1",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "m1.md",
+        "agent": "main",
+    })
+    await client.post("/api/memories", json={
+        "title": "Main 2",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "m2.md",
+        "agent": "main",
+    })
+    await client.post("/api/memories", json={
+        "title": "Programmer 1",
+        "content": "Content",
+        "memory_type": "custom",
+        "path": "p1.md",
+        "agent": "programmer",
+    })
+    
+    response = await client.get("/api/memories/agents")
+    assert response.status_code == 200
+    agents = response.json()
+    
+    # Should have counts for each agent
+    agent_dict = {a["agent"]: a for a in agents}
+    assert "main" in agent_dict
+    assert agent_dict["main"]["memory_count"] == 2
+    assert "programmer" in agent_dict
+    assert agent_dict["programmer"]["memory_count"] == 1
+    assert "last_updated" in agent_dict["main"]

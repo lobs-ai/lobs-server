@@ -289,7 +289,8 @@ class Memory(Base):
     __tablename__ = "memories"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
-    path = Column(String, unique=True, nullable=False, index=True)
+    path = Column(String, nullable=False, index=True)
+    agent = Column(String, nullable=False, default="main", index=True)
     title = Column(String, nullable=False)
     content = Column(Text, nullable=False)
     memory_type = Column(String, nullable=False)  # long_term/daily/custom
