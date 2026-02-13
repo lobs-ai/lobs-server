@@ -8,7 +8,7 @@ from typing import Any
 POLL_INTERVAL = 10
 
 # Maximum number of concurrent workers
-MAX_WORKERS = 3
+MAX_WORKERS = 5
 
 # Worker health monitoring timeouts (in seconds)
 WORKER_WARNING_TIMEOUT = 1800  # 30 minutes

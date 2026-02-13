@@ -34,7 +34,7 @@ from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
-from app.orchestrator.git_manager import GitManager, OpenClawConfigManager
+from app.orchestrator.git_manager import GitManager
 
 logger = logging.getLogger(__name__)
 
@@ -57,9 +57,9 @@ class WorkerManager:
         ]] = {}
         
         # Git/config managers per worker
-        # worker_id -> (git_manager, config_manager, repo_path)
+        # worker_id -> (git_manager, repo_path)
         self.worker_git_managers: dict[str, tuple[
-            Optional[GitManager], OpenClawConfigManager, Optional[Path]
+            Optional[GitManager], Optional[Path]
         ]] = {}
         
         # Domain locks: one worker per project
@@ -116,9 +116,7 @@ class WorkerManager:
 
         # Track for cleanup on exception
         git_manager = None
-        config_manager = None
         task_id_short = task_id[:8]
-        config_overridden = False
         
         try:
             # Get project details
@@ -144,7 +142,9 @@ class WorkerManager:
             log_file.parent.mkdir(parents=True, exist_ok=True)
             
             # Git setup (only if project has repo_path)
-            config_manager = OpenClawConfigManager()
+            # NOTE: No config override needed — agent reads personality from its
+            # configured workspace, and works on project files via cwd.
+            # This allows concurrent workers of the same agent type.
             
             if project.repo_path:
                 git_manager = GitManager(repo_path)
@@ -154,42 +154,14 @@ class WorkerManager:
                     logger.error(f"Failed to create git branch for task {task_id_short}")
                     return False
                 
-                # Get agent workspace path from config
-                import json
-                config_path = Path.home() / ".openclaw" / "openclaw.json"
-                config = json.loads(config_path.read_text(encoding="utf-8"))
-                agents = config.get("agents", {}).get("list", [])
-                agent_workspace = None
-                for a in agents:
-                    if a.get("id") == agent_type or a.get("name") == agent_type:
-                        agent_workspace = Path(a.get("workspace", ""))
-                        break
-                
-                if not agent_workspace or not agent_workspace.exists():
-                    logger.error(f"Agent workspace not found for {agent_type}")
-                    git_manager.cleanup_on_failure(task_id_short, has_commits=False)
-                    return False
-                
-                # Copy template files to repo
-                git_manager.copy_template_files(agent_workspace)
-                
-                # Override workspace in config to point to repo
-                if not await config_manager.override_workspace(agent_type, repo_path):
-                    logger.error("Failed to override workspace config")
-                    git_manager.cleanup_on_failure(task_id_short, has_commits=False)
-                    return False
-                
-                config_overridden = True
-                
                 logger.info(
                     f"[WORKER] Git setup complete for {task_id_short}: "
-                    f"branch created, templates copied, workspace overridden"
+                    f"branch created in {repo_path.name}"
                 )
             
-            # Track git/config managers
+            # Track git manager
             self.worker_git_managers[worker_id] = (
                 git_manager,
-                config_manager,
                 repo_path if project.repo_path else None
             )
 
@@ -286,14 +258,6 @@ class WorkerManager:
         except Exception as e:
             logger.error(f"Failed to spawn worker for task {task_id[:8]}: {e}", exc_info=True)
             
-            # Cleanup on exception: restore config if it was overridden
-            if config_overridden and config_manager:
-                try:
-                    await config_manager.restore_workspace(agent_type)
-                    logger.info(f"[WORKER] Restored workspace config after spawn failure")
-                except Exception as restore_error:
-                    logger.error(f"[WORKER] Failed to restore config: {restore_error}")
-            
             # Git cleanup
             if git_manager:
                 try:
@@ -369,8 +333,7 @@ class WorkerManager:
         # Get git/config managers
         git_data = self.worker_git_managers.pop(worker_id, None)
         git_manager = git_data[0] if git_data else None
-        config_manager = git_data[1] if git_data else None
-        repo_path = git_data[2] if git_data else None
+        repo_path = git_data[1] if git_data else None
         
         # Remove from tracking
         self.active_workers.pop(worker_id, None)
@@ -395,14 +358,9 @@ class WorkerManager:
                 f"(task={task_id[:8]}, duration={int(duration)}s)"
             )
             
-            # Git cleanup and commit (if git-managed)
-            if git_manager and config_manager:
+            # Git commit and push (if git-managed)
+            if git_manager:
                 try:
-                    # Restore workspace config first
-                    await config_manager.restore_workspace(agent_type)
-                    
-                    # Clean up template files
-                    git_manager.cleanup_template_files()
                     
                     # Check for changes
                     has_changes, diff_stat = git_manager.has_changes()
@@ -457,11 +415,8 @@ class WorkerManager:
             )
             
             # Git cleanup on failure
-            if git_manager and config_manager:
+            if git_manager:
                 try:
-                    # Restore workspace config first
-                    await config_manager.restore_workspace(agent_type)
-                    
                     # Check if any commits were made (branch has commits beyond base)
                     result = git_manager._run_git(
                         "rev-list", "--count", f"HEAD...origin/main",
@@ -761,7 +716,6 @@ class WorkerManager:
         # Clear state
         self.active_workers.clear()
         self.project_locks.clear()
-        self.agent_locks.clear()
         self.worker_git_managers.clear()
 
         # Update DB
