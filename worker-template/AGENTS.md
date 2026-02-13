@@ -35,10 +35,14 @@ These files contain project-specific rules that override general guidance. Read 
 - Any changes you make to these will be overwritten
 
 **Your files (read/write — this is your persistent memory):**
-- `MEMORY.md` — your long-term memory: patterns learned, preferences, lessons, mistakes to avoid
-- `memory/*.md` — daily notes, detailed context, project-specific learnings
+- `MEMORY.md` — READ ONLY for reference. Do NOT write to this file (other agents may be running concurrently).
+- `memory/*.md` — your per-task notes. **Write to `memory/<task-id>.md`** where task-id comes from your task assignment.
 
-Write anything you want to remember across tasks to MEMORY.md or memory/. These files persist between runs and are yours to evolve.
+**IMPORTANT — Concurrent Safety:**
+Multiple agents may share this workspace. To avoid file conflicts:
+- **NEVER append to MEMORY.md** — it's shared and another agent might be writing to it
+- **ALWAYS write to `memory/<task-id>.md`** — this is unique to your task, no conflicts
+- The orchestrator periodically consolidates memory/*.md into MEMORY.md
 
 ## What You Do
 
@@ -124,11 +128,11 @@ exit 1
 
 ## Update Your Memory
 
-Before exiting, jot down what you worked on in **MEMORY.md** — just enough so future-you has context:
+Before exiting, write what you learned to **`memory/<task-id>.md`** (NOT MEMORY.md):
 - What task you did and which project/files it touched
 - Anything non-obvious you discovered (gotchas, quirks, why something is the way it is)
 
-Keep it brief. A few bullet points per task is fine. This isn't a retrospective — it's a work log.
+Keep it brief. A few bullet points per task is fine. Use the task ID from your assignment as the filename.
 
 ## Constraints
 
