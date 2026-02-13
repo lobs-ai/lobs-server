@@ -533,3 +533,84 @@ class MemorySearchResult(BaseModel):
     memory_type: str
     date: Optional[datetime] = None
     score: float
+
+
+# Status/System Health schemas
+class ServerHealth(BaseModel):
+    """Server health status."""
+    status: str
+    uptime_seconds: int
+    version: str
+
+
+class OrchestratorHealth(BaseModel):
+    """Orchestrator health status."""
+    running: bool
+    paused: bool
+
+
+class WorkersHealth(BaseModel):
+    """Workers health status."""
+    active: int
+    total_completed: int
+    total_failed: int
+
+
+class TasksHealth(BaseModel):
+    """Tasks health status."""
+    active: int
+    waiting: int
+    blocked: int
+    completed_today: int
+
+
+class MemoriesHealth(BaseModel):
+    """Memories health status."""
+    total: int
+    today_entries: int
+
+
+class InboxHealth(BaseModel):
+    """Inbox health status."""
+    unread: int
+
+
+class SystemOverview(BaseModel):
+    """Combined system health overview."""
+    server: ServerHealth
+    orchestrator: OrchestratorHealth
+    workers: WorkersHealth
+    agents: list[dict[str, Any]]
+    tasks: TasksHealth
+    memories: MemoriesHealth
+    inbox: InboxHealth
+
+
+class ActivityEvent(BaseModel):
+    """Activity timeline event."""
+    type: str
+    title: str
+    timestamp: datetime
+    details: str = ""
+
+
+class CostPeriod(BaseModel):
+    """Cost tracking for a time period."""
+    tokens_in: int
+    tokens_out: int
+    estimated_cost: float
+
+
+class AgentCostBreakdown(BaseModel):
+    """Cost breakdown by agent type."""
+    type: str
+    tokens_total: int
+    runs: int
+
+
+class CostSummary(BaseModel):
+    """Token/cost tracking summary."""
+    today: CostPeriod
+    week: CostPeriod
+    month: CostPeriod
+    by_agent: list[AgentCostBreakdown]

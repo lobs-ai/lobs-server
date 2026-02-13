@@ -34,6 +34,7 @@ from app.routers import (
     backup,
     chat,
     memories,
+    status,
 )
 from app.routers import text_dumps
 
@@ -49,6 +50,9 @@ async def lifespan(app: FastAPI):
     global orchestrator_engine
     
     # Startup
+    from datetime import datetime, timezone
+    app.state.start_time = datetime.now(timezone.utc)
+    
     settings.ensure_data_dir()
     await init_db()
     
@@ -140,6 +144,7 @@ app.include_router(orchestrator.router, prefix=settings.API_PREFIX)
 app.include_router(backup.router, prefix=settings.API_PREFIX)
 app.include_router(chat.router, prefix=settings.API_PREFIX)
 app.include_router(memories.router, prefix=settings.API_PREFIX)
+app.include_router(status.router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")
