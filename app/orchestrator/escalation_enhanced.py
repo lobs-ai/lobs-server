@@ -78,11 +78,11 @@ class EscalationManagerEnhanced:
                 f"(tier={current_tier}, retries={retry_count}, agent={agent_type})"
             )
             
-            # Tier 1: Auto-retry with same agent
-            if current_tier == 0 and retry_count < self.max_tier_1_retries:
+            # Tier 1: Auto-retry with same agent (tier 0 or 1, retries < max)
+            if current_tier <= 1 and retry_count < self.max_tier_1_retries:
                 return await self._tier_1_auto_retry(task, agent_type, error_log)
             
-            # Tier 2: Switch agent type
+            # Tier 2: Switch agent type (tier 1 exhausted)
             elif current_tier <= 1:
                 return await self._tier_2_agent_switch(task, agent_type, error_log)
             

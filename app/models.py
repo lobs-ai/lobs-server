@@ -187,6 +187,7 @@ class WorkerRun(Base):
     task_id = Column(String, ForeignKey("tasks.id"))
     succeeded = Column(Boolean)
     source = Column(String)
+    summary = Column(String)  # Work summary from .work-summary file
 
 
 class AgentStatus(Base):

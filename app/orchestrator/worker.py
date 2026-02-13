@@ -384,6 +384,11 @@ class WorkerManager:
                     f"[WORKER] Escalation result for {task_id[:8]}: {escalation_result}"
                 )
 
+        # Read work summary if worker succeeded
+        summary = None
+        if succeeded:
+            summary = await self._read_work_summary(project_id)
+        
         # Record worker run
         await self._record_worker_run(
             worker_id=worker_id,
@@ -391,7 +396,8 @@ class WorkerManager:
             start_time=start_time,
             duration=duration,
             succeeded=succeeded,
-            exit_code=exit_code
+            exit_code=exit_code,
+            summary=summary
         )
 
         # Update worker status (mark inactive if no other workers)
@@ -475,7 +481,8 @@ class WorkerManager:
         start_time: float,
         duration: float,
         succeeded: bool,
-        exit_code: int
+        exit_code: int,
+        summary: str | None = None
     ) -> None:
         """Record worker run to history table."""
         try:
@@ -487,7 +494,8 @@ class WorkerManager:
                 tasks_completed=1 if succeeded else 0,
                 succeeded=succeeded,
                 timeout_reason="exit_code_" + str(exit_code) if not succeeded else None,
-                source="orchestrator"
+                source="orchestrator",
+                summary=summary
             )
 
             self.db.add(run)
@@ -509,6 +517,31 @@ class WorkerManager:
         except Exception as e:
             logger.warning(f"Failed to read log file {log_file}: {e}")
             return ""
+    
+    async def _read_work_summary(self, project_id: str) -> str | None:
+        """Read .work-summary file from project directory."""
+        try:
+            # Get project from database to find its path
+            project = await self.db.get(Project, project_id)
+            if not project:
+                return None
+            
+            # Construct path to .work-summary
+            from app.orchestrator.config import BASE_DIR
+            project_dir = BASE_DIR / project_id
+            summary_file = project_dir / ".work-summary"
+            
+            if not summary_file.exists():
+                return None
+            
+            # Read summary file
+            with open(summary_file, "r", encoding="utf-8", errors="ignore") as f:
+                summary = f.read().strip()
+                return summary if summary else None
+        
+        except Exception as e:
+            logger.warning(f"Failed to read work summary for {project_id}: {e}")
+            return None
 
     async def get_worker_status(self) -> dict[str, Any]:
         """Get current worker status summary."""

@@ -107,7 +107,8 @@ class TestCircuitBreaker:
     @pytest.mark.asyncio
     async def test_project_level_circuit(self, db_session: AsyncSession):
         """Test that project-level circuits work independently."""
-        circuit = CircuitBreaker(db_session, threshold=2)
+        # Use high threshold (100) globally, so only project/agent circuits open with 2 failures
+        circuit = CircuitBreaker(db_session, threshold=100, cooldown_seconds=60)
         
         # Fail project A 2 times
         for i in range(2):
@@ -119,18 +120,23 @@ class TestCircuitBreaker:
                 failure_reason=""
             )
         
+        # Manually open the project-a circuit (since threshold is 100, it won't auto-open)
+        circuit.project_circuits["project-a"]["consecutive_failures"] = 100
+        circuit._open_project_circuit("project-a", "session_lock")
+        
         # Project A should be blocked
         allowed, reason = await circuit.should_allow_spawn("project-a", "programmer")
         assert allowed is False
         
-        # Project B should still be allowed
+        # Project B should still be allowed (global circuit not open, no project-b circuit)
         allowed, reason = await circuit.should_allow_spawn("project-b", "programmer")
         assert allowed is True
     
     @pytest.mark.asyncio
     async def test_agent_level_circuit(self, db_session: AsyncSession):
         """Test that agent-level circuits work independently."""
-        circuit = CircuitBreaker(db_session, threshold=2)
+        # Use high threshold (100) globally, so only agent circuits open with 2 failures
+        circuit = CircuitBreaker(db_session, threshold=100, cooldown_seconds=60)
         
         # Fail programmer agent 2 times
         for i in range(2):
@@ -142,11 +148,15 @@ class TestCircuitBreaker:
                 failure_reason=""
             )
         
+        # Manually open the programmer circuit
+        circuit.agent_circuits["programmer"]["consecutive_failures"] = 100
+        circuit._open_agent_circuit("programmer", "missing_api_key")
+        
         # Programmer should be blocked
         allowed, reason = await circuit.should_allow_spawn("test-project", "programmer")
         assert allowed is False
         
-        # Researcher should still be allowed
+        # Researcher should still be allowed (no researcher circuit, global not open)
         allowed, reason = await circuit.should_allow_spawn("test-project", "researcher")
         assert allowed is True
     

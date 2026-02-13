@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Patterns that indicate infrastructure failure, not task failure
 INFRA_FAILURE_PATTERNS = [
-    (re.compile(r"gateway.*token.*mismatch|unauthorized.*gateway", re.IGNORECASE), "gateway_auth"),
+    (re.compile(r"gateway.*(token.*mismatch|auth.*failed|unauthorized)|unauthorized.*gateway", re.IGNORECASE), "gateway_auth"),
     (re.compile(r"session file locked", re.IGNORECASE), "session_lock"),
-    (re.compile(r"No API key found for provider", re.IGNORECASE), "missing_api_key"),
+    (re.compile(r"No API key found for provider|missing.*api.*key", re.IGNORECASE), "missing_api_key"),
     (re.compile(r"connect failed.*unauthorized", re.IGNORECASE), "gateway_auth"),
     (re.compile(r"ECONNREFUSED|ETIMEDOUT|ENOTFOUND", re.IGNORECASE), "service_unavailable"),
     (re.compile(r"All models failed", re.IGNORECASE), "all_models_failed"),
@@ -207,18 +207,20 @@ class CircuitBreaker:
         Returns:
             (allowed, reason) tuple
         """
-        # Check global circuit
-        if self.global_circuit["is_open"]:
-            elapsed = time.time() - self.global_circuit["opened_at"]
+        # Check agent circuit first (most specific to this spawn request)
+        agent_circuit = self.agent_circuits.get(agent_type)
+        if agent_circuit and agent_circuit["is_open"]:
+            elapsed = time.time() - agent_circuit["opened_at"]
             if elapsed >= self.cooldown_seconds:
                 logger.info(
-                    f"[CIRCUIT] Global cooldown elapsed ({elapsed:.0f}s), allowing probe spawn"
+                    f"[CIRCUIT] Agent {agent_type} cooldown elapsed, allowing probe spawn"
                 )
                 return True, ""
             
             remaining = self.cooldown_seconds - elapsed
             return False, (
-                f"Global circuit breaker OPEN: {self.global_circuit['reason']}. "
+                f"Circuit breaker OPEN for {agent_type} agent: "
+                f"{agent_circuit['last_failure_type']}. "
                 f"Paused for {remaining:.0f}s more."
             )
         
@@ -239,20 +241,18 @@ class CircuitBreaker:
                 f"Paused for {remaining:.0f}s more."
             )
         
-        # Check agent circuit
-        agent_circuit = self.agent_circuits.get(agent_type)
-        if agent_circuit and agent_circuit["is_open"]:
-            elapsed = time.time() - agent_circuit["opened_at"]
+        # Check global circuit (only affects this spawn if more specific circuits aren't blocking)
+        if self.global_circuit["is_open"]:
+            elapsed = time.time() - self.global_circuit["opened_at"]
             if elapsed >= self.cooldown_seconds:
                 logger.info(
-                    f"[CIRCUIT] Agent {agent_type} cooldown elapsed, allowing probe spawn"
+                    f"[CIRCUIT] Global cooldown elapsed ({elapsed:.0f}s), allowing probe spawn"
                 )
                 return True, ""
             
             remaining = self.cooldown_seconds - elapsed
             return False, (
-                f"Circuit breaker OPEN for {agent_type} agent: "
-                f"{agent_circuit['last_failure_type']}. "
+                f"GLOBAL CIRCUIT BREAKER OPEN: {self.global_circuit['reason']}. "
                 f"Paused for {remaining:.0f}s more."
             )
         

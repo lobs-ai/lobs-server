@@ -1,5 +1,6 @@
 """Orchestrator configuration."""
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ WORKER_KILL_TIMEOUT = 3600  # 1 hour
 WORKER_HEARTBEAT_TIMEOUT = 300  # 5 minutes
 
 # Base directory for repos (will be configured via app.config)
-BASE_DIR = Path.home() / "other" / "lobs"
+BASE_DIR = Path(os.environ.get("LOBS_PROJECTS_DIR", str(Path.home())))
 
 # Worker results directory
 WORKER_RESULTS_DIR = Path.home() / ".openclaw" / "worker-results"
