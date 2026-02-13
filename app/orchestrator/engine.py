@@ -298,8 +298,7 @@ class OrchestratorEngine:
                         f"[ENGINE] Spawned worker for task {task_id[:8]} "
                         f"(project={project_id}, agent={agent_type})"
                     )
-                    # Only process one task per iteration
-                    break
+                    # Continue to try spawning more workers (up to max_workers)
                 else:
                     logger.debug(
                         f"[ENGINE] Worker not spawned for task {task_id[:8]} "

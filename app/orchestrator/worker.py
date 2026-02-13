@@ -104,14 +104,7 @@ class WorkerManager:
             )
             return False
 
-        # Check agent type lock
-        if agent_type in self.agent_locks:
-            locked_task = self.agent_locks[agent_type]
-            logger.info(
-                f"[WORKER] Agent type {agent_type} locked by task {locked_task[:8]}. "
-                f"Task {task_id[:8]} queued."
-            )
-            return False
+        # Agent type lock removed — different projects can use the same agent concurrently
 
         try:
             # Get project details
@@ -188,7 +181,7 @@ class WorkerManager:
                 process, task_id, project_id, agent_type, start_time, log_file
             )
             self.project_locks[project_id] = task_id
-            self.agent_locks[agent_type] = task_id
+            # agent_locks removed
 
             # Update DB: worker status
             await self._update_worker_status(
@@ -292,7 +285,7 @@ class WorkerManager:
         # Remove from tracking
         self.active_workers.pop(worker_id, None)
         self.project_locks.pop(project_id, None)
-        self.agent_locks.pop(agent_type, None)
+        # agent_locks removed
 
         # Read log tail for error detection
         log_tail = self._read_log_tail(log_file, lines=50)
@@ -615,7 +608,7 @@ class WorkerManager:
         # Clear state
         self.active_workers.clear()
         self.project_locks.clear()
-        self.agent_locks.clear()
+        # agent_locks removed
 
         # Update DB
         await self._update_worker_status(active=False)
