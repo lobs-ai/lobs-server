@@ -34,6 +34,7 @@ from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
+from app.orchestrator.git_manager import GitManager, OpenClawConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,12 @@ class WorkerManager:
         # worker_id -> (process, task_id, project_id, agent_type, start_time, log_file)
         self.active_workers: dict[str, tuple[
             subprocess.Popen, str, str, str, float, Path
+        ]] = {}
+        
+        # Git/config managers per worker
+        # worker_id -> (git_manager, config_manager, repo_path)
+        self.worker_git_managers: dict[str, tuple[
+            Optional[GitManager], OpenClawConfigManager, Optional[Path]
         ]] = {}
         
         # Domain locks: one worker per project
@@ -135,6 +142,56 @@ class WorkerManager:
             # Setup log file
             log_file = WORKER_RESULTS_DIR / f"{task_id}.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Git setup (only if project has repo_path)
+            git_manager = None
+            config_manager = OpenClawConfigManager()
+            
+            if project.repo_path:
+                git_manager = GitManager(repo_path)
+                
+                # Create git branch
+                task_id_short = task_id[:8]
+                if not git_manager.create_task_branch(task_id_short):
+                    logger.error(f"Failed to create git branch for task {task_id_short}")
+                    return False
+                
+                # Get agent workspace path from config
+                import json
+                config_path = Path.home() / ".openclaw" / "openclaw.json"
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                agents = config.get("agents", {}).get("list", [])
+                agent_workspace = None
+                for a in agents:
+                    if a.get("id") == agent_type or a.get("name") == agent_type:
+                        agent_workspace = Path(a.get("workspace", ""))
+                        break
+                
+                if not agent_workspace or not agent_workspace.exists():
+                    logger.error(f"Agent workspace not found for {agent_type}")
+                    git_manager.cleanup_on_failure(task_id_short, has_commits=False)
+                    return False
+                
+                # Copy template files to repo
+                git_manager.copy_template_files(agent_workspace)
+                
+                # Override workspace in config to point to repo
+                if not await config_manager.override_workspace(agent_type, repo_path):
+                    logger.error("Failed to override workspace config")
+                    git_manager.cleanup_on_failure(task_id_short, has_commits=False)
+                    return False
+                
+                logger.info(
+                    f"[WORKER] Git setup complete for {task_id_short}: "
+                    f"branch created, templates copied, workspace overridden"
+                )
+            
+            # Track git/config managers
+            self.worker_git_managers[worker_id] = (
+                git_manager,
+                config_manager,
+                repo_path if project.repo_path else None
+            )
 
             # Build OpenClaw command
             task_title = task.get("title", task_id[:8])
@@ -289,6 +346,12 @@ class WorkerManager:
         """Handle worker completion (success or failure)."""
         duration = time.time() - start_time
         
+        # Get git/config managers
+        git_data = self.worker_git_managers.pop(worker_id, None)
+        git_manager = git_data[0] if git_data else None
+        config_manager = git_data[1] if git_data else None
+        repo_path = git_data[2] if git_data else None
+        
         # Remove from tracking
         self.active_workers.pop(worker_id, None)
         self.project_locks.pop(project_id, None)
@@ -300,12 +363,48 @@ class WorkerManager:
         # Determine success/failure
         succeeded = exit_code == 0
         
+        # Git variables for DB recording
+        commit_sha = None
+        files_modified = []
+        task_id_short = task_id[:8]
+        
         if succeeded:
             # Success
             logger.info(
                 f"[WORKER] Worker {worker_id} completed successfully "
                 f"(task={task_id[:8]}, duration={int(duration)}s)"
             )
+            
+            # Git cleanup and commit (if git-managed)
+            if git_manager and config_manager:
+                try:
+                    # Restore workspace config first
+                    await config_manager.restore_workspace(agent_type)
+                    
+                    # Clean up template files
+                    git_manager.cleanup_template_files()
+                    
+                    # Check for changes
+                    has_changes, diff_stat = git_manager.has_changes()
+                    
+                    if has_changes:
+                        # Commit and push
+                        task_title = (await self.db.get(Task, task_id)).title or task_id_short
+                        commit_sha, files_modified = git_manager.commit_and_push(
+                            task_id_short,
+                            task_title
+                        )
+                        
+                        if commit_sha:
+                            logger.info(
+                                f"[GIT] Committed {commit_sha[:8]} with "
+                                f"{len(files_modified)} files:\n{diff_stat}"
+                            )
+                    else:
+                        logger.info(f"[GIT] No changes to commit for {task_id_short}")
+                    
+                except Exception as e:
+                    logger.error(f"[GIT] Git operations failed for {task_id_short}: {e}")
 
             # Update task
             db_task = await self.db.get(Task, task_id)
@@ -336,6 +435,27 @@ class WorkerManager:
                 f"[WORKER] Worker {worker_id} failed "
                 f"(task={task_id[:8]}, exit_code={exit_code})"
             )
+            
+            # Git cleanup on failure
+            if git_manager and config_manager:
+                try:
+                    # Restore workspace config first
+                    await config_manager.restore_workspace(agent_type)
+                    
+                    # Check if any commits were made (branch has commits beyond base)
+                    result = git_manager._run_git(
+                        "rev-list", "--count", f"HEAD...origin/main",
+                        check=False
+                    )
+                    has_commits = result.returncode == 0 and int(result.stdout.strip().split()[0] or 0) > 0
+                    
+                    # Cleanup: remove templates, reset changes, delete branch if empty
+                    git_manager.cleanup_on_failure(task_id_short, has_commits)
+                    
+                    logger.info(f"[GIT] Cleaned up after failure for {task_id_short}")
+                    
+                except Exception as e:
+                    logger.error(f"[GIT] Cleanup failed for {task_id_short}: {e}")
 
             # Update agent tracker
             await AgentTracker(self.db).mark_failed(agent_type, task_id)
@@ -401,7 +521,9 @@ class WorkerManager:
             duration=duration,
             succeeded=succeeded,
             exit_code=exit_code,
-            summary=summary
+            summary=summary,
+            commit_sha=commit_sha,
+            files_modified=files_modified
         )
 
         # Update worker status (mark inactive if no other workers)
@@ -486,7 +608,9 @@ class WorkerManager:
         duration: float,
         succeeded: bool,
         exit_code: int,
-        summary: str | None = None
+        summary: str | None = None,
+        commit_sha: str | None = None,
+        files_modified: list[str] | None = None
     ) -> None:
         """Record worker run to history table."""
         try:
@@ -499,7 +623,9 @@ class WorkerManager:
                 succeeded=succeeded,
                 timeout_reason="exit_code_" + str(exit_code) if not succeeded else None,
                 source="orchestrator",
-                summary=summary
+                summary=summary,
+                commit_shas=[commit_sha] if commit_sha else None,
+                files_modified=files_modified
             )
 
             self.db.add(run)
@@ -615,7 +741,8 @@ class WorkerManager:
         # Clear state
         self.active_workers.clear()
         self.project_locks.clear()
-        self.agent_locks.pop(agent_type, None)
+        self.agent_locks.clear()
+        self.worker_git_managers.clear()
 
         # Update DB
         await self._update_worker_status(active=False)
