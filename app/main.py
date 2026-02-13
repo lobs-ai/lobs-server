@@ -37,6 +37,7 @@ from app.routers import (
     chat,
     memories,
     status,
+    topics,
 )
 from app.routers import text_dumps
 
@@ -150,6 +151,7 @@ app.include_router(projects.router, prefix=settings.API_PREFIX, dependencies=[De
 app.include_router(tasks.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(inbox.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(documents.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(topics.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(research.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(tracker.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(worker.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])

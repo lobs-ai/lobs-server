@@ -176,6 +176,35 @@ class InboxTriageUpdate(BaseModel):
 
 
 # AgentDocument schemas
+# Topic schemas
+class TopicBase(BaseModel):
+    title: str
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    linked_project_id: Optional[str] = None
+    auto_created: bool = False
+
+
+class TopicCreate(TopicBase):
+    id: str
+
+
+class TopicUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    icon: Optional[str] = None
+    linked_project_id: Optional[str] = None
+    auto_created: Optional[bool] = None
+
+
+class Topic(TopicBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
 class AgentDocumentBase(BaseModel):
     title: str
     filename: Optional[str] = None
@@ -184,7 +213,7 @@ class AgentDocumentBase(BaseModel):
     content_is_truncated: bool = False
     source: Optional[str] = None
     status: Optional[str] = None
-    topic: Optional[str] = None
+    topic_id: Optional[str] = None
     project_id: Optional[str] = None
     task_id: Optional[str] = None
     date: Optional[datetime] = None
@@ -204,7 +233,7 @@ class AgentDocumentUpdate(BaseModel):
     content_is_truncated: Optional[bool] = None
     source: Optional[str] = None
     status: Optional[str] = None
-    topic: Optional[str] = None
+    topic_id: Optional[str] = None
     project_id: Optional[str] = None
     task_id: Optional[str] = None
     date: Optional[datetime] = None
@@ -221,6 +250,7 @@ class AgentDocument(AgentDocumentBase):
 # ResearchRequest schemas
 class ResearchRequestBase(BaseModel):
     project_id: Optional[str] = None
+    topic_id: Optional[str] = None
     tile_id: Optional[str] = None
     prompt: Optional[str] = None
     status: Optional[str] = None
@@ -238,6 +268,7 @@ class ResearchRequestCreate(ResearchRequestBase):
 
 
 class ResearchRequestUpdate(BaseModel):
+    topic_id: Optional[str] = None
     tile_id: Optional[str] = None
     prompt: Optional[str] = None
     status: Optional[str] = None

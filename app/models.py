@@ -93,6 +93,20 @@ class InboxMessage(Base):
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
+class Topic(Base):
+    """Topic model for knowledge organization."""
+    __tablename__ = "topics"
+    
+    id = Column(String, primary_key=True)
+    title = Column(String, nullable=False, unique=True)
+    description = Column(Text)
+    icon = Column(String)  # emoji or icon name
+    linked_project_id = Column(String, ForeignKey("projects.id"))
+    auto_created = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class AgentDocument(Base):
     """Agent document model."""
     __tablename__ = "agent_documents"
@@ -105,7 +119,7 @@ class AgentDocument(Base):
     content_is_truncated = Column(Boolean, default=False)
     source = Column(String)  # writer/researcher
     status = Column(String)  # pending/approved/rejected
-    topic = Column(String)
+    topic_id = Column(String, ForeignKey("topics.id"))
     project_id = Column(String, ForeignKey("projects.id"))
     task_id = Column(String, ForeignKey("tasks.id"))
     date = Column(DateTime)
@@ -119,6 +133,7 @@ class ResearchRequest(Base):
     
     id = Column(String, primary_key=True)
     project_id = Column(String, ForeignKey("projects.id"))
+    topic_id = Column(String, ForeignKey("topics.id"))
     tile_id = Column(String)
     prompt = Column(Text)
     status = Column(String)
