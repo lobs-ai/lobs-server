@@ -371,8 +371,13 @@ async def _run_git(cwd: str, *args: str, timeout: int = 15) -> tuple[int, str]:
 
 
 @router.get("/updates")
-async def check_updates() -> UpdateCheckResponse:
-    """Check all tracked repos for available updates."""
+async def check_updates(client_commit: str | None = None) -> UpdateCheckResponse:
+    """Check for available updates.
+    
+    If client_commit is provided, compare that against origin/main
+    instead of the server's local HEAD (for when the app runs on
+    a different machine than the server).
+    """
     repos: list[RepoUpdateInfo] = []
 
     for name, path in TRACKED_REPOS.items():
@@ -393,22 +398,49 @@ async def check_updates() -> UpdateCheckResponse:
             # Fetch latest from origin (quiet)
             await _run_git(path, "fetch", "origin", branch, "--quiet")
 
-            # Local HEAD info
-            _, local_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
-            _, local_message = await _run_git(path, "log", "-1", "--format=%s")
-            _, local_date = await _run_git(path, "log", "-1", "--format=%ci")
-
-            # Remote HEAD info
+            # Remote HEAD info (latest available)
             _, remote_commit = await _run_git(path, "rev-parse", "--short", f"origin/{branch}")
             _, remote_message = await _run_git(path, "log", "-1", f"origin/{branch}", "--format=%s")
             _, remote_date = await _run_git(path, "log", "-1", f"origin/{branch}", "--format=%ci")
 
-            # Count commits behind/ahead
-            _, rev_list = await _run_git(path, "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}")
-            ahead, behind = 0, 0
-            parts = rev_list.split()
-            if len(parts) == 2:
-                ahead, behind = int(parts[0]), int(parts[1])
+            if client_commit:
+                # Client told us its commit — compare that against origin
+                local_commit = client_commit
+                # Get message for client commit (may fail if server doesn't have it locally, 
+                # but after fetch it should)
+                rc, local_message = await _run_git(path, "log", "-1", client_commit, "--format=%s")
+                if rc != 0:
+                    local_message = "(unknown commit)"
+                rc, local_date = await _run_git(path, "log", "-1", client_commit, "--format=%ci")
+                if rc != 0:
+                    local_date = ""
+
+                # Count commits between client and origin
+                _, full_remote = await _run_git(path, "rev-parse", f"origin/{branch}")
+                _, full_local = await _run_git(path, "rev-parse", client_commit)
+                if full_remote.startswith(full_local[:7]):
+                    # Same commit
+                    ahead, behind = 0, 0
+                else:
+                    _, rev_list = await _run_git(
+                        path, "rev-list", "--left-right", "--count",
+                        f"{client_commit}...origin/{branch}"
+                    )
+                    ahead, behind = 0, 0
+                    parts = rev_list.split()
+                    if len(parts) == 2:
+                        ahead, behind = int(parts[0]), int(parts[1])
+            else:
+                # No client commit — use server's local HEAD
+                _, local_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
+                _, local_message = await _run_git(path, "log", "-1", "--format=%s")
+                _, local_date = await _run_git(path, "log", "-1", "--format=%ci")
+
+                _, rev_list = await _run_git(path, "rev-list", "--left-right", "--count", f"HEAD...origin/{branch}")
+                ahead, behind = 0, 0
+                parts = rev_list.split()
+                if len(parts) == 2:
+                    ahead, behind = int(parts[0]), int(parts[1])
 
             repos.append(RepoUpdateInfo(
                 name=name, path=path, branch=branch,
@@ -458,9 +490,15 @@ async def self_update_mission_control() -> SelfUpdateResponse:
 
         _, new_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
 
-        # Build
+        # Build (use bin/build which generates BuildInfo with commit hash)
+        build_script = os.path.join(path, "bin", "build")
+        if os.path.isfile(build_script):
+            build_cmd = ["bash", build_script]
+        else:
+            build_cmd = ["swift", "build"]
+        
         proc = await asyncio.create_subprocess_exec(
-            "swift", "build",
+            *build_cmd,
             cwd=path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,

@@ -77,6 +77,7 @@ class InboxThread(Base):
     id = Column(String, primary_key=True)
     doc_id = Column(String, ForeignKey("inbox_items.id"))
     triage_status = Column(String)  # needs_response/pending/resolved
+    last_processed_message_id = Column(String)  # Track last processed message to avoid re-processing
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
