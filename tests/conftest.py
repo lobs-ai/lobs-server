@@ -176,13 +176,12 @@ async def sample_template(client: AsyncClient):
 
 
 @pytest_asyncio.fixture
-async def sample_reminder(client: AsyncClient):
-    """Create a sample reminder."""
-    reminder_data = {
-        "id": "test-reminder-1",
-        "title": "Test Reminder",
-        "due_at": "2026-12-31T23:59:59Z"
-    }
-    response = await client.post("/api/reminders", json=reminder_data)
-    assert response.status_code == 200
-    return response.json()
+def auth_headers(test_token):
+    """Provide authorization headers."""
+    return {"Authorization": f"Bearer {test_token}"}
+
+
+@pytest_asyncio.fixture
+def project_id(sample_project):
+    """Provide a project ID."""
+    return sample_project["id"]

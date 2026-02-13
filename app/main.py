@@ -30,7 +30,7 @@ from app.routers import (
     tracker,
     worker,
     templates,
-    reminders,
+    calendar,
     agents,
     orchestrator,
     backup,
@@ -153,7 +153,7 @@ app.include_router(research.router, prefix=settings.API_PREFIX, dependencies=[De
 app.include_router(tracker.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(worker.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(templates.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
-app.include_router(reminders.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(calendar.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(text_dumps.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(agents.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(orchestrator.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])

@@ -217,13 +217,44 @@ class TaskTemplate(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
-class Reminder(Base):
-    """Reminder model."""
-    __tablename__ = "reminders"
+class ScheduledEvent(Base):
+    """Scheduled event model for calendar/reminders/recurring tasks."""
+    __tablename__ = "scheduled_events"
     
-    id = Column(String, primary_key=True)
+    id = Column(String, primary_key=True)  # uuid
     title = Column(String, nullable=False)
-    due_at = Column(DateTime, nullable=False)
+    description = Column(Text)
+    
+    # Type: "reminder" (notify user), "task" (create task for agent), "meeting" (personal calendar)
+    event_type = Column(String, nullable=False)
+    
+    # Scheduling
+    scheduled_at = Column(DateTime, nullable=False)  # when to fire (UTC)
+    end_at = Column(DateTime)  # optional end time (for meetings/blocks)
+    all_day = Column(Boolean, default=False)
+    
+    # Recurrence (optional)
+    recurrence_rule = Column(String)  # cron expression, e.g. "0 9 * * 1-5" for weekdays 9am
+    recurrence_end = Column(DateTime)  # when recurrence stops
+    
+    # Target
+    target_type = Column(String, nullable=False)  # "self" (Rafe), "agent", "orchestrator"
+    target_agent = Column(String)  # agent type if target_type is "agent"
+    
+    # Task template (for event_type="task")
+    task_project_id = Column(String, ForeignKey("projects.id"))
+    task_notes = Column(Text)
+    task_priority = Column(String)  # optional priority
+    
+    # Status
+    status = Column(String, nullable=False, default="pending")  # pending, fired, cancelled, recurring
+    last_fired_at = Column(DateTime)
+    next_fire_at = Column(DateTime)  # computed from recurrence
+    fire_count = Column(Integer, default=0)
+    
+    # Metadata
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class TextDump(Base):

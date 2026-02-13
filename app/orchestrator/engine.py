@@ -24,6 +24,7 @@ from app.orchestrator.monitor_enhanced import MonitorEnhanced
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
+from app.orchestrator.scheduler import EventScheduler
 from app.orchestrator.config import POLL_INTERVAL
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,8 @@ class OrchestratorEngine:
         self._paused = False
         self._task: Optional[asyncio.Task] = None
         self.last_poll = 0.0
+        self._last_scheduler_check = 0.0
+        self._scheduler_interval = 60  # Check events every 60 seconds
 
     async def start(self) -> None:
         """Start the orchestrator engine as a background task."""
@@ -161,14 +164,32 @@ class OrchestratorEngine:
             circuit_breaker = CircuitBreaker(db)
             escalation = EscalationManagerEnhanced(db)
             agent_tracker = AgentTracker(db)
+            scheduler = EventScheduler(db)
 
-            # 1. Check active workers
+            # 1. Check scheduled events (every 60 seconds)
+            import time
+            current_time = time.time()
+            if current_time - self._last_scheduler_check >= self._scheduler_interval:
+                try:
+                    result = await scheduler.check_due_events()
+                    if result["total_fired"] > 0:
+                        activity = True
+                        logger.info(
+                            f"[ENGINE] Scheduler fired {result['total_fired']} event(s)"
+                        )
+                    self._last_scheduler_check = current_time
+                    await db.commit()  # Commit scheduler changes
+                except Exception as e:
+                    logger.error(f"[ENGINE] Scheduler check failed: {e}", exc_info=True)
+                    await db.rollback()
+
+            # 2. Check active workers
             initial_active = len(worker_manager.active_workers)
             await worker_manager.check_workers()
             if len(worker_manager.active_workers) != initial_active:
                 activity = True
 
-            # 2. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
+            # 3. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
             try:
                 monitor_result = await monitor_enhanced.run_full_check()
                 if monitor_result.get("issues_found", 0) > 0:
@@ -182,14 +203,14 @@ class OrchestratorEngine:
             except Exception as e:
                 logger.error(f"[ENGINE] Enhanced monitor check failed: {e}", exc_info=True)
 
-            # 3. Skip work assignment if paused or OpenClaw unavailable
+            # 4. Skip work assignment if paused or OpenClaw unavailable
             if self._paused:
                 return activity
             
             if not self._openclaw_available:
                 return activity
 
-            # 4. Scan for eligible tasks
+            # 5. Scan for eligible tasks
             eligible_tasks = await scanner.get_eligible_tasks()
             
             if not eligible_tasks:
@@ -204,7 +225,7 @@ class OrchestratorEngine:
                     f"{len(eligible_tasks)} task(s) queued."
                 )
 
-            # 5. Process eligible tasks
+            # 6. Process eligible tasks
             for task_dict in eligible_tasks:
                 activity = True
                 

@@ -404,19 +404,73 @@ class TaskTemplate(TaskTemplateBase):
 
 
 # Reminder schemas
-class ReminderBase(BaseModel):
+# ScheduledEvent schemas (replaces Reminder)
+class ScheduledEventBase(BaseModel):
     title: str
-    due_at: datetime
+    description: Optional[str] = None
+    event_type: str  # reminder, task, meeting
+    scheduled_at: datetime
+    end_at: Optional[datetime] = None
+    all_day: bool = False
+    recurrence_rule: Optional[str] = None
+    recurrence_end: Optional[datetime] = None
+    target_type: str  # self, agent, orchestrator
+    target_agent: Optional[str] = None
+    task_project_id: Optional[str] = None
+    task_notes: Optional[str] = None
+    task_priority: Optional[str] = None
 
 
-class ReminderCreate(ReminderBase):
+class ScheduledEventCreate(ScheduledEventBase):
     id: str
 
 
-class Reminder(ReminderBase):
+class ScheduledEventUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    event_type: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    end_at: Optional[datetime] = None
+    all_day: Optional[bool] = None
+    recurrence_rule: Optional[str] = None
+    recurrence_end: Optional[datetime] = None
+    target_type: Optional[str] = None
+    target_agent: Optional[str] = None
+    task_project_id: Optional[str] = None
+    task_notes: Optional[str] = None
+    task_priority: Optional[str] = None
+    status: Optional[str] = None
+
+
+class ScheduledEventResponse(ScheduledEventBase):
     id: str
+    status: str
+    last_fired_at: Optional[datetime] = None
+    next_fire_at: Optional[datetime] = None
+    fire_count: int
+    created_at: datetime
+    updated_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+
+class ScheduledEventList(BaseModel):
+    """List of scheduled events with metadata."""
+    events: list[ScheduledEventResponse]
+    total: int
+
+
+class CalendarDayEvents(BaseModel):
+    """Events grouped by a single date."""
+    date: str  # YYYY-MM-DD
+    events: list[ScheduledEventResponse]
+
+
+class CalendarView(BaseModel):
+    """Events grouped by date for calendar view."""
+    start_date: str
+    end_date: str
+    days: list[CalendarDayEvents]
 
 
 # TextDump schemas
