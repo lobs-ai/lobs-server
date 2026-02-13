@@ -21,11 +21,16 @@ def _compile_keywords(words: Iterable[str]) -> re.Pattern[str]:
     return re.compile(r"\b(?:" + "|".join(escaped) + r")\b", re.IGNORECASE)
 
 
-# Default routing rules - only route AWAY from programmer when signal is strong
+# Default routing rules - route to specialized agents when signal is clear
 _DEFAULT_RULES: tuple[_Rule, ...] = (
     _Rule(
         agent_type="researcher",
-        pattern=_compile_keywords(["research", "investigate", "explore", "compare alternatives"]),
+        pattern=_compile_keywords([
+            "research", "investigate", "explore", "compare alternatives",
+            "ideas", "analysis", "analyze", "evaluate", "study",
+            "proof of concept", "proof-of-concept", "feasibility",
+            "batch", "suggestions", "propose", "proposal",
+        ]),
     ),
     _Rule(
         agent_type="writer",
@@ -36,11 +41,17 @@ _DEFAULT_RULES: tuple[_Rule, ...] = (
     ),
     _Rule(
         agent_type="architect",
-        pattern=_compile_keywords(["design system", "architect", "rework architecture", "restructure"]),
+        pattern=_compile_keywords([
+            "design system", "architect", "rework architecture", "restructure",
+            "design proposal", "system design", "framework",
+        ]),
     ),
     _Rule(
         agent_type="reviewer",
-        pattern=_compile_keywords(["code review", "audit code", "review PR"]),
+        pattern=_compile_keywords([
+            "code review", "audit code", "review PR",
+            "failure analysis", "hygiene", "cleanup",
+        ]),
     ),
 )
 
