@@ -197,6 +197,68 @@ class GitManager:
             logger.error(f"[GIT] Failed to commit/push: {e}")
             return None, []
 
+    def merge_to_main(self, task_id_short: str) -> bool:
+        """Merge task branch back to main and push.
+        
+        Attempts automatic merge. Returns True on success, False on conflict.
+        On conflict, leaves the branch unmerged for manual resolution.
+        """
+        branch_name = f"task/{task_id_short}"
+        
+        try:
+            # Get default branch
+            result = self._run_git(
+                "symbolic-ref", "refs/remotes/origin/HEAD",
+                check=False
+            )
+            if result.returncode == 0:
+                default_branch = result.stdout.strip().split('/')[-1]
+            else:
+                default_branch = "main"
+            
+            # Fetch latest
+            self._run_git("fetch", "origin", check=False)
+            
+            # Checkout main
+            self._run_git("checkout", default_branch)
+            self._run_git("pull", "--rebase", "origin", default_branch, check=False)
+            
+            # Merge task branch
+            result = self._run_git(
+                "merge", branch_name, "--no-edit",
+                check=False
+            )
+            
+            if result.returncode != 0:
+                # Merge conflict
+                logger.warning(
+                    f"[GIT] Merge conflict for {branch_name}. "
+                    f"Aborting merge, branch preserved for manual resolution."
+                )
+                self._run_git("merge", "--abort", check=False)
+                # Go back to task branch so repo isn't in weird state
+                self._run_git("checkout", branch_name, check=False)
+                return False
+            
+            # Push merged main
+            result = self._run_git("push", "origin", default_branch, check=False)
+            if result.returncode != 0:
+                logger.error(f"[GIT] Failed to push merged {default_branch}")
+                return False
+            
+            # Delete task branch (local and remote)
+            self._run_git("branch", "-d", branch_name, check=False)
+            self._run_git("push", "origin", "--delete", branch_name, check=False)
+            
+            logger.info(
+                f"[GIT] Merged {branch_name} → {default_branch} and pushed"
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(f"[GIT] Merge failed for {branch_name}: {e}")
+            return False
+
     def cleanup_on_failure(self, task_id_short: str, has_commits: bool) -> None:
         """Clean up after task failure.
         

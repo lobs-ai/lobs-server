@@ -65,8 +65,8 @@ class WorkerManager:
         # Domain locks: one worker per project
         self.project_locks: dict[str, str] = {}  # project_id -> task_id
         
-        # Per-agent-type limiting (DISABLED — session isolation via --session-id allows concurrency)
-        # self.agent_locks: dict[str, str] = {}  # agent_type -> task_id
+        # Per-agent-type limiting (one worker per agent type — shared session file)
+        self.agent_locks: dict[str, str] = {}  # agent_type -> task_id
 
         self.max_workers = MAX_WORKERS
 
@@ -111,8 +111,14 @@ class WorkerManager:
             )
             return False
 
-        # Agent type lock removed — session isolation via --session-id allows
-        # multiple workers of the same agent type concurrently
+        # Check agent type lock (one worker per agent type — shared session file)
+        if agent_type in self.agent_locks:
+            locked_task = self.agent_locks[agent_type]
+            logger.info(
+                f"[WORKER] Agent type {agent_type} locked by task {locked_task[:8]}. "
+                f"Task {task_id[:8]} queued."
+            )
+            return False
 
         # Track for cleanup on exception
         git_manager = None
@@ -221,7 +227,7 @@ class WorkerManager:
                 process, task_id, project_id, agent_type, start_time, log_file
             )
             self.project_locks[project_id] = task_id
-            # agent_locks removed — concurrent same-type agents supported
+            self.agent_locks[agent_type] = task_id
 
             # Update DB: worker status
             await self._update_worker_status(
@@ -338,7 +344,7 @@ class WorkerManager:
         # Remove from tracking
         self.active_workers.pop(worker_id, None)
         self.project_locks.pop(project_id, None)
-        # agent_locks removed — concurrent same-type agents supported
+        self.agent_locks.pop(agent_type, None)
 
         # Read log tail for error detection
         log_tail = self._read_log_tail(log_file, lines=50)
@@ -378,8 +384,19 @@ class WorkerManager:
                                 f"[GIT] Committed {commit_sha[:8]} with "
                                 f"{len(files_modified)} files:\n{diff_stat}"
                             )
+                            
+                            # Merge branch back to main
+                            merged = git_manager.merge_to_main(task_id_short)
+                            if not merged:
+                                logger.warning(
+                                    f"[GIT] Auto-merge failed for {task_id_short}. "
+                                    f"Branch task/{task_id_short} preserved."
+                                )
+                                # TODO: escalate merge conflict via LLM
                     else:
                         logger.info(f"[GIT] No changes to commit for {task_id_short}")
+                        # No changes — clean up empty branch
+                        git_manager.cleanup_on_failure(task_id_short, has_commits=False)
                     
                 except Exception as e:
                     logger.error(f"[GIT] Git operations failed for {task_id_short}: {e}")
@@ -716,6 +733,7 @@ class WorkerManager:
         # Clear state
         self.active_workers.clear()
         self.project_locks.clear()
+        self.agent_locks.clear()
         self.worker_git_managers.clear()
 
         # Update DB
