@@ -282,3 +282,17 @@ class ChatMessage(Base):
     content = Column(Text, nullable=False)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     message_metadata = Column(JSON)
+
+
+class Memory(Base):
+    """Memory model for second brain feature."""
+    __tablename__ = "memories"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    path = Column(String, unique=True, nullable=False, index=True)
+    title = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    memory_type = Column(String, nullable=False)  # long_term/daily/custom
+    date = Column(DateTime, nullable=True)  # for daily memories
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

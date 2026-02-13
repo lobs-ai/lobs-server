@@ -33,6 +33,7 @@ from app.routers import (
     orchestrator,
     backup,
     chat,
+    memories,
 )
 from app.routers import text_dumps
 
@@ -138,6 +139,7 @@ app.include_router(agents.router, prefix=settings.API_PREFIX)
 app.include_router(orchestrator.router, prefix=settings.API_PREFIX)
 app.include_router(backup.router, prefix=settings.API_PREFIX)
 app.include_router(chat.router, prefix=settings.API_PREFIX)
+app.include_router(memories.router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

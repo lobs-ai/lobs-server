@@ -480,3 +480,56 @@ class ResearchSource(ResearchSourceBase):
     added_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+
+# Memory schemas
+class MemoryBase(BaseModel):
+    path: str
+    title: str
+    content: str
+    memory_type: str  # long_term/daily/custom
+    date: Optional[datetime] = None
+
+
+class MemoryCreate(BaseModel):
+    title: str
+    content: str
+    memory_type: str
+    date: Optional[datetime] = None
+    path: Optional[str] = None  # auto-generated for daily/long_term
+
+
+class MemoryUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+
+
+class Memory(MemoryBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MemoryListItem(BaseModel):
+    """Memory list item without full content."""
+    id: int
+    path: str
+    title: str
+    memory_type: str
+    date: Optional[datetime] = None
+    updated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MemorySearchResult(BaseModel):
+    """Memory search result with snippet."""
+    id: int
+    path: str
+    title: str
+    snippet: str
+    memory_type: str
+    date: Optional[datetime] = None
+    score: float
