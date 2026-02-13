@@ -330,11 +330,9 @@ async def get_costs(
 
 # MARK: - Software Updates
 
-# Repos to track for updates
+# Only track Mission Control - it manages itself
 TRACKED_REPOS = {
-    "lobs-server": os.path.expanduser("~/lobs-server"),
     "lobs-mission-control": os.path.expanduser("~/lobs-mission-control"),
-    "lobs-mobile": os.path.expanduser("~/lobs-mobile"),
 }
 
 
@@ -358,14 +356,6 @@ class UpdateCheckResponse(BaseModel):
     repos: list[RepoUpdateInfo]
     has_updates: bool = False
     checked_at: str
-
-
-class UpdatePullResponse(BaseModel):
-    repo: str
-    success: bool
-    output: str
-    new_commit: str | None = None
-    needs_restart: bool = False
 
 
 async def _run_git(cwd: str, *args: str, timeout: int = 15) -> tuple[int, str]:
@@ -439,38 +429,6 @@ async def check_updates() -> UpdateCheckResponse:
         has_updates=any(r.has_update for r in repos),
         checked_at=datetime.now(timezone.utc).isoformat(),
     )
-
-
-@router.post("/updates/pull")
-async def pull_update(repo: str) -> UpdatePullResponse:
-    """Pull latest changes for a specific repo."""
-    if repo not in TRACKED_REPOS:
-        return UpdatePullResponse(repo=repo, success=False, output=f"Unknown repo: {repo}")
-
-    path = TRACKED_REPOS[repo]
-    if not os.path.isdir(os.path.join(path, ".git")):
-        return UpdatePullResponse(repo=repo, success=False, output="Not a git repo")
-
-    try:
-        rc, branch = await _run_git(path, "rev-parse", "--abbrev-ref", "HEAD")
-        if rc != 0:
-            branch = "main"
-
-        rc, output = await _run_git(path, "pull", "--rebase", "origin", branch, timeout=30)
-        if rc != 0:
-            return UpdatePullResponse(repo=repo, success=False, output=output)
-
-        _, new_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
-
-        return UpdatePullResponse(
-            repo=repo,
-            success=True,
-            output=output,
-            new_commit=new_commit,
-            needs_restart=(repo == "lobs-server"),
-        )
-    except Exception as e:
-        return UpdatePullResponse(repo=repo, success=False, output=str(e))
 
 
 class SelfUpdateResponse(BaseModel):
