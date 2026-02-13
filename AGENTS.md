@@ -1,122 +1,117 @@
 # AGENTS.md — lobs-server
 
 ## What This Is
+Central backend for Lobs Mission Control. FastAPI + SQLite REST API with built-in orchestrator. All state lives here — tasks, projects, memories, documents, chat, agent management.
 
-lobs-server is a FastAPI + SQLite REST API that serves as the central backend for the Lobs task management system. It replaces the old git-based lobs-control state management with a proper database-backed server.
-
-## Architecture
-
-```
-lobs-server/
-├── app/
-│   ├── main.py              # FastAPI app, lifespan, middleware
-│   ├── config.py             # Settings (env vars)
-│   ├── database.py           # Async SQLAlchemy engine + session
-│   ├── models.py             # All SQLAlchemy models (16 tables)
-│   ├── schemas.py            # Pydantic request/response schemas
-│   ├── backup.py             # SQLite backup manager (scheduled + manual)
-│   ├── logging_config.py     # Structured logging (console/JSON, rotating files)
-│   ├── middleware.py          # Request logging middleware
-│   ├── routers/              # REST API endpoints
-│   │   ├── projects.py       # /api/projects
-│   │   ├── tasks.py          # /api/tasks
-│   │   ├── inbox.py          # /api/inbox
-│   │   ├── documents.py      # /api/documents
-│   │   ├── research.py       # /api/research/{project_id}/...
-│   │   ├── tracker.py        # /api/tracker/{project_id}/...
-│   │   ├── worker.py         # /api/worker/status, /api/worker/history
-│   │   ├── agents.py         # /api/agents
-│   │   ├── templates.py      # /api/templates
-│   │   ├── reminders.py      # /api/reminders
-│   │   ├── text_dumps.py     # /api/text-dumps
-│   │   ├── backup.py         # /api/backup/...
-│   │   ├── orchestrator.py   # /api/orchestrator/...
-│   │   └── health.py         # /api/health
-│   └── orchestrator/         # Built-in task orchestrator
-│       ├── engine.py          # Main async polling loop
-│       ├── scanner.py         # Finds eligible tasks (DB queries)
-│       ├── worker.py          # Spawns OpenClaw worker processes
-│       ├── router.py          # Routes tasks to agent types
-│       ├── prompter.py        # Builds rich prompts for workers
-│       ├── registry.py        # Agent config registry
-│       ├── monitor.py         # Health checks, stuck detection
-│       ├── escalation.py      # Tiered failure handling
-│       ├── circuit_breaker.py # Prevents cascading failures
-│       └── agent_tracker.py   # Per-agent status tracking
-├── agents/                    # Agent templates (AGENTS.md, SOUL.md per type)
-├── tests/                     # Pytest test suite (129+ tests)
-├── scripts/
-│   └── migrate_from_git.py   # One-time migration from lobs-control
-├── data/
-│   ├── lobs.db               # SQLite database
-│   └── backups/              # Automatic backups
-├── logs/                      # Rotating log files
-├── requirements.txt
-└── run.sh                     # Start server (uvicorn)
-```
-
-## Running
-
+## Quick Start
 ```bash
 cd ~/lobs-server
 source .venv/bin/activate
-./run.sh                    # Starts on 0.0.0.0:8000
+./run.sh  # or: uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-## Key Design Decisions
-
-- **Async everything**: SQLAlchemy async with aiosqlite, FastAPI async handlers
-- **Orchestrator is built-in**: Runs as asyncio background task in the same process — direct DB access, no HTTP overhead
-- **SQLite**: Single-file database, no separate DB server needed. Backed up automatically every 6 hours
-- **No git for state**: All state lives in the database. The old git-based approach (lobs-control) is fully replaced
-- **Workers are external**: The orchestrator spawns OpenClaw worker processes via subprocess — they're separate processes, not threads
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_PATH` | `./data/lobs.db` | SQLite database path |
-| `ORCHESTRATOR_ENABLED` | `true` | Enable/disable orchestrator |
-| `ORCHESTRATOR_POLL_INTERVAL` | `10` | Seconds between task scans |
-| `ORCHESTRATOR_MAX_WORKERS` | `3` | Max concurrent workers |
-| `BACKUP_ENABLED` | `true` | Enable automatic backups |
-| `BACKUP_INTERVAL_HOURS` | `6` | Hours between backups |
-| `BACKUP_RETENTION_COUNT` | `30` | Max backups to keep |
-| `BACKUP_GIT_ENABLED` | `false` | Commit backups to git |
-| `LOG_LEVEL` | `INFO` | Logging level |
-| `LOG_FORMAT` | `console` | `console` or `json` |
-
-## Testing
-
-```bash
-cd ~/lobs-server && source .venv/bin/activate
-python -m pytest tests/ -v
+## Architecture
+```
+FastAPI App (app/main.py)
+├── Routers (app/routers/)     — REST API endpoints
+├── Services (app/services/)   — Chat manager, OpenClaw bridge
+├── Orchestrator (app/orchestrator/) — Task execution engine
+├── Models (app/models.py)     — SQLAlchemy DB models
+├── Schemas (app/schemas.py)   — Pydantic request/response schemas
+├── Auth (app/auth.py)         — Bearer token authentication
+├── Database (app/database.py) — Async SQLAlchemy + aiosqlite
+└── Config (app/config.py)     — Settings
 ```
 
-## API Docs
+## API Routers (app/routers/)
+| Router | Prefix | Purpose |
+|--------|--------|---------|
+| health.py | /api/health | Health check (PUBLIC, no auth) |
+| projects.py | /api/projects | Project CRUD |
+| tasks.py | /api/tasks | Task CRUD, status/state updates |
+| memories.py | /api/memories | Memory CRUD, search, quick capture |
+| documents.py | /api/docs | Reports, research documents |
+| inbox.py | /api/inbox | Inbox items (proposals, suggestions) |
+| research.py | /api/research | Research requests and findings |
+| chat.py | /api/chat | Chat sessions, messages, WebSocket |
+| status.py | /api/status | System health, activity, costs |
+| agents.py | /api/agents | Agent statuses and personality files |
+| worker.py | /api/worker | Worker status and history |
+| orchestrator.py | /api/orchestrator | Orchestrator control (pause/resume) |
+| tracker.py | /api/tracker | Project tracker items |
+| templates.py | /api/templates | Task templates |
+| reminders.py | /api/reminders | Reminders |
+| backup.py | /api/backup | DB backup management |
+| text_dumps.py | /api/text-dumps | Text dump storage |
 
-When the server is running: http://localhost:8000/docs (auto-generated OpenAPI/Swagger)
+## Authentication
+- **All endpoints require Bearer token** (except `/api/health`)
+- **WebSocket**: Token passed as query param (`/api/chat/ws?token=...`)
+- **No token creation API** — tokens generated server-side only
+- Auth dependency: `app/auth.py` → `require_auth`
+- Token management scripts:
+  ```bash
+  python scripts/generate_token.py <name>    # Create token
+  python scripts/list_tokens.py              # List all tokens
+  python scripts/revoke_token.py <name>      # Revoke token
+  ```
+
+## Orchestrator (app/orchestrator/)
+Built into the server — direct DB access, no HTTP overhead.
+| File | Purpose |
+|------|---------|
+| engine.py | Main polling loop, dispatches work |
+| worker.py | Spawns OpenClaw workers, manages lifecycle |
+| scanner.py | Finds eligible tasks |
+| router.py | Routes tasks to agent types |
+| monitor.py | Basic health monitoring |
+| monitor_enhanced.py | Stuck task detection, auto-unblock, failure patterns |
+| escalation.py | Basic failure handling |
+| escalation_enhanced.py | Multi-tier escalation (retry → agent switch → diagnostic → human) |
+| circuit_breaker.py | Infrastructure failure detection, per-project/agent isolation |
+| agent_tracker.py | Agent status tracking |
+| prompter.py | Builds task prompts with context |
+| config.py | Orchestrator settings |
+
+**Graceful degradation**: If `openclaw` is not on PATH, orchestrator runs in monitoring-only mode (no worker spawning).
+
+## Services (app/services/)
+| File | Purpose |
+|------|---------|
+| chat_manager.py | WebSocket connection tracking, message broadcasting |
+| openclaw_bridge.py | Webhook interface for OpenClaw agent responses |
 
 ## Database
+- **SQLite** via async SQLAlchemy + aiosqlite
+- DB file: `data/lobs.db`
+- Models in `app/models.py` — 10+ tables (projects, tasks, memories, inbox, documents, agents, worker_runs, chat_sessions, chat_messages, api_tokens, etc.)
+- Auto-creates tables on startup via `init_db()`
 
-SQLite at `data/lobs.db`. Tables:
-- `projects`, `tasks`, `inbox_items`, `inbox_threads`, `inbox_messages`
-- `agent_documents`, `research_requests`, `research_docs`, `research_sources`
-- `tracker_items`, `worker_status`, `worker_runs`, `agent_status`
-- `task_templates`, `reminders`, `text_dumps`
+## Testing
+```bash
+source .venv/bin/activate
+python -m pytest -v              # All tests
+python -m pytest tests/test_memories.py -v  # Specific module
+python -m pytest -x              # Stop on first failure
+```
+Tests auto-create auth tokens via fixtures.
 
-## Conventions
+## Key Files
+- `app/main.py` — App setup, lifespan, router registration
+- `app/models.py` — All SQLAlchemy models
+- `app/schemas.py` — All Pydantic schemas
+- `app/auth.py` — Token auth dependency
+- `app/database.py` — DB engine, session factory
+- `app/config.py` — Settings (API_PREFIX, DB path, etc.)
+- `scripts/migrate_from_git.py` — One-time migration from lobs-control
+- `scripts/seed_memories.py` — Seed memories from workspace files
 
-- All timestamps are UTC ISO 8601
-- IDs are UUID strings (uppercase)
-- API uses snake_case for JSON keys
-- Pagination: `?limit=N&offset=M` on all list endpoints
-- Filtering: query params (e.g., `?status=active&project_id=flock`)
+## Common Edits
+- **Add endpoint**: Create router in `app/routers/`, add model/schema, register in `app/main.py`
+- **Add model field**: Update `app/models.py` + `app/schemas.py`, ALTER TABLE in DB
+- **Add orchestrator feature**: Edit files in `app/orchestrator/`
 
-## Working on This Repo
-
-- **Don't deploy** without explicit approval
-- **Run tests** before pushing: `python -m pytest tests/ -x -q`
-- **Server must boot**: `python -c "from app.main import app; print('OK')"`
-- **Keep models.py and schemas.py in sync** — if you add a DB column, add the Pydantic field too
-- **Routers follow a pattern** — look at an existing router before creating a new one
+## Networking
+- Binds to `0.0.0.0:8000`
+- Dashboard connects via Tailscale (private network)
+- Not exposed to LAN

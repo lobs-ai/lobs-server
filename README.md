@@ -1,108 +1,40 @@
 # lobs-server
 
-FastAPI + SQLite backend for the lobs-control task management system.
-
-## Overview
-
-This server replaces the git-based JSON file backend with a REST API + SQLite database. The SwiftUI macOS dashboard communicates with this API instead of managing files directly.
+Central backend for [Lobs Mission Control](https://github.com/RafeSymonds/lobs-mission-control). FastAPI + SQLite REST API with built-in task orchestrator.
 
 ## Features
-
-- **FastAPI** - Modern async Python web framework
-- **SQLite + SQLAlchemy** - Async database ORM
-- **Alembic** - Database migrations
-- **CORS enabled** - Ready for dashboard integration
-- **REST API** - Full CRUD for all models
-
-## Data Models
-
-- **Projects** - Kanban/research/tracker projects
-- **Tasks** - Dashboard tasks with status tracking
-- **Inbox** - Threaded markdown documents
-- **Documents** - Agent-generated content
-- **Research** - Research requests, docs, sources, deliverables
-- **Tracker** - Project tracker items
-- **Worker** - Worker and agent status
-- **Templates** - Task templates
-- **Reminders** - Scheduled reminders
-- **Text Dumps** - Batch text processing
+- **Task & Project Management** — Full CRUD with kanban workflow
+- **Memory System** — Second brain: daily notes, long-term memory, search, quick capture
+- **Chat** — Real-time WebSocket messaging with OpenClaw agent bridge
+- **Orchestrator** — Automatic task routing, worker spawning, failure escalation
+- **System Health** — Activity timeline, cost tracking, monitoring
+- **Auth** — Bearer token authentication on all endpoints
 
 ## Setup
-
 ```bash
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate
-
-# Install dependencies
+git clone git@github.com:RafeSymonds/lobs-server.git
+cd lobs-server
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 
-# Run database migrations
-alembic upgrade head
+# Generate an API token
+python scripts/generate_token.py my-token
 
-# Start server
-./run.sh
+# Run
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-## API Endpoints
+## API
+All endpoints at `/api/*` require Bearer token (except `/api/health`).
 
-All endpoints are prefixed with `/api`:
+See [AGENTS.md](AGENTS.md) for full endpoint reference.
 
-- `GET/POST /api/projects` - List/create projects
-- `GET/PUT/DELETE /api/projects/{id}` - Get/update/delete project
-- `POST /api/projects/{id}/archive` - Archive project
-- `GET/POST /api/tasks` - List/create tasks (filterable)
-- `GET/PUT/DELETE /api/tasks/{id}` - Get/update/delete task
-- `PATCH /api/tasks/{id}/status` - Update task status
-- `PATCH /api/tasks/{id}/work-state` - Update task work state
-- `GET/POST /api/inbox` - List/create inbox items
-- `GET /api/inbox/{id}/thread` - Get inbox thread
-- `POST /api/inbox/{id}/thread/messages` - Add thread message
-- `GET/POST /api/documents` - List/create documents
-- `POST /api/documents/{id}/archive` - Archive document
-- `GET/POST /api/research/requests` - Research requests
-- `GET/PUT /api/research/{projectId}/doc` - Research document
-- `GET/POST /api/research/{projectId}/sources` - Research sources
-- `GET/POST /api/research/{projectId}/deliverables` - Research deliverables
-- `GET/POST /api/tracker/{projectId}/items` - Tracker items
-- `GET /api/worker/status` - Current worker status
-- `GET /api/worker/history` - Worker run history
-- `GET /api/worker/agents` - All agent statuses
-- `GET/POST /api/templates` - Task templates
-- `GET/POST /api/reminders` - Reminders
-- `POST /api/text-dumps` - Text dumps
-- `GET /api/health` - Health check
-
-## Configuration
-
-Environment variables (or `.env` file):
-
-```env
-DATABASE_URL=sqlite+aiosqlite:///~/lobs-server/data/lobs.db
-HOST=0.0.0.0
-PORT=8000
-CORS_ORIGINS=["*"]
-```
-
-## Development
-
+## Testing
 ```bash
-# Run with auto-reload
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-
-# Create new migration
-alembic revision --autogenerate -m "description"
-
-# Apply migrations
-alembic upgrade head
+source .venv/bin/activate
+python -m pytest -v
 ```
-
-## Database
-
-SQLite database location: `~/lobs-server/data/lobs.db`
-
-All timestamps are stored in UTC (ISO 8601 format).
 
 ## License
-
-Private project.
+Private
