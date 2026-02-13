@@ -6,6 +6,10 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
+if [ -d "env" ]; then
+    source env/bin/activate
+fi
+
 # Ensure log directory exists
 mkdir -p logs
 
@@ -13,16 +17,16 @@ mkdir -p logs
 HOST="0.0.0.0"
 MODE="${1:-lan}"
 case "$MODE" in
-    local)
-        HOST="127.0.0.1"
-        ;;
-    lan)
-        HOST="0.0.0.0"
-        ;;
-    *)
-        echo "Usage: $0 [lan|local]"
-        exit 1
-        ;;
+local)
+    HOST="127.0.0.1"
+    ;;
+lan)
+    HOST="0.0.0.0"
+    ;;
+*)
+    echo "Usage: $0 [lan|local]"
+    exit 1
+    ;;
 esac
 
 # Start uvicorn server
