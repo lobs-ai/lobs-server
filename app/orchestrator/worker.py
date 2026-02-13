@@ -132,13 +132,28 @@ class WorkerManager:
                 return False
 
             # Resolve repo path: prefer project.repo_path, fall back to BASE_DIR/project_id
+            # For projects without repos, create temp working directory
+            has_repo = False
             if project.repo_path:
                 repo_path = Path(project.repo_path)
+                if repo_path.exists():
+                    has_repo = True
+                else:
+                    logger.warning(f"Project repo_path set but doesn't exist: {repo_path}")
             else:
                 repo_path = BASE_DIR / project_id
-            if not repo_path.exists():
-                logger.error(f"Project repo not found: {repo_path}")
-                return False
+                if repo_path.exists():
+                    has_repo = True
+            
+            # If no repo exists, create temp working directory
+            if not has_repo:
+                # Use WORKER_RESULTS_DIR for temp working directories
+                repo_path = WORKER_RESULTS_DIR / project_id
+                repo_path.mkdir(parents=True, exist_ok=True)
+                logger.info(
+                    f"[WORKER] No repo for project {project_id}, "
+                    f"using temp working dir: {repo_path}"
+                )
 
             # Create worker ID
             worker_id = f"worker_{int(time.time())}_{task_id[:8]}"
@@ -147,12 +162,12 @@ class WorkerManager:
             log_file = WORKER_RESULTS_DIR / f"{task_id}.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # Git setup (only if project has repo_path)
+            # Git setup (only if project has repo)
             # NOTE: No config override needed — agent reads personality from its
             # configured workspace, and works on project files via cwd.
             # This allows concurrent workers of the same agent type.
             
-            if project.repo_path:
+            if has_repo:
                 git_manager = GitManager(repo_path)
                 
                 # Create git branch
@@ -164,11 +179,15 @@ class WorkerManager:
                     f"[WORKER] Git setup complete for {task_id_short}: "
                     f"branch created in {repo_path.name}"
                 )
+            else:
+                logger.info(
+                    f"[WORKER] Skipping git setup for repo-less project {project_id}"
+                )
             
-            # Track git manager
+            # Track git manager (None for repo-less projects)
             self.worker_git_managers[worker_id] = (
                 git_manager,
-                repo_path if project.repo_path else None
+                repo_path if has_repo else None
             )
 
             # Build OpenClaw command

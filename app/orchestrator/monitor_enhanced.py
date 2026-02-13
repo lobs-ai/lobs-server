@@ -56,7 +56,9 @@ class MonitorEnhanced:
             
             stuck = []
             for task in tasks:
-                age_seconds = (now - task.updated_at).total_seconds()
+                # Ensure timezone-aware datetime before subtraction
+                updated_at = task.updated_at.replace(tzinfo=timezone.utc) if task.updated_at.tzinfo is None else task.updated_at
+                age_seconds = (now - updated_at).total_seconds()
                 
                 # Check if worker is still active for this task
                 worker_result = await self.db.execute(
