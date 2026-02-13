@@ -20,12 +20,12 @@ class MockInboxItem:
 
 
 def test_analyze_response():
-    """Test the response analysis logic."""
+    """Test the response analysis logic (fallback regex method)."""
     processor = InboxProcessor(MockDB())
     
     # Test approval - simple "yes"
     item = MockInboxItem("Bug fixes needed", "1. Fix the bug\n2. Add tests")
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="Yes, do it!",
         inbox_item=item
     )
@@ -33,7 +33,7 @@ def test_analyze_response():
     print("✓ Approval detection (yes) works")
     
     # Test approval - "do this"
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="do this",
         inbox_item=item
     )
@@ -41,7 +41,7 @@ def test_analyze_response():
     print("✓ Approval detection (do this) works")
     
     # Test approval - "looks good"
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="looks good, do that",
         inbox_item=item
     )
@@ -49,7 +49,7 @@ def test_analyze_response():
     print("✓ Approval detection (looks good) works")
     
     # Test approval - conversational with instructions
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="yes investigate why this is an issue",
         inbox_item=item
     )
@@ -58,7 +58,7 @@ def test_analyze_response():
     
     # Test rejection
     item2 = MockInboxItem("Bug fixes needed", "1. Fix the bug")
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="No, skip this",
         inbox_item=item2
     )
@@ -66,7 +66,7 @@ def test_analyze_response():
     print("✓ Rejection detection works")
     
     # Test pending
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="Maybe later, need to think about it",
         inbox_item=item2
     )
@@ -75,7 +75,7 @@ def test_analyze_response():
     
     # Test specific instructions (action verb)
     item3 = MockInboxItem("Bug triage", "Various bugs reported")
-    result = processor._analyze_response(
+    result = processor._analyze_response_fallback(
         user_message="integrate this with the new calendar feature",
         inbox_item=item3
     )
