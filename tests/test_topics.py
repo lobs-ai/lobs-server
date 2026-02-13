@@ -200,6 +200,114 @@ class TestTopicsDocuments:
         assert response.status_code == 404
 
 
+class TestTopicsResearchRequests:
+    """Tests for topic research request endpoints."""
+    
+    @pytest.mark.asyncio
+    async def test_create_research_request_for_topic(self, client: AsyncClient):
+        """Test creating a research request linked to a topic."""
+        # Create a topic first
+        topic_data = {"id": "topic-research-test", "title": "Research Topic"}
+        await client.post("/api/topics", json=topic_data)
+        
+        # Create a research request for this topic
+        request_data = {
+            "id": "req-001",
+            "prompt": "Research AI safety",
+            "status": "pending",
+            "author": "rafe"
+        }
+        response = await client.post(f"/api/topics/{topic_data['id']}/requests", json=request_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == request_data["id"]
+        assert data["prompt"] == request_data["prompt"]
+        assert data["topic_id"] == topic_data["id"]  # Verify topic_id is set
+    
+    @pytest.mark.asyncio
+    async def test_create_research_request_topic_not_found(self, client: AsyncClient):
+        """Test creating a research request for non-existent topic fails."""
+        request_data = {
+            "id": "req-002",
+            "prompt": "Research something",
+            "status": "pending"
+        }
+        response = await client.post("/api/topics/nonexistent-topic/requests", json=request_data)
+        assert response.status_code == 404
+        assert "not found" in response.json()["detail"]
+    
+    @pytest.mark.asyncio
+    async def test_get_topic_research_requests_empty(self, client: AsyncClient):
+        """Test getting research requests for a topic with no requests."""
+        # Create a topic first
+        topic_data = {"id": "topic-no-requests", "title": "Empty Topic"}
+        await client.post("/api/topics", json=topic_data)
+        
+        # Get requests (should be empty)
+        response = await client.get(f"/api/topics/{topic_data['id']}/requests")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 0
+    
+    @pytest.mark.asyncio
+    async def test_get_topic_research_requests_with_data(self, client: AsyncClient):
+        """Test getting research requests for a topic with existing requests."""
+        # Create a topic
+        topic_data = {"id": "topic-with-requests", "title": "Topic With Requests"}
+        await client.post("/api/topics", json=topic_data)
+        
+        # Create two research requests
+        request1 = {
+            "id": "req-topic-1",
+            "prompt": "Research question 1",
+            "status": "pending"
+        }
+        request2 = {
+            "id": "req-topic-2",
+            "prompt": "Research question 2",
+            "status": "pending"
+        }
+        await client.post(f"/api/topics/{topic_data['id']}/requests", json=request1)
+        await client.post(f"/api/topics/{topic_data['id']}/requests", json=request2)
+        
+        # Get all requests for the topic
+        response = await client.get(f"/api/topics/{topic_data['id']}/requests")
+        assert response.status_code == 200
+        data = response.json()
+        assert isinstance(data, list)
+        assert len(data) == 2
+        # Verify both requests are linked to the topic
+        for req in data:
+            assert req["topic_id"] == topic_data["id"]
+    
+    @pytest.mark.asyncio
+    async def test_get_topic_research_requests_not_found(self, client: AsyncClient):
+        """Test getting research requests for non-existent topic fails."""
+        response = await client.get("/api/topics/nonexistent-topic/requests")
+        assert response.status_code == 404
+    
+    @pytest.mark.asyncio
+    async def test_research_request_with_project_and_topic(self, client: AsyncClient, sample_project):
+        """Test creating a research request with both project_id and topic_id."""
+        # Create a topic
+        topic_data = {"id": "topic-with-project", "title": "Project Topic"}
+        await client.post("/api/topics", json=topic_data)
+        
+        # Create a research request with both project and topic
+        request_data = {
+            "id": "req-both",
+            "prompt": "Research project-specific topic",
+            "status": "pending",
+            "project_id": sample_project["id"]
+        }
+        response = await client.post(f"/api/topics/{topic_data['id']}/requests", json=request_data)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["topic_id"] == topic_data["id"]
+        assert data["project_id"] == sample_project["id"]
+
+
 class TestTopicsIntegration:
     """Integration tests for topics."""
     

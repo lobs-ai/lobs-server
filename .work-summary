@@ -1,15 +1,13 @@
-Created Topic model and API endpoints for knowledge organization system. Migrated agent_documents from string topics to FK relationships.
+Added research request endpoints to topics router. Users can now create research requests linked to topics via POST /api/topics/{id}/requests.
 
 Implementation:
-- Created Topic model with id, title, description, icon, linked_project_id, auto_created, created_at, updated_at
-- Replaced agent_documents.topic (string) with topic_id (FK to topics)
-- Added topic_id FK to research_requests  
-- Created 8 API endpoints: GET/POST /api/topics, GET/PUT/DELETE /api/topics/{id}, GET /api/topics/{id}/documents
-- Migration script created 13 topics from existing distinct topic strings, updated 69 agent documents
-- Added Pydantic schemas: Topic, TopicCreate, TopicUpdate
-- Updated AgentDocument and ResearchRequest schemas to use topic_id
+- Added POST /api/topics/{topic_id}/requests endpoint to create research requests linked to topics
+- Added GET /api/topics/{topic_id}/requests endpoint to list research requests for a topic
+- Research requests automatically get topic_id set when created via topic endpoint
+- Supports both project_id and topic_id on research requests for flexible organization
 
-Tests: 15 tests passed (100% success rate)
-- Covered CRUD operations, validation, pagination, duplicate prevention
-- Tested topic-documents relationship endpoint
-- Verified auto_created flag functionality
+Tests: 21/21 passed (6 new tests covering research request creation and retrieval)
+- Verified topic_id is properly set on created requests
+- Tested error handling for non-existent topics
+- Tested listing requests (empty and with data)
+- Tested combination of project_id and topic_id

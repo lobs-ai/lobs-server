@@ -5,8 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Topic as TopicModel, AgentDocument as AgentDocumentModel
-from app.schemas import Topic, TopicCreate, TopicUpdate, AgentDocument
+from app.models import Topic as TopicModel, AgentDocument as AgentDocumentModel, ResearchRequest as ResearchRequestModel
+from app.schemas import Topic, TopicCreate, TopicUpdate, AgentDocument, ResearchRequest, ResearchRequestCreate
 from app.config import settings
 
 router = APIRouter(prefix="/topics", tags=["topics"])
@@ -129,3 +129,58 @@ async def get_topic_documents(
     result = await db.execute(query)
     documents = result.scalars().all()
     return [AgentDocument.model_validate(d) for d in documents]
+
+
+@router.post("/{topic_id}/requests")
+async def create_topic_research_request(
+    topic_id: str,
+    request: ResearchRequestCreate,
+    db: AsyncSession = Depends(get_db)
+) -> ResearchRequest:
+    """Create a research request linked to a topic.
+    
+    This creates a research request that will be processed by the researcher agent
+    via the orchestrator. The request is automatically linked to the specified topic.
+    """
+    # First verify topic exists
+    result = await db.execute(select(TopicModel).where(TopicModel.id == topic_id))
+    topic = result.scalar_one_or_none()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    
+    # Create research request with topic_id set
+    request_data = request.model_dump()
+    request_data["topic_id"] = topic_id
+    
+    db_request = ResearchRequestModel(**request_data)
+    db.add(db_request)
+    await db.flush()
+    await db.refresh(db_request)
+    return ResearchRequest.model_validate(db_request)
+
+
+@router.get("/{topic_id}/requests")
+async def get_topic_research_requests(
+    topic_id: str,
+    limit: int = settings.DEFAULT_LIMIT,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db)
+) -> list[ResearchRequest]:
+    """Get all research requests linked to a specific topic."""
+    # First verify topic exists
+    result = await db.execute(select(TopicModel).where(TopicModel.id == topic_id))
+    topic = result.scalar_one_or_none()
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+    
+    # Get research requests for this topic
+    query = (
+        select(ResearchRequestModel)
+        .where(ResearchRequestModel.topic_id == topic_id)
+        .offset(offset)
+        .limit(min(limit, settings.MAX_LIMIT))
+        .order_by(ResearchRequestModel.created_at.desc())
+    )
+    result = await db.execute(query)
+    requests = result.scalars().all()
+    return [ResearchRequest.model_validate(r) for r in requests]
