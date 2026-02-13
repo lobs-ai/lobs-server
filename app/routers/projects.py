@@ -33,6 +33,10 @@ async def create_project(
     db: AsyncSession = Depends(get_db)
 ) -> Project:
     """Create a new project."""
+    # Check for duplicate ID
+    existing = await db.execute(select(ProjectModel).where(ProjectModel.id == project.id))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Project with id '{project.id}' already exists")
     db_project = ProjectModel(**project.model_dump())
     db.add(db_project)
     await db.flush()

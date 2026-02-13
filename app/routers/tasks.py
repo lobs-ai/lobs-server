@@ -53,6 +53,9 @@ async def create_task(
     db: AsyncSession = Depends(get_db)
 ) -> Task:
     """Create a new task."""
+    existing = await db.execute(select(TaskModel).where(TaskModel.id == task.id))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail=f"Task with id '{task.id}' already exists")
     db_task = TaskModel(**task.model_dump())
     db.add(db_task)
     await db.flush()
