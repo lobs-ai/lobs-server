@@ -1,13 +1,1 @@
-Added research request endpoints to topics router. Users can now create research requests linked to topics via POST /api/topics/{id}/requests.
-
-Implementation:
-- Added POST /api/topics/{topic_id}/requests endpoint to create research requests linked to topics
-- Added GET /api/topics/{topic_id}/requests endpoint to list research requests for a topic
-- Research requests automatically get topic_id set when created via topic endpoint
-- Supports both project_id and topic_id on research requests for flexible organization
-
-Tests: 21/21 passed (6 new tests covering research request creation and retrieval)
-- Verified topic_id is properly set on created requests
-- Tested error handling for non-existent topics
-- Tested listing requests (empty and with data)
-- Tested combination of project_id and topic_id
+Designed document lifecycle system: merge endpoint, last_maintained_at tracking, orchestrator knowledge maintenance. 3 programmer handoffs.
