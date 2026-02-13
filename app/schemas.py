@@ -1,8 +1,8 @@
 """Pydantic schemas for request/response models."""
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Any
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 
 # Project schemas
