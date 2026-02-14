@@ -1,14 +1,11 @@
 """Task API endpoints."""
 
 import os
-import re
-import logging
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timedelta, timezone
-from difflib import SequenceMatcher
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, and_, or_
+from datetime import datetime, timedelta
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -16,22 +13,6 @@ from app.database import get_db
 from app.models import Task as TaskModel
 from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate
 from app.config import settings
-
-logger = logging.getLogger(__name__)
-
-# --- Dedup helpers ---
-
-def _normalize_title(title: str) -> str:
-    """Normalize task title for fuzzy matching."""
-    normalized = re.sub(r'[^\w\s]', '', title.lower())
-    return re.sub(r'\s+', ' ', normalized).strip()
-
-def _similarity(a: str, b: str) -> float:
-    """Similarity ratio between two strings (0-1)."""
-    return SequenceMatcher(None, a, b).ratio()
-
-DEDUP_SIMILARITY_THRESHOLD = 0.70
-DEDUP_LOOKBACK_HOURS = 24
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -69,45 +50,12 @@ async def list_tasks(
 @router.post("")
 async def create_task(
     task: TaskCreate,
-    skip_dedup: bool = Query(False, description="Skip dedup check (for human-created tasks)"),
     db: AsyncSession = Depends(get_db)
 ) -> Task:
-    """Create a new task. Rejects duplicates by default (70% title similarity within 24h)."""
-    # Exact ID check
+    """Create a new task."""
     existing = await db.execute(select(TaskModel).where(TaskModel.id == task.id))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Task with id '{task.id}' already exists")
-    
-    # Fuzzy title dedup (skip if human override)
-    if not skip_dedup:
-        normalized_new = _normalize_title(task.title)
-        cutoff = datetime.now(timezone.utc) - timedelta(hours=DEDUP_LOOKBACK_HOURS)
-        
-        recent_result = await db.execute(
-            select(TaskModel).where(
-                or_(
-                    TaskModel.status.in_(["active", "inbox"]),
-                    and_(
-                        TaskModel.status == "completed",
-                        TaskModel.updated_at >= cutoff
-                    )
-                )
-            )
-        )
-        recent_tasks = recent_result.scalars().all()
-        
-        for existing_task in recent_tasks:
-            sim = _similarity(normalized_new, _normalize_title(existing_task.title))
-            if sim >= DEDUP_SIMILARITY_THRESHOLD:
-                logger.warning(
-                    f"[DEDUP] Rejected task '{task.title}' — {sim*100:.0f}% similar to "
-                    f"existing '{existing_task.title}' ({existing_task.id[:8]})"
-                )
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Duplicate task rejected: {sim*100:.0f}% similar to existing task '{existing_task.title}'"
-                )
-    
     db_task = TaskModel(**task.model_dump())
     db.add(db_task)
     await db.flush()
