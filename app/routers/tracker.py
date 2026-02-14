@@ -406,3 +406,43 @@ async def get_deadlines(
         )
         for e in entries
     ]
+
+
+# Work Tracker Analysis (AI-generated insights)
+@router.get("/analysis/latest")
+async def get_latest_analysis(
+    db: AsyncSession = Depends(get_db)
+) -> TrackerEntry | None:
+    """Get the most recent AI analysis entry."""
+    result = await db.execute(
+        select(TrackerEntryModel)
+        .where(TrackerEntryModel.type == "analysis")
+        .order_by(TrackerEntryModel.created_at.desc())
+        .limit(1)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry:
+        return None
+    return TrackerEntry.model_validate(entry)
+
+
+@router.put("/analysis")
+async def upsert_analysis(
+    entry: TrackerEntryCreate,
+    db: AsyncSession = Depends(get_db)
+) -> TrackerEntry:
+    """Create or update the AI analysis. Keeps only the latest one."""
+    # Delete old analyses
+    old = await db.execute(
+        select(TrackerEntryModel).where(TrackerEntryModel.type == "analysis")
+    )
+    for old_entry in old.scalars().all():
+        await db.delete(old_entry)
+    
+    # Create new
+    db_entry = TrackerEntryModel(**entry.model_dump())
+    db_entry.type = "analysis"  # Force type
+    db.add(db_entry)
+    await db.flush()
+    await db.refresh(db_entry)
+    return TrackerEntry.model_validate(db_entry)
