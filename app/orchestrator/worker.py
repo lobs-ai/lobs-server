@@ -391,6 +391,35 @@ class WorkerManager:
                     has_changes, diff_stat = git_manager.has_changes()
                     
                     if has_changes:
+                        # Check if changes are only docs (no real code changes)
+                        staged_files = git_manager._run_git(
+                            "diff", "--cached", "--name-only", check=False
+                        ).stdout.strip().split("\n")
+                        doc_only_extensions = {".md"}
+                        ignored_files = {".work-summary"}
+                        real_changes = [
+                            f for f in staged_files
+                            if f.strip()
+                            and f.strip() not in ignored_files
+                            and not any(f.strip().endswith(ext) for ext in doc_only_extensions)
+                        ]
+                        
+                        if not real_changes:
+                            logger.warning(
+                                f"[GIT] Task {task_id_short} only produced doc/md files "
+                                f"({staged_files}) — no real code changes. Marking as failed."
+                            )
+                            git_manager.cleanup_on_failure(task_id_short, has_commits=False)
+                            db_task = await self.db.get(Task, task_id)
+                            if db_task:
+                                db_task.work_state = "failed"
+                                db_task.status = "todo"
+                                db_task.failure_reason = "Worker only produced documentation files, no source code changes"
+                                db_task.finished_at = None
+                                db_task.updated_at = datetime.now(timezone.utc)
+                                await self.db.commit()
+                            return True
+                        
                         # Commit and push
                         task_title = (await self.db.get(Task, task_id)).title or task_id_short
                         commit_sha, files_modified = git_manager.commit_and_push(

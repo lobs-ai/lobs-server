@@ -78,6 +78,14 @@ Common test commands (check project for specifics):
 
 The orchestrator checks for file changes after you finish. If you produce no changes, the task is considered failed regardless of your exit code.
 
+**DO NOT write documentation files as your deliverable.** Your job is to change SOURCE CODE files (.swift, .py, .js, etc). Writing a markdown file describing what should be done is NOT completing the task. Fix the actual code. If the task says "X is broken", find the Swift/Python/etc file and fix it — don't write a FIX_SUMMARY.md about it.
+
+**Forbidden outputs:**
+- ❌ `*_FIX.md`, `*_SUMMARY.md`, `*_PLAN.md` files
+- ❌ Any markdown doc that describes changes instead of making them
+- ❌ Test files without corresponding source code changes
+- Only modify `.work-summary` for your commit message — that's the only doc you write
+
 ## Being Proactive
 
 While staying focused on your task, you should:

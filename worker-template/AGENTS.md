@@ -145,6 +145,7 @@ Keep it brief. A few bullet points per task is fine. Append to the file if it al
 - If you can't find the right files, search harder (grep, find, read directory structures)
 - If you are genuinely blocked and cannot make changes, exit with code 1 and explain why in `.work-summary`
 - The orchestrator checks for file changes after you finish. No changes = failed task.
+- **DO NOT write documentation/summary/fix markdown files as your deliverable.** Change actual SOURCE CODE. Writing a `*_FIX.md` or `*_SUMMARY.md` instead of fixing code is a failure. The only doc you write is `.work-summary`.
 
 ## Constraints
 
