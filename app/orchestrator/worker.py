@@ -444,21 +444,19 @@ class WorkerManager:
                     else:
                         logger.warning(
                             f"[GIT] No changes to commit for {task_id_short} — "
-                            f"worker completed but produced no code. Marking as failed."
+                            f"worker completed but produced no file changes."
                         )
                         # No changes — clean up empty branch
                         git_manager.cleanup_on_failure(task_id_short, has_commits=False)
                         
-                        # Mark task as failed since no work was produced
+                        # Still mark as completed — some tasks legitimately
+                        # don't require file changes (research, docs review, etc.)
+                        # but log it for tracking
                         db_task = await self.db.get(Task, task_id)
                         if db_task:
-                            db_task.work_state = "failed"
-                            db_task.status = "todo"
-                            db_task.failure_reason = "Worker completed but produced no file changes"
-                            db_task.finished_at = None
+                            db_task.notes = (db_task.notes or "") + "\n[Note: Completed with no file changes]"
                             db_task.updated_at = datetime.now(timezone.utc)
                             await self.db.commit()
-                        return True  # Worker ran OK, but task reverted
                     
                 except Exception as e:
                     logger.error(f"[GIT] Git operations failed for {task_id_short}: {e}")

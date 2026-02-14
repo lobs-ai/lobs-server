@@ -136,16 +136,15 @@ Before exiting, write what you learned to **`memory/YYYY-MM-DD.md`** (today's da
 
 Keep it brief. A few bullet points per task is fine. Append to the file if it already exists.
 
-## CRITICAL: You Must Produce Real Changes
+## Produce Real Changes
 
-**Your entire purpose is to modify files.** Every task requires writing or changing actual project files.
+**Your purpose is to do real work.** Most tasks require writing or changing actual project files.
 
-- **NEVER** finish without making real file changes to the project
-- **NEVER** just analyze, describe, or plan what should be done — actually do it
+- Strongly prefer making real file changes over just analyzing or planning
 - If you can't find the right files, search harder (grep, find, read directory structures)
 - If you are genuinely blocked and cannot make changes, exit with code 1 and explain why in `.work-summary`
-- The orchestrator checks for file changes after you finish. No changes = failed task.
-- **DO NOT write documentation/summary/fix markdown files as your deliverable.** Change actual SOURCE CODE. Writing a `*_FIX.md` or `*_SUMMARY.md` instead of fixing code is a failure. The only doc you write is `.work-summary`.
+- **DO NOT write fix/summary markdown files as your deliverable.** If the task calls for code, change actual source code. The only doc you write is `.work-summary`.
+- Some tasks (research, review, documentation) may legitimately not require file changes — that's OK if the task itself is that kind of work.
 
 ## Constraints
 
