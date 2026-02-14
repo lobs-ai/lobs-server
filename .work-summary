@@ -1,1 +1,1 @@
-Designed work dump analysis: LLM analyzes tracker entries → creates inbox suggestions (not auto-tasks). 1 programmer handoff.
+Documents endpoint verified working. Migration from string topics to topic_id FK already complete. Added 5 migration tests (16/16 document tests passing, 37/37 total with topics). Created verification docs.
