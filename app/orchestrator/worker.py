@@ -252,7 +252,8 @@ class WorkerManager:
         Call Gateway API to spawn a new session.
         
         Uses cleanup=delete for auto-archival. Announces route to
-        suggester agent's sink session (haiku) to avoid burning opus tokens.
+        sink agent with a bogus ollama model — errors out instantly,
+        zero tokens consumed.
         
         Returns:
             Dict with runId and childSessionKey, or None on failure
@@ -264,7 +265,7 @@ class WorkerManager:
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
                         "tool": "sessions_spawn",
-                        "sessionKey": "agent:suggester:orchestrator-sink",
+                        "sessionKey": "agent:sink:orchestrator-sink",
                         "args": {
                             "task": task_prompt,
                             "agentId": agent_id,
