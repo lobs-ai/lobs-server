@@ -12,8 +12,10 @@ Key changes:
 import asyncio
 import logging
 import shutil
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Optional
+from difflib import SequenceMatcher
 
 from app.database import AsyncSessionLocal
 from app.orchestrator.scanner import Scanner
@@ -61,8 +63,8 @@ class OrchestratorEngine:
         self._pm_active = False
         self._pm_session_id: Optional[str] = None
         self._last_pm_proactive = 0.0
-        self._pm_proactive_interval = 3600  # PM proactive review every 60 minutes (was 10min, caused dupes)
-        self._recent_pm_tasks: set[str] = set()  # Track recently created task titles for dedup
+        self._pm_proactive_interval = 1800  # PM proactive review every 30 minutes
+        self._task_cooldowns: dict[str, datetime] = {}  # {normalized_title: last_created_timestamp} for dedup
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -342,6 +344,88 @@ class OrchestratorEngine:
 
         return activity
 
+    def _normalize_title(self, title: str) -> str:
+        """Normalize task title for fuzzy matching."""
+        # Convert to lowercase, remove special chars, collapse whitespace
+        normalized = re.sub(r'[^\w\s]', '', title.lower())
+        normalized = re.sub(r'\s+', ' ', normalized).strip()
+        return normalized
+
+    def _similarity_ratio(self, str1: str, str2: str) -> float:
+        """Calculate similarity ratio between two strings (0.0 to 1.0)."""
+        return SequenceMatcher(None, str1, str2).ratio()
+
+    async def _check_task_duplicate(
+        self, 
+        db, 
+        title: str, 
+        project_id: Optional[str] = None, 
+        agent: Optional[str] = None
+    ) -> tuple[bool, Optional[str]]:
+        """
+        Check if a similar task already exists or was recently created.
+        
+        Returns:
+            (is_duplicate, reason)
+        """
+        from sqlalchemy import select, or_, and_
+        from app.models import Task as TaskModel
+        
+        normalized_title = self._normalize_title(title)
+        
+        # 1. Fast path: Check in-memory cooldown
+        cooldown_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        if normalized_title in self._task_cooldowns:
+            last_created = self._task_cooldowns[normalized_title]
+            if last_created > cooldown_cutoff:
+                return (True, f"Cooldown: similar task created {(datetime.now(timezone.utc) - last_created).total_seconds() / 60:.0f}m ago")
+        
+        # 2. DB check: Active tasks (recent 24 hours)
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+        query = select(TaskModel).where(
+            TaskModel.status.in_(["active", "inbox"]),
+            TaskModel.created_at >= recent_cutoff
+        )
+        
+        result = await db.execute(query)
+        recent_tasks = result.scalars().all()
+        
+        # 3. Fuzzy match against recent task titles
+        for task in recent_tasks:
+            existing_normalized = self._normalize_title(task.title)
+            similarity = self._similarity_ratio(normalized_title, existing_normalized)
+            
+            if similarity >= 0.70:  # 70% similarity threshold
+                return (True, f"Similar to existing task: '{task.title}' ({similarity*100:.0f}% match)")
+        
+        # 4. Check for same project+agent combo in progress
+        if project_id and agent:
+            query = select(TaskModel).where(
+                and_(
+                    TaskModel.status == "active",
+                    TaskModel.work_state.in_(["not_started", "in_progress"]),
+                    TaskModel.project_id == project_id,
+                    TaskModel.agent == agent
+                )
+            )
+            result = await db.execute(query)
+            active_for_agent = result.scalars().first()
+            
+            if active_for_agent:
+                return (True, f"Agent '{agent}' already has active task on project '{project_id}': {active_for_agent.title}")
+        
+        return (False, None)
+
+    async def _record_task_creation(self, title: str) -> None:
+        """Record that a task was created (for cooldown tracking)."""
+        normalized_title = self._normalize_title(title)
+        self._task_cooldowns[normalized_title] = datetime.now(timezone.utc)
+        
+        # Cleanup old cooldowns (keep last 100)
+        if len(self._task_cooldowns) > 100:
+            sorted_items = sorted(self._task_cooldowns.items(), key=lambda x: x[1], reverse=True)
+            self._task_cooldowns = dict(sorted_items[:100])
+
     async def _spawn_pm_review(self, unrouted_tasks: list[dict[str, Any]], worker_manager: WorkerManager) -> None:
         """Spawn project-manager to review and route unrouted tasks."""
         # Limit to 10 tasks at a time to avoid overwhelming the PM
@@ -427,68 +511,134 @@ Route ALL tasks. Do not skip any."""
     async def _spawn_pm_proactive_review(self, worker_manager: WorkerManager) -> None:
         """Spawn project-manager for proactive system health review.
         
-        DEDUP: Checks existing active tasks before spawning to avoid duplicates.
-        Only spawns if there are actually stuck/failed tasks that need attention.
-        Does NOT create new autonomous improvement tasks — only triages existing work.
+        DEDUP: Passes all recent/active tasks to PM to avoid creating duplicates.
+        Uses tiered approval system (small/medium/large) for autonomous task creation.
         """
-        # Pre-check: only spawn if there are actual issues to fix
+        import time
+        current_time = time.time()
+        
+        # Guard: Skip if last PM review completed < 25 minutes ago
+        time_since_last = current_time - self._last_pm_proactive
+        if time_since_last < 1500:  # 25 minutes in seconds
+            logger.debug(
+                f"[ENGINE] PM proactive review skipped — too soon "
+                f"({time_since_last/60:.1f}min since last review)"
+            )
+            return
+        
+        # Gather recent task context for dedup
         async with self._session_factory() as check_db:
-            from sqlalchemy import select, func
+            from sqlalchemy import select, or_, and_
             from app.models import Task as TaskModel
             
-            # Count stuck tasks (in_progress for > 30 min with no worker)
-            stuck_result = await check_db.execute(
-                select(func.count()).select_from(TaskModel).where(
+            # Get all active + recently completed (24h) tasks
+            recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+            query = select(TaskModel).where(
+                or_(
                     TaskModel.status == "active",
-                    TaskModel.work_state == "in_progress",
+                    and_(
+                        TaskModel.status == "completed",
+                        TaskModel.updated_at >= recent_cutoff
+                    )
                 )
-            )
-            stuck_count = stuck_result.scalar() or 0
+            ).order_by(TaskModel.updated_at.desc())
             
-            # Count failed tasks
-            failed_result = await check_db.execute(
-                select(func.count()).select_from(TaskModel).where(
-                    TaskModel.status == "active",
-                    TaskModel.work_state == "failed",
+            result = await check_db.execute(query)
+            recent_tasks = result.scalars().all()
+            
+            # Build compact task summaries (title + status only, no full notes)
+            task_summaries = []
+            for t in recent_tasks[:50]:  # Limit to 50 most recent to save tokens
+                task_summaries.append(
+                    f"- {t.title} ({t.status}, {t.work_state or 'unknown'})"
                 )
-            )
-            failed_count = failed_result.scalar() or 0
             
-            if stuck_count == 0 and failed_count == 0:
-                logger.debug("[ENGINE] PM proactive review skipped — no stuck or failed tasks")
-                return
+            task_context = "\n".join(task_summaries) if task_summaries else "(No recent tasks)"
 
-        prompt = """## Proactive System Review (TRIAGE ONLY)
+        prompt = f"""## Proactive System Review
 
-You are being called for a periodic health check. Your job is to FIX EXISTING ISSUES only.
+You are the Project Manager for the lobs-server system. Your job is to review system health and create small maintenance tasks when needed.
 
-### ⚠️ CRITICAL RULES
-- **DO NOT create new tasks.** You are here to triage, not generate work.
-- **DO NOT create "improvement" tasks** (code quality, docs, tests, refactors).
-- **ONLY** fix stuck/failed tasks or escalate real problems to Rafe.
+### 🎯 Tiered Approval System
 
-### Step 1: Check Active Tasks
+**🟢 SMALL (Create directly)**
+- Bug fixes (clear, reproducible)
+- Missing documentation (specific gaps)
+- Test coverage for specific modules
+- Small refactors (< 50 lines)
+- Dependency updates (security/critical)
+
+**🟡 MEDIUM (Create with justification)**
+- Utility functions / helpers
+- Moderate refactors (50-200 lines)
+- Performance optimizations (specific bottlenecks)
+- Non-critical dependency updates
+
+**🔴 LARGE (Inbox item for Rafe)**
+- New features
+- UI/UX changes
+- Architecture changes
+- Breaking changes
+- Anything requiring design decisions
+
+### 📋 Recent/Active Tasks (DO NOT DUPLICATE)
+{task_context}
+
+### ⚠️ CRITICAL DEDUP RULES
+1. **Check the list above** before creating any task
+2. **DO NOT create** if a similar task exists (even if worded differently)
+3. **DO NOT create** "improvement" tasks without specific issues
+4. **DO NOT create** generic tasks (e.g., "improve code quality")
+
+### 🔍 Your Workflow
+
+**Step 1: Health Check**
 ```bash
-./scripts/lobs-tasks list
+./scripts/lobs-tasks list  # Check for stuck/failed tasks
+./scripts/lobs-status agents  # Check agent health
 ```
 
-### Step 2: Check Agent Health
+**Step 2: Triage Existing Issues**
+- Stuck tasks (in_progress with no worker) → Reset: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
+- Failed tasks → Reset if retryable
+- Repeated failures (3+ times) → Create inbox item
+
+**Step 3: Identify New Work (if any)**
+Look for:
+- Missing tests for new code
+- Undocumented APIs or modules
+- Known bugs from recent failures
+- Security updates flagged by dependabot
+
+**Step 4: Create Tasks (Tier-Appropriate)**
+For **🟢 SMALL** tasks only:
 ```bash
-./scripts/lobs-status agents
+./scripts/lobs-tasks create "specific task title" --project PROJECT_ID --notes "clear description" --agent AGENT_TYPE
 ```
 
-### What to Do
-1. **Stuck tasks** (in_progress with no active worker) → Reset: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
-2. **Failed tasks** → Reset if retryable: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
-3. **Repeated failures** (same task failed 3+ times) → `./scripts/lobs-inbox create "title" --content "details" --severity medium`
-4. **Everything looks fine** → Do nothing. Exit cleanly.
+For **🟡 MEDIUM** tasks:
+Create WITH justification explaining:
+- Why it's needed now
+- What specific problem it solves
+- Estimated scope
 
-### DO NOT
-- Create new tasks of any kind
-- Suggest improvements
-- Create documentation tasks
-- Create code review tasks
-- Create test tasks"""
+For **🔴 LARGE** tasks:
+```bash
+./scripts/lobs-inbox create "proposal title" --content "detailed proposal" --severity low
+```
+
+### 🚫 DO NOT CREATE
+- Duplicate tasks (check the list!)
+- Vague "improvement" tasks
+- Tasks without clear acceptance criteria
+- Code review tasks (those are triggered by completion)
+- Generic "update docs" (be specific about what needs docs)
+
+### 📊 Token Efficiency
+- Keep it concise
+- Only create tasks if there's actual work to do
+- Skip this review if everything looks healthy
+- Exit cleanly if no action needed"""
 
         try:
             spawn_result = await worker_manager._spawn_session(
