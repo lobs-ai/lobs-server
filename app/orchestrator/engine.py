@@ -365,7 +365,7 @@ You have {len(tasks_to_route)} task(s) that need agent assignment. Review each a
 ### Instructions
 For each task, call the lobs-server API to set the agent. Use the FULL task ID (not truncated):
 ```bash
-curl -s -X PATCH -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \\
+curl -s -X PUT -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \\
   -H "Content-Type: application/json" \\
   http://localhost:8000/api/tasks/FULL_TASK_ID_HERE \\
   -d '{{"agent": "AGENT_TYPE"}}'
