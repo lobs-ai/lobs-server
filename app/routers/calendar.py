@@ -8,7 +8,7 @@ from sqlalchemy import select, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import ScheduledEvent as ScheduledEventModel, Task as TaskModel
+from app.models import ScheduledEvent as ScheduledEventModel, Task as TaskModel, TrackerEntry as TrackerEntryModel
 from app.schemas import (
     ScheduledEventCreate,
     ScheduledEventUpdate,
@@ -23,6 +23,32 @@ from app.auth import require_auth
 router = APIRouter(prefix="/calendar", tags=["calendar"])
 
 
+def _tracker_deadline_to_event_response(entry: TrackerEntryModel) -> ScheduledEventResponse:
+    """Convert a TrackerEntry deadline into a ScheduledEventResponse for calendar display."""
+    return ScheduledEventResponse(
+        id=f"deadline-{entry.id}",  # Prefix to distinguish from regular events
+        title=entry.raw_text,
+        description=f"Category: {entry.category}" if entry.category else None,
+        event_type="deadline",
+        scheduled_at=entry.due_date,
+        end_at=None,
+        all_day=True,  # Deadlines are all-day events
+        recurrence_rule=None,
+        recurrence_end=None,
+        target_type="self",  # Deadlines are always for the user
+        target_agent=None,
+        task_project_id=None,
+        task_notes=entry.raw_text,
+        task_priority="normal",
+        status="pending",
+        last_fired_at=None,
+        next_fire_at=None,
+        fire_count=0,
+        created_at=entry.created_at,
+        updated_at=entry.updated_at,
+    )
+
+
 @router.post("/events", dependencies=[Depends(require_auth)])
 async def create_event(
     event: ScheduledEventCreate,
@@ -30,7 +56,7 @@ async def create_event(
 ) -> ScheduledEventResponse:
     """Create a new scheduled event."""
     # Validate event_type
-    valid_types = ["reminder", "task", "meeting", "lecture", "teaching", "office_hours", "lab", "discussion"]
+    valid_types = ["reminder", "task", "meeting", "lecture", "teaching", "office_hours", "lab", "discussion", "deadline"]
     if event.event_type not in valid_types:
         raise HTTPException(
             status_code=400,
@@ -258,11 +284,11 @@ async def get_upcoming_events(
     limit: int = Query(default=10, le=100),
     db: AsyncSession = Depends(get_db)
 ) -> list[ScheduledEventResponse]:
-    """Get the next N upcoming events."""
+    """Get the next N upcoming events (includes tracker deadlines)."""
     now = datetime.now(timezone.utc)
     
-    # Get pending events
-    query = (
+    # Get pending scheduled events
+    events_query = (
         select(ScheduledEventModel)
         .where(
             and_(
@@ -274,25 +300,50 @@ async def get_upcoming_events(
             )
         )
         .order_by(ScheduledEventModel.scheduled_at)
-        .limit(limit)
     )
     
-    result = await db.execute(query)
-    events = result.scalars().all()
+    events_result = await db.execute(events_query)
+    events = events_result.scalars().all()
     
-    return [ScheduledEventResponse.model_validate(e) for e in events]
+    # Get upcoming tracker deadlines
+    deadlines_query = (
+        select(TrackerEntryModel)
+        .where(
+            and_(
+                TrackerEntryModel.type == "deadline",
+                TrackerEntryModel.due_date.isnot(None),
+                TrackerEntryModel.due_date >= now
+            )
+        )
+        .order_by(TrackerEntryModel.due_date)
+    )
+    
+    deadlines_result = await db.execute(deadlines_query)
+    deadlines = deadlines_result.scalars().all()
+    
+    # Convert to responses
+    event_responses = [ScheduledEventResponse.model_validate(e) for e in events]
+    deadline_responses = [_tracker_deadline_to_event_response(d) for d in deadlines]
+    
+    # Merge and sort by scheduled_at
+    all_items = event_responses + deadline_responses
+    all_items.sort(key=lambda x: x.scheduled_at)
+    
+    # Return first N items
+    return all_items[:limit]
 
 
 @router.get("/today", dependencies=[Depends(require_auth)])
 async def get_today_events(
     db: AsyncSession = Depends(get_db)
 ) -> list[ScheduledEventResponse]:
-    """Get today's events."""
+    """Get today's events (includes tracker deadlines)."""
     now = datetime.now(timezone.utc)
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_day = start_of_day + timedelta(days=1)
     
-    query = (
+    # Get scheduled events for today
+    events_query = (
         select(ScheduledEventModel)
         .where(
             and_(
@@ -304,10 +355,35 @@ async def get_today_events(
         .order_by(ScheduledEventModel.scheduled_at)
     )
     
-    result = await db.execute(query)
-    events = result.scalars().all()
+    events_result = await db.execute(events_query)
+    events = events_result.scalars().all()
     
-    return [ScheduledEventResponse.model_validate(e) for e in events]
+    # Get tracker deadlines for today
+    deadlines_query = (
+        select(TrackerEntryModel)
+        .where(
+            and_(
+                TrackerEntryModel.type == "deadline",
+                TrackerEntryModel.due_date.isnot(None),
+                TrackerEntryModel.due_date >= start_of_day,
+                TrackerEntryModel.due_date < end_of_day
+            )
+        )
+        .order_by(TrackerEntryModel.due_date)
+    )
+    
+    deadlines_result = await db.execute(deadlines_query)
+    deadlines = deadlines_result.scalars().all()
+    
+    # Convert to responses
+    event_responses = [ScheduledEventResponse.model_validate(e) for e in events]
+    deadline_responses = [_tracker_deadline_to_event_response(d) for d in deadlines]
+    
+    # Merge and sort by scheduled_at
+    all_items = event_responses + deadline_responses
+    all_items.sort(key=lambda x: x.scheduled_at)
+    
+    return all_items
 
 
 @router.get("/range", dependencies=[Depends(require_auth)])
@@ -316,7 +392,7 @@ async def get_calendar_range(
     end_date: str = Query(..., description="End date (YYYY-MM-DD)"),
     db: AsyncSession = Depends(get_db)
 ) -> CalendarView:
-    """Get events in a date range, grouped by date. Expands recurring events."""
+    """Get events in a date range, grouped by date. Expands recurring events and includes tracker deadlines."""
     try:
         start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
         end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
@@ -360,15 +436,33 @@ async def get_calendar_range(
     result = await db.execute(recurring_query)
     recurring_events = result.scalars().all()
     
+    # Get tracker deadlines in range
+    deadlines_query = (
+        select(TrackerEntryModel)
+        .where(
+            and_(
+                TrackerEntryModel.type == "deadline",
+                TrackerEntryModel.due_date.isnot(None),
+                TrackerEntryModel.due_date >= start,
+                TrackerEntryModel.due_date <= end
+            )
+        )
+        .order_by(TrackerEntryModel.due_date)
+    )
+    
+    deadlines_result = await db.execute(deadlines_query)
+    deadlines = deadlines_result.scalars().all()
+    
     # Expand recurring events into the requested range
     expanded = []
     for event in recurring_events:
         occurrences = _expand_recurring_event(event, start, end)
         expanded.extend(occurrences)
     
-    # Combine one-off + expanded recurring
+    # Combine one-off + expanded recurring + deadlines
     all_responses = [ScheduledEventResponse.model_validate(e) for e in oneoff_events]
     all_responses.extend(expanded)
+    all_responses.extend([_tracker_deadline_to_event_response(d) for d in deadlines])
     
     # Group events by date
     events_by_date = defaultdict(list)
