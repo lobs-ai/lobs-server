@@ -85,6 +85,10 @@ class EventScheduler:
         Returns a summary of what was processed.
         """
         now = datetime.now(timezone.utc)
+        # SQLite stores datetimes as text. SQLAlchemy may bind with 'T' or ' '
+        # separator depending on the driver. Use isoformat string for consistent
+        # comparison so that string ordering works correctly in SQLite.
+        now_str = now.isoformat()
         
         # Find pending events that are due
         pending_query = (
@@ -92,7 +96,7 @@ class EventScheduler:
             .where(
                 and_(
                     ScheduledEvent.status == "pending",
-                    ScheduledEvent.scheduled_at <= now
+                    ScheduledEvent.scheduled_at <= now_str
                 )
             )
         )
@@ -103,7 +107,7 @@ class EventScheduler:
             .where(
                 and_(
                     ScheduledEvent.status == "recurring",
-                    ScheduledEvent.next_fire_at <= now
+                    ScheduledEvent.next_fire_at <= now_str
                 )
             )
         )
@@ -180,10 +184,40 @@ class EventScheduler:
                     f"[SCHEDULER] Event {event.id} is type 'task' but has no task_project_id"
                 )
             else:
+                # Guard: skip if an active task with the same title already exists
+                existing = await self.db.execute(
+                    select(Task).where(
+                        and_(
+                            Task.title == event.title,
+                            Task.project_id == event.task_project_id,
+                            Task.status.in_(["active", "todo"]),
+                        )
+                    )
+                )
+                if existing.scalars().first():
+                    logger.info(
+                        f"[SCHEDULER] Skipping duplicate task '{event.title}' — active instance exists"
+                    )
+                    # Still update fire metadata below
+                    event.last_fired_at = now
+                    event.fire_count += 1
+                    if event.recurrence_rule and event.status == "recurring":
+                        try:
+                            next_fire = compute_next_fire_time(event.recurrence_rule, now)
+                            if event.recurrence_end and next_fire > event.recurrence_end:
+                                event.status = "fired"
+                                event.next_fire_at = None
+                            else:
+                                event.next_fire_at = next_fire
+                        except Exception:
+                            pass
+                    await self.db.flush()
+                    return
+
                 task = Task(
                     id=str(uuid.uuid4()),
                     title=event.title,
-                    status="todo",
+                    status="active",
                     project_id=event.task_project_id,
                     notes=event.task_notes or event.description,
                     owner=event.target_type if event.target_type != "orchestrator" else None,
@@ -208,6 +242,8 @@ class EventScheduler:
                 logger.info(f"  Duration: {duration} minutes")
         
         # Update event status
+        # Note: SQLite stores datetimes as text. We normalize to ISO format
+        # with space separator for consistent string comparison.
         event.last_fired_at = now
         event.fire_count += 1
         
