@@ -47,7 +47,7 @@ class TaskBase(BaseModel):
     title: str
     status: str
     owner: Optional[str] = "lobs"
-    work_state: Optional[str] = None
+    work_state: Optional[str] = "not_started"
     review_state: Optional[str] = None
     project_id: Optional[str] = None
     notes: Optional[str] = None

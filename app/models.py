@@ -33,7 +33,7 @@ class Task(Base):
     title = Column(String, nullable=False)
     status = Column(String, nullable=False)  # inbox/active/completed/rejected/waiting_on
     owner = Column(String)  # lobs/rafe
-    work_state = Column(String)
+    work_state = Column(String, default="not_started")
     review_state = Column(String)
     project_id = Column(String, ForeignKey("projects.id"))
     notes = Column(Text)
