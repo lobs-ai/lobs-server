@@ -375,12 +375,9 @@ You have {len(tasks_to_route)} task(s) that need agent assignment. Review each a
 {chr(10).join(task_summaries)}
 
 ### Instructions
-For each task, call the lobs-server API to set the agent. Use the FULL task ID (not truncated):
+For each task, assign the agent using the script:
 ```bash
-curl -s -X PUT -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \\
-  -H "Content-Type: application/json" \\
-  http://localhost:8000/api/tasks/FULL_TASK_ID_HERE \\
-  -d '{{"agent": "AGENT_TYPE"}}'
+./scripts/lobs-tasks set-agent FULL_TASK_ID AGENT_TYPE
 ```
 
 Choose the agent based on:
@@ -434,60 +431,44 @@ You are being called for a periodic health check. Review the system and take act
 
 ### Step 1: Check System Status
 ```bash
-curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
-  http://localhost:8000/api/status/overview
+./scripts/lobs-status overview
 ```
 
 ### Step 2: Check Recent Activity
 ```bash
-curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
-  http://localhost:8000/api/status/activity
+./scripts/lobs-status activity
 ```
 
-### Step 3: Check for Stuck/Failed Tasks
+### Step 3: Check Agent Health
 ```bash
-curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
-  "http://localhost:8000/api/tasks?status=active&work_state=failed"
+./scripts/lobs-status agents
 ```
 
-### Step 4: Check Agent Health
+### Step 4: Check Active Tasks
 ```bash
-curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
-  http://localhost:8000/api/agents
+./scripts/lobs-tasks list
 ```
 
 ### What to Do
 Based on your review:
 
-1. **Stuck tasks** → Re-route to a different agent or reset work_state
-2. **Failed tasks with high retry count** → Analyze why, maybe re-scope or break down
+1. **Stuck tasks** → Re-route: `./scripts/lobs-tasks set-agent TASK_ID new_agent`
+2. **Failed tasks** → Reset: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
 3. **Idle system with no work** → Look for small improvements:
    - Code that could use better error handling
    - Missing tests
    - Documentation gaps
-   - Config improvements
    - Performance opportunities
-4. **Issues needing Rafe** → Create inbox item (POST /api/inbox)
+4. **Issues needing Rafe** → `./scripts/lobs-inbox create "title" --content "details" --severity medium`
 
 ### Approval Rules
-- 🟢 Small improvements (bug fixes, docs, tests): Create task with agent assigned
-- 🟡 Medium changes (refactors, new utilities): Create task with agent assigned (you're approving)
-- 🔴 Large changes (UI, features, architecture): Create inbox item for Rafe
+- 🟢 Small (bug fixes, docs, tests): Create task directly
+- 🟡 Medium (refactors, new utilities): Create task (you're approving)
+- 🔴 Large (UI, features, architecture): Create inbox item for Rafe
 
 ### Creating Tasks
 ```bash
-curl -s -X POST -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
-  -H "Content-Type: application/json" \
-  http://localhost:8000/api/tasks \
-  -d '{
-    "id": "UNIQUE-UUID-HERE",
-    "title": "Short title",
-    "project_id": "project-name",
-    "notes": "What and why",
-    "status": "active",
-    "work_state": "not_started",
-    "agent": "programmer"
-  }'
+./scripts/lobs-tasks create "Short title" --project project-name --agent programmer --notes "What and why"
 ```
 
 Be efficient. Only create tasks for genuinely useful work. Quality over quantity."""
