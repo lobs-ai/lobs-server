@@ -33,14 +33,15 @@ FastAPI App (app/main.py)
 | documents.py | /api/docs | Reports, research documents |
 | inbox.py | /api/inbox | Inbox items (proposals, suggestions) |
 | research.py | /api/research | Research requests and findings |
+| topics.py | /api/topics | Topics CRUD, document organization |
 | chat.py | /api/chat | Chat sessions, messages, WebSocket |
+| calendar.py | /api/calendar | Scheduled events, calendar views, deadlines |
 | status.py | /api/status | System health, activity, costs |
 | agents.py | /api/agents | Agent statuses and personality files |
 | worker.py | /api/worker | Worker status and history |
 | orchestrator.py | /api/orchestrator | Orchestrator control (pause/resume) |
 | tracker.py | /api/tracker | Project tracker items |
 | templates.py | /api/templates | Task templates |
-| reminders.py | /api/reminders | Reminders |
 | backup.py | /api/backup | DB backup management |
 | text_dumps.py | /api/text-dumps | Text dump storage |
 
@@ -58,12 +59,13 @@ FastAPI App (app/main.py)
 
 ## Orchestrator (app/orchestrator/)
 Built into the server — direct DB access, no HTTP overhead.
+
 | File | Purpose |
 |------|---------|
 | engine.py | Main polling loop, dispatches work |
-| worker.py | Spawns OpenClaw workers, manages lifecycle |
+| worker.py | Spawns workers via OpenClaw Gateway `/tools/invoke` API |
 | scanner.py | Finds eligible tasks |
-| router.py | Routes tasks to agent types |
+| router.py | Routes tasks to agent types (or project-manager for delegation) |
 | monitor.py | Basic health monitoring |
 | monitor_enhanced.py | Stuck task detection, auto-unblock, failure patterns |
 | escalation.py | Basic failure handling |
@@ -72,8 +74,11 @@ Built into the server — direct DB access, no HTTP overhead.
 | agent_tracker.py | Agent status tracking |
 | prompter.py | Builds task prompts with context |
 | config.py | Orchestrator settings |
+| registry.py | Agent template registry (loads agent configs from `agents/`) |
 
-**Graceful degradation**: If `openclaw` is not on PATH, orchestrator runs in monitoring-only mode (no worker spawning).
+**Worker spawning**: Uses OpenClaw Gateway `/tools/invoke` with `sessions_spawn` (not direct `openclaw` CLI).  
+**Agent delegation**: Tasks can be routed to `project-manager` agent for intelligent delegation and approval flows.  
+**Graceful degradation**: If Gateway is unreachable, orchestrator runs in monitoring-only mode.
 
 ## Services (app/services/)
 | File | Purpose |
@@ -106,10 +111,43 @@ Tests auto-create auth tokens via fixtures.
 - `scripts/migrate_from_git.py` — One-time migration from lobs-control
 - `scripts/seed_memories.py` — Seed memories from workspace files
 
+## Agent Scripts (bin/agent-scripts/)
+Shared utility scripts available to all agents during task execution. Included in agent workspace path.
+
+| Script | Purpose |
+|--------|---------|
+| `lobs-tasks` | Task management (list, get, update, complete) |
+| `lobs-status` | System status (overview, projects, agents) |
+| `lobs-inbox` | Inbox operations (list, create) |
+| `SKILLS-REFERENCE.md` | Quick reference for agent capabilities |
+
+**Usage**: Agents can call these scripts directly (e.g., `./scripts/lobs-tasks list-mine`). Scripts use the lobs-server API internally.
+
+## Agent Output Files
+Agents write files in their workspace that the orchestrator processes on finalization:
+
+| File | Purpose |
+|------|---------|
+| `.work-summary` | Short summary of work done (1-2 lines) or blocker message |
+| `.new-topics.json` | (Researcher only) Topic creation requests (auto-created topics) |
+| `.approval-request.json` | (Future) Structured approval requests |
+
+**Example `.new-topics.json`:**
+```json
+[
+  {
+    "title": "WebSocket Performance Patterns",
+    "description": "Research on WS connection pooling, message batching, backpressure"
+  }
+]
+```
+
 ## Common Edits
 - **Add endpoint**: Create router in `app/routers/`, add model/schema, register in `app/main.py`
-- **Add model field**: Update `app/models.py` + `app/schemas.py`, ALTER TABLE in DB
+- **Add model field**: Update `app/models.py` + `app/schemas.py`, run Alembic migration
 - **Add orchestrator feature**: Edit files in `app/orchestrator/`
+- **Add agent type**: Create template in `agents/<agent-name>/` with AGENTS.md + SOUL.md
+- **Add agent script**: Create in `bin/agent-scripts/`, make executable, document in SKILLS-REFERENCE.md
 
 ## Networking
 - Binds to `0.0.0.0:8000`

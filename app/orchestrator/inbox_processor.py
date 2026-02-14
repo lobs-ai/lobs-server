@@ -6,7 +6,7 @@ analyzes the response, and determines actions:
 - resolve: Mark thread as resolved (no further action needed)
 - pending: Mark as pending (acknowledged but not actionable yet)
 
-Uses LLM-based analysis via inbox-responder agent. Falls back to regex on failure.
+Uses LLM-based analysis via project-manager agent. Falls back to regex on failure.
 """
 
 import asyncio

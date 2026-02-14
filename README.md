@@ -3,10 +3,12 @@
 Central backend for [Lobs Mission Control](https://github.com/RafeSymonds/lobs-mission-control). FastAPI + SQLite REST API with built-in task orchestrator.
 
 ## Features
-- **Task & Project Management** — Full CRUD with kanban workflow
+- **Task & Project Management** — Full CRUD with kanban workflow, tiered approvals
 - **Memory System** — Second brain: daily notes, long-term memory, search, quick capture
+- **Topics/Knowledge** — Research workspaces with documents and auto-created topics
 - **Chat** — Real-time WebSocket messaging with OpenClaw agent bridge
-- **Orchestrator** — Automatic task routing, worker spawning, failure escalation
+- **Orchestrator** — Automatic task routing via project-manager, worker spawning, failure escalation
+- **Calendar Integration** — Events, recurring schedules, tracker deadline sync
 - **System Health** — Activity timeline, cost tracking, monitoring
 - **Auth** — Bearer token authentication on all endpoints
 
@@ -19,16 +21,27 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Generate an API token
-python scripts/generate_token.py my-token
+python bin/generate_token.py my-token
 
 # Run
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+./bin/run  # or: uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
+
+## Documentation
+
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — Development guide for contributors and AI agents
+- **[AGENTS.md](AGENTS.md)** — Complete API reference, architecture, development guide
+- **[docs/](docs/)** — Implementation guides, design documents, investigations
+  - [Testing Guide](docs/TESTING.md) — How to run and write tests
+  - [Known Issues](docs/KNOWN_ISSUES.md) — Technical debt and known problems
+  - [Topics Implementation](docs/TOPICS_IMPLEMENTATION.md) — Knowledge organization system
+  - [Document Lifecycle](docs/document-lifecycle-design.md) — Document state management
+  - See [docs/README.md](docs/README.md) for full index
 
 ## API
 All endpoints at `/api/*` require Bearer token (except `/api/health`).
 
-See [AGENTS.md](AGENTS.md) for full endpoint reference.
+See [AGENTS.md](AGENTS.md) for complete endpoint reference.
 
 ## Testing
 ```bash

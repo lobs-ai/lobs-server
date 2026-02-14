@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "inbox-responder", "project-manager"}
+VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "project-manager"}
 
 # Model tiers for different agent types
 AGENT_MODEL_MAP = {
@@ -16,7 +16,6 @@ AGENT_MODEL_MAP = {
     "architect": "anthropic/claude-opus-4-6",
     "reviewer": "anthropic/claude-sonnet-4-5",
     "writer": "anthropic/claude-sonnet-4-5",
-    "inbox-responder": "anthropic/claude-haiku-4-5",
     "suggester": "anthropic/claude-haiku-4-5",
     "project-manager": "anthropic/claude-sonnet-4-5",
 }
