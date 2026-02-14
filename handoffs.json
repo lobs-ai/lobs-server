@@ -1,10 +1,10 @@
 [
   {
     "to": "programmer",
-    "initiative": "researcher-topic-creation",
-    "title": "Process .new-topics.json in worker finalization + update researcher prompt",
-    "context": "See docs/researcher-topic-creation-design.md. Two changes: (1) In worker finalization (where .work-summary is read), also read .new-topics.json if present. For each entry, check for duplicate title (case-insensitive), create Topic with auto_created=True if new. (2) Update researcher prompt in prompter.py to include topic creation instructions and list existing topic titles for context.",
-    "acceptance": "1) Worker finalization reads .new-topics.json from workspace if present. 2) Creates topics with auto_created=True, generated UUID. 3) Case-insensitive duplicate title check — skips existing. 4) Missing/malformed file doesn't crash finalization. 5) Researcher prompt includes topic creation guidance with .new-topics.json format. 6) Researcher prompt includes list of existing topic titles (queried from DB). 7) Tests for topic creation, duplicate skip, missing file, and prompt content.",
-    "files": ["docs/researcher-topic-creation-design.md"]
+    "initiative": "work-dump-analysis",
+    "title": "EntryAnalyzer service + background analysis on tracker entry creation",
+    "context": "See docs/work-dump-analysis-design.md. Two parts: (1) Create app/services/entry_analyzer.py — LLM-powered analysis of tracker entries that creates inbox suggestions. Uses httpx to call OpenAI-compatible API, returns 0-3 suggestions, creates InboxItems. Gracefully skips if no API key. (2) Add `analyzed` bool to TrackerEntry model/schema. Wire background analysis into POST /tracker/entries via asyncio.create_task. Background task gets its own DB session.",
+    "acceptance": "1) app/services/entry_analyzer.py exists with EntryAnalyzer class. 2) LLM prompt analyzes entry text and returns structured suggestions. 3) Suggestions become InboxItems with clear source attribution. 4) analyzed field on TrackerEntry, set True after processing. 5) POST /tracker/entries fires background analysis (doesn't block response). 6) No API key configured → silent skip, no crash. 7) Background task uses its own DB session (not the request session). 8) Tests with mocked LLM for: suggestions created, empty response, no API key, analyzed flag.",
+    "files": ["docs/work-dump-analysis-design.md"]
   }
 ]
