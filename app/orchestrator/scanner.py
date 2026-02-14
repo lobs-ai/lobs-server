@@ -23,14 +23,14 @@ class Scanner:
         
         Returns tasks where:
         - status='active'
-        - work_state='not_started'
+        - work_state in ('not_started', 'ready')
         - agent is assigned (routed by PM)
         """
         try:
             result = await self.db.execute(
                 select(Task).where(
                     Task.status == "active",
-                    Task.work_state == "not_started",
+                    Task.work_state.in_(["not_started", "ready"]),
                     Task.agent != None,
                     Task.agent != ""
                 )
@@ -47,14 +47,14 @@ class Scanner:
         
         Returns tasks where:
         - status='active'
-        - work_state='not_started'
+        - work_state in ('not_started', 'ready')
         - agent is null or empty (needs PM routing)
         """
         try:
             result = await self.db.execute(
                 select(Task).where(
                     Task.status == "active",
-                    Task.work_state == "not_started",
+                    Task.work_state.in_(["not_started", "ready"]),
                     (Task.agent == None) | (Task.agent == "")
                 )
             )
