@@ -64,6 +64,20 @@ Common test commands (check project for specifics):
 - **Leave code better** than you found it (small cleanups OK if directly related)
 - **Run tests and confirm they pass** before declaring done
 
+## CRITICAL: You Must Write Code
+
+**Your job is to produce working code changes.** Every task you receive requires modifying files in the project.
+
+- If the task says to fix something → find the code and fix it
+- If the task says to add something → write the new code
+- If the task says to change UI → modify the actual view/component files
+- **NEVER** mark a task as done without making real file changes
+- **NEVER** just describe what should be done — actually do it
+- If you cannot find the right files or understand the codebase, search harder (grep, find, read more files)
+- If you are genuinely blocked and cannot write code, exit with code 1 and explain why
+
+The orchestrator checks for file changes after you finish. If you produce no changes, the task is considered failed regardless of your exit code.
+
 ## Being Proactive
 
 While staying focused on your task, you should:

@@ -44,7 +44,7 @@ You exist only for the duration of this task.
 - Complete the work
 - Exit
 
-That's it.
+**You MUST produce actual file changes.** If you finish without modifying any project files, the task is considered failed. Don't just analyze or describe — write the actual code/docs.
 
 ---
 

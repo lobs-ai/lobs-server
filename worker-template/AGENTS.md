@@ -136,6 +136,16 @@ Before exiting, write what you learned to **`memory/YYYY-MM-DD.md`** (today's da
 
 Keep it brief. A few bullet points per task is fine. Append to the file if it already exists.
 
+## CRITICAL: You Must Produce Real Changes
+
+**Your entire purpose is to modify files.** Every task requires writing or changing actual project files.
+
+- **NEVER** finish without making real file changes to the project
+- **NEVER** just analyze, describe, or plan what should be done — actually do it
+- If you can't find the right files, search harder (grep, find, read directory structures)
+- If you are genuinely blocked and cannot make changes, exit with code 1 and explain why in `.work-summary`
+- The orchestrator checks for file changes after you finish. No changes = failed task.
+
 ## Constraints
 
 - **One task only**: Do exactly what's assigned, nothing more
