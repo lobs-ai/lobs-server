@@ -61,7 +61,8 @@ class OrchestratorEngine:
         self._pm_active = False
         self._pm_session_id: Optional[str] = None
         self._last_pm_proactive = 0.0
-        self._pm_proactive_interval = 600  # PM proactive review every 10 minutes
+        self._pm_proactive_interval = 3600  # PM proactive review every 60 minutes (was 10min, caused dupes)
+        self._recent_pm_tasks: set[str] = set()  # Track recently created task titles for dedup
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -424,54 +425,70 @@ Route ALL tasks. Do not skip any."""
             self._pm_session_id = None
 
     async def _spawn_pm_proactive_review(self, worker_manager: WorkerManager) -> None:
-        """Spawn project-manager for proactive system health review."""
-        prompt = """## Proactive System Review
+        """Spawn project-manager for proactive system health review.
+        
+        DEDUP: Checks existing active tasks before spawning to avoid duplicates.
+        Only spawns if there are actually stuck/failed tasks that need attention.
+        Does NOT create new autonomous improvement tasks — only triages existing work.
+        """
+        # Pre-check: only spawn if there are actual issues to fix
+        async with self._session_factory() as check_db:
+            from sqlalchemy import select, func
+            from app.models import Task as TaskModel
+            
+            # Count stuck tasks (in_progress for > 30 min with no worker)
+            stuck_result = await check_db.execute(
+                select(func.count()).select_from(TaskModel).where(
+                    TaskModel.status == "active",
+                    TaskModel.work_state == "in_progress",
+                )
+            )
+            stuck_count = stuck_result.scalar() or 0
+            
+            # Count failed tasks
+            failed_result = await check_db.execute(
+                select(func.count()).select_from(TaskModel).where(
+                    TaskModel.status == "active",
+                    TaskModel.work_state == "failed",
+                )
+            )
+            failed_count = failed_result.scalar() or 0
+            
+            if stuck_count == 0 and failed_count == 0:
+                logger.debug("[ENGINE] PM proactive review skipped — no stuck or failed tasks")
+                return
 
-You are being called for a periodic health check. Review the system and take action.
+        prompt = """## Proactive System Review (TRIAGE ONLY)
 
-### Step 1: Check System Status
-```bash
-./scripts/lobs-status overview
-```
+You are being called for a periodic health check. Your job is to FIX EXISTING ISSUES only.
 
-### Step 2: Check Recent Activity
-```bash
-./scripts/lobs-status activity
-```
+### ⚠️ CRITICAL RULES
+- **DO NOT create new tasks.** You are here to triage, not generate work.
+- **DO NOT create "improvement" tasks** (code quality, docs, tests, refactors).
+- **ONLY** fix stuck/failed tasks or escalate real problems to Rafe.
 
-### Step 3: Check Agent Health
-```bash
-./scripts/lobs-status agents
-```
-
-### Step 4: Check Active Tasks
+### Step 1: Check Active Tasks
 ```bash
 ./scripts/lobs-tasks list
 ```
 
-### What to Do
-Based on your review:
-
-1. **Stuck tasks** → Re-route: `./scripts/lobs-tasks set-agent TASK_ID new_agent`
-2. **Failed tasks** → Reset: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
-3. **Idle system with no work** → Look for small improvements:
-   - Code that could use better error handling
-   - Missing tests
-   - Documentation gaps
-   - Performance opportunities
-4. **Issues needing Rafe** → `./scripts/lobs-inbox create "title" --content "details" --severity medium`
-
-### Approval Rules
-- 🟢 Small (bug fixes, docs, tests): Create task directly
-- 🟡 Medium (refactors, new utilities): Create task (you're approving)
-- 🔴 Large (UI, features, architecture): Create inbox item for Rafe
-
-### Creating Tasks
+### Step 2: Check Agent Health
 ```bash
-./scripts/lobs-tasks create "Short title" --project project-name --agent programmer --notes "What and why"
+./scripts/lobs-status agents
 ```
 
-Be efficient. Only create tasks for genuinely useful work. Quality over quantity."""
+### What to Do
+1. **Stuck tasks** (in_progress with no active worker) → Reset: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
+2. **Failed tasks** → Reset if retryable: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
+3. **Repeated failures** (same task failed 3+ times) → `./scripts/lobs-inbox create "title" --content "details" --severity medium`
+4. **Everything looks fine** → Do nothing. Exit cleanly.
+
+### DO NOT
+- Create new tasks of any kind
+- Suggest improvements
+- Create documentation tasks
+- Create code review tasks
+- Create test tasks"""
 
         try:
             spawn_result = await worker_manager._spawn_session(
