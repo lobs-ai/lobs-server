@@ -1,7 +1,7 @@
 """SQLAlchemy models for all database tables."""
 
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Boolean, Integer, Float, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, String, Text, Boolean, Integer, Float, DateTime, ForeignKey, JSON, UniqueConstraint
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -354,6 +354,9 @@ class ChatMessage(Base):
 class Memory(Base):
     """Memory model for second brain feature."""
     __tablename__ = "memories"
+    __table_args__ = (
+        UniqueConstraint("path", "agent", name="ix_memories_path_agent"),
+    )
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     path = Column(String, nullable=False, index=True)

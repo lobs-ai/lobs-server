@@ -178,6 +178,7 @@ async def sync_agent_memories(db: AsyncSession, agent: Optional[str] = None) -> 
     try:
         await db.flush()
     except Exception as e:
+        await db.rollback()
         stats["errors"].append(f"Database error: {str(e)}")
     
     return stats
