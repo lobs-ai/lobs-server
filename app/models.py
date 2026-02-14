@@ -164,6 +164,24 @@ class TrackerItem(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class TrackerEntry(Base):
+    """Work tracker entry model for personal productivity tracking."""
+    __tablename__ = "tracker_entries"
+    
+    id = Column(String, primary_key=True)
+    type = Column(String, nullable=False)  # work_session/deadline/note
+    raw_text = Column(Text, nullable=False)
+    
+    # Parsed fields
+    duration = Column(Integer)  # minutes
+    category = Column(String)
+    due_date = Column(DateTime)
+    estimated_minutes = Column(Integer)
+    
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class WorkerStatus(Base):
     """Worker status model (singleton)."""
     __tablename__ = "worker_status"

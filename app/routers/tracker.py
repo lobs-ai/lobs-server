@@ -1,12 +1,18 @@
 """Tracker API endpoints."""
 
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import TrackerItem as TrackerItemModel, ResearchRequest as ResearchRequestModel
-from app.schemas import TrackerItem, TrackerItemCreate, TrackerItemUpdate, ResearchRequest, ResearchRequestCreate, ResearchRequestUpdate
+from app.models import TrackerItem as TrackerItemModel, ResearchRequest as ResearchRequestModel, TrackerEntry as TrackerEntryModel
+from app.schemas import (
+    TrackerItem, TrackerItemCreate, TrackerItemUpdate, 
+    ResearchRequest, ResearchRequestCreate, ResearchRequestUpdate,
+    TrackerEntry, TrackerEntryCreate, TrackerEntryUpdate,
+    TrackerSummary, DeadlineEntry
+)
 from app.config import settings
 
 router = APIRouter(prefix="/tracker", tags=["tracker"])
@@ -205,3 +211,198 @@ async def delete_tracker_request(
     
     await db.delete(request)
     return {"status": "deleted"}
+
+
+# Personal Work Tracker endpoints
+@router.post("/entries")
+async def create_tracker_entry(
+    entry: TrackerEntryCreate,
+    db: AsyncSession = Depends(get_db)
+) -> TrackerEntry:
+    """Create a work tracker entry."""
+    db_entry = TrackerEntryModel(**entry.model_dump())
+    db.add(db_entry)
+    await db.flush()
+    await db.refresh(db_entry)
+    return TrackerEntry.model_validate(db_entry)
+
+
+@router.get("/entries")
+async def list_tracker_entries(
+    limit: int = settings.DEFAULT_LIMIT,
+    offset: int = 0,
+    type: str | None = None,
+    db: AsyncSession = Depends(get_db)
+) -> list[TrackerEntry]:
+    """List work tracker entries with optional type filter."""
+    query = select(TrackerEntryModel)
+    
+    if type:
+        query = query.where(TrackerEntryModel.type == type)
+    
+    query = query.order_by(TrackerEntryModel.created_at.desc()).offset(offset).limit(min(limit, settings.MAX_LIMIT))
+    result = await db.execute(query)
+    entries = result.scalars().all()
+    return [TrackerEntry.model_validate(e) for e in entries]
+
+
+@router.get("/entries/{entry_id}")
+async def get_tracker_entry(
+    entry_id: str,
+    db: AsyncSession = Depends(get_db)
+) -> TrackerEntry:
+    """Get a specific tracker entry."""
+    result = await db.execute(
+        select(TrackerEntryModel).where(TrackerEntryModel.id == entry_id)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Tracker entry not found")
+    return TrackerEntry.model_validate(entry)
+
+
+@router.put("/entries/{entry_id}")
+async def update_tracker_entry(
+    entry_id: str,
+    entry_update: TrackerEntryUpdate,
+    db: AsyncSession = Depends(get_db)
+) -> TrackerEntry:
+    """Update a tracker entry."""
+    result = await db.execute(
+        select(TrackerEntryModel).where(TrackerEntryModel.id == entry_id)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Tracker entry not found")
+    
+    update_data = entry_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(entry, key, value)
+    
+    await db.flush()
+    await db.refresh(entry)
+    return TrackerEntry.model_validate(entry)
+
+
+@router.delete("/entries/{entry_id}")
+async def delete_tracker_entry(
+    entry_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a tracker entry."""
+    result = await db.execute(
+        select(TrackerEntryModel).where(TrackerEntryModel.id == entry_id)
+    )
+    entry = result.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(status_code=404, detail="Tracker entry not found")
+    
+    await db.delete(entry)
+    return {"status": "deleted"}
+
+
+@router.get("/summary")
+async def get_tracker_summary(
+    db: AsyncSession = Depends(get_db)
+) -> TrackerSummary:
+    """Get work tracker summary statistics."""
+    # Total entries
+    total_result = await db.execute(select(func.count()).select_from(TrackerEntryModel))
+    total_entries = total_result.scalar() or 0
+    
+    # Work sessions count
+    work_sessions_result = await db.execute(
+        select(func.count()).select_from(TrackerEntryModel).where(TrackerEntryModel.type == "work_session")
+    )
+    work_sessions_count = work_sessions_result.scalar() or 0
+    
+    # Total minutes logged
+    total_minutes_result = await db.execute(
+        select(func.sum(TrackerEntryModel.duration)).where(TrackerEntryModel.type == "work_session")
+    )
+    total_minutes_logged = total_minutes_result.scalar() or 0
+    
+    # Deadlines count
+    deadlines_result = await db.execute(
+        select(func.count()).select_from(TrackerEntryModel).where(TrackerEntryModel.type == "deadline")
+    )
+    deadlines_count = deadlines_result.scalar() or 0
+    
+    # Upcoming deadlines (future only)
+    now = datetime.now(timezone.utc)
+    upcoming_result = await db.execute(
+        select(func.count()).select_from(TrackerEntryModel).where(
+            and_(
+                TrackerEntryModel.type == "deadline",
+                TrackerEntryModel.due_date >= now
+            )
+        )
+    )
+    upcoming_deadlines = upcoming_result.scalar() or 0
+    
+    # Notes count
+    notes_result = await db.execute(
+        select(func.count()).select_from(TrackerEntryModel).where(TrackerEntryModel.type == "note")
+    )
+    notes_count = notes_result.scalar() or 0
+    
+    # Categories count
+    categories_result = await db.execute(
+        select(TrackerEntryModel.category, func.count()).where(
+            TrackerEntryModel.category.isnot(None)
+        ).group_by(TrackerEntryModel.category)
+    )
+    categories = {cat: count for cat, count in categories_result.all()}
+    
+    # Last 7 days minutes
+    seven_days_ago = now - timedelta(days=7)
+    last_7_days_result = await db.execute(
+        select(func.sum(TrackerEntryModel.duration)).where(
+            and_(
+                TrackerEntryModel.type == "work_session",
+                TrackerEntryModel.created_at >= seven_days_ago
+            )
+        )
+    )
+    last_7_days_minutes = last_7_days_result.scalar() or 0
+    
+    return TrackerSummary(
+        total_entries=total_entries,
+        work_sessions_count=work_sessions_count,
+        total_minutes_logged=total_minutes_logged,
+        deadlines_count=deadlines_count,
+        upcoming_deadlines=upcoming_deadlines,
+        notes_count=notes_count,
+        categories=categories,
+        last_7_days_minutes=last_7_days_minutes
+    )
+
+
+@router.get("/deadlines")
+async def get_deadlines(
+    upcoming: bool = True,
+    limit: int = settings.DEFAULT_LIMIT,
+    db: AsyncSession = Depends(get_db)
+) -> list[DeadlineEntry]:
+    """Get deadline entries, optionally filtered to upcoming only."""
+    query = select(TrackerEntryModel).where(TrackerEntryModel.type == "deadline")
+    
+    if upcoming:
+        now = datetime.now(timezone.utc)
+        query = query.where(TrackerEntryModel.due_date >= now)
+    
+    query = query.order_by(TrackerEntryModel.due_date.asc()).limit(min(limit, settings.MAX_LIMIT))
+    result = await db.execute(query)
+    entries = result.scalars().all()
+    
+    return [
+        DeadlineEntry(
+            id=e.id,
+            raw_text=e.raw_text,
+            category=e.category,
+            due_date=e.due_date,
+            estimated_minutes=e.estimated_minutes,
+            created_at=e.created_at
+        )
+        for e in entries
+    ]

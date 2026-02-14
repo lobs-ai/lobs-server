@@ -322,6 +322,59 @@ class TrackerItem(TrackerItemBase):
     model_config = ConfigDict(from_attributes=True)
 
 
+# TrackerEntry schemas (personal work tracker)
+class TrackerEntryBase(BaseModel):
+    type: str  # work_session/deadline/note
+    raw_text: str
+    duration: Optional[int] = None  # minutes
+    category: Optional[str] = None
+    due_date: Optional[datetime] = None
+    estimated_minutes: Optional[int] = None
+
+
+class TrackerEntryCreate(TrackerEntryBase):
+    id: str
+
+
+class TrackerEntryUpdate(BaseModel):
+    type: Optional[str] = None
+    raw_text: Optional[str] = None
+    duration: Optional[int] = None
+    category: Optional[str] = None
+    due_date: Optional[datetime] = None
+    estimated_minutes: Optional[int] = None
+
+
+class TrackerEntry(TrackerEntryBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TrackerSummary(BaseModel):
+    """Summary statistics for work tracker."""
+    total_entries: int
+    work_sessions_count: int
+    total_minutes_logged: int
+    deadlines_count: int
+    upcoming_deadlines: int
+    notes_count: int
+    categories: dict[str, int]  # category -> count
+    last_7_days_minutes: int
+
+
+class DeadlineEntry(BaseModel):
+    """Deadline entry for listing."""
+    id: str
+    raw_text: str
+    category: Optional[str]
+    due_date: datetime
+    estimated_minutes: Optional[int]
+    created_at: datetime
+
+
 # WorkerStatus schemas
 class WorkerStatusBase(BaseModel):
     active: bool = False
