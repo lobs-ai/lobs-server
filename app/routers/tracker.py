@@ -6,12 +6,13 @@ from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import TrackerItem as TrackerItemModel, ResearchRequest as ResearchRequestModel, TrackerEntry as TrackerEntryModel
+from app.models import TrackerItem as TrackerItemModel, ResearchRequest as ResearchRequestModel, TrackerEntry as TrackerEntryModel, TrackerNotification as TrackerNotificationModel
 from app.schemas import (
     TrackerItem, TrackerItemCreate, TrackerItemUpdate, 
     ResearchRequest, ResearchRequestCreate, ResearchRequestUpdate,
     TrackerEntry, TrackerEntryCreate, TrackerEntryUpdate,
-    TrackerSummary, DeadlineEntry
+    TrackerSummary, DeadlineEntry,
+    TrackerNotification, TrackerNotificationCreate
 )
 from app.config import settings
 
@@ -446,3 +447,37 @@ async def upsert_analysis(
     await db.flush()
     await db.refresh(db_entry)
     return TrackerEntry.model_validate(db_entry)
+
+
+# Notification Deduplication endpoints
+@router.get("/notifications/check/{deadline_key}")
+async def check_notification(deadline_key: str, cooldown_hours: int = 12, db: AsyncSession = Depends(get_db)):
+    """Check if a notification was already sent for this deadline within cooldown."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=cooldown_hours)
+    result = await db.execute(
+        select(TrackerNotificationModel).where(
+            TrackerNotificationModel.deadline_key == deadline_key,
+            TrackerNotificationModel.sent_at >= cutoff
+        )
+    )
+    existing = result.scalar_one_or_none()
+    return {"already_sent": existing is not None, "last_sent": existing.sent_at.isoformat() if existing else None}
+
+
+@router.post("/notifications")
+async def record_notification(notification: TrackerNotificationCreate, db: AsyncSession = Depends(get_db)):
+    """Record that a notification was sent."""
+    db_notif = TrackerNotificationModel(**notification.model_dump())
+    db.add(db_notif)
+    await db.flush()
+    await db.refresh(db_notif)
+    return TrackerNotification.model_validate(db_notif)
+
+
+@router.get("/notifications")
+async def list_notifications(limit: int = 20, db: AsyncSession = Depends(get_db)):
+    """List recent notifications."""
+    result = await db.execute(
+        select(TrackerNotificationModel).order_by(TrackerNotificationModel.sent_at.desc()).limit(limit)
+    )
+    return [TrackerNotification.model_validate(n) for n in result.scalars().all()]

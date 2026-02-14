@@ -2,7 +2,8 @@
 
 from datetime import datetime, timezone
 from typing import Optional, Any
-from pydantic import BaseModel, ConfigDict, field_serializer
+from uuid import uuid4
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 # Project schemas
@@ -373,6 +374,25 @@ class DeadlineEntry(BaseModel):
     due_date: datetime
     estimated_minutes: Optional[int]
     created_at: datetime
+
+
+# TrackerNotification schemas
+class TrackerNotification(BaseModel):
+    id: str
+    deadline_key: str
+    notification_type: str
+    message_summary: str | None = None
+    sent_at: datetime
+    cooldown_hours: int = 12
+    model_config = ConfigDict(from_attributes=True)
+
+
+class TrackerNotificationCreate(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid4()))
+    deadline_key: str
+    notification_type: str
+    message_summary: str | None = None
+    cooldown_hours: int = 12
 
 
 # WorkerStatus schemas

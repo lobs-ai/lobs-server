@@ -182,6 +182,18 @@ class TrackerEntry(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class TrackerNotification(Base):
+    """Tracks sent notifications to prevent duplicates."""
+    __tablename__ = "tracker_notifications"
+    
+    id = Column(String, primary_key=True)
+    deadline_key = Column(String, nullable=False)  # e.g. "cse590-hw2-2026-02-16"
+    notification_type = Column(String, nullable=False)  # "deadline_reminder", "analysis_update", etc
+    message_summary = Column(Text)  # what was sent
+    sent_at = Column(DateTime, default=func.now(), nullable=False)
+    cooldown_hours = Column(Integer, default=12)  # don't re-notify within this window
+
+
 class WorkerStatus(Base):
     """Worker status model (singleton)."""
     __tablename__ = "worker_status"
