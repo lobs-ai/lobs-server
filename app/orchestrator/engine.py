@@ -57,9 +57,11 @@ class OrchestratorEngine:
         self._last_inbox_check = 0.0
         self._inbox_interval = 45  # Process inbox every 45 seconds
         self._last_pm_check = 0.0
-        self._pm_interval = 60  # PM review every 60 seconds max
+        self._pm_interval = 60  # PM routing review every 60 seconds max
         self._pm_active = False
         self._pm_session_id: Optional[str] = None
+        self._last_pm_proactive = 0.0
+        self._pm_proactive_interval = 600  # PM proactive review every 10 minutes
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -221,6 +223,16 @@ class OrchestratorEngine:
                     self._last_pm_check = current_time
                 except Exception as e:
                     logger.error(f"[ENGINE] PM coordination failed: {e}", exc_info=True)
+
+            # 3b. PM Proactive Review (every 10 minutes)
+            if (not self._paused and self._openclaw_available 
+                    and not self._pm_active
+                    and current_time - self._last_pm_proactive >= self._pm_proactive_interval):
+                try:
+                    await self._spawn_pm_proactive_review(worker_manager)
+                    self._last_pm_proactive = current_time
+                except Exception as e:
+                    logger.error(f"[ENGINE] PM proactive review failed: {e}", exc_info=True)
 
             # 4. Check active workers
             initial_active = len(worker_manager.active_workers)
@@ -413,6 +425,101 @@ Route ALL tasks. Do not skip any."""
             logger.error(f"[ENGINE] Failed to spawn PM review: {e}", exc_info=True)
             self._pm_active = False
             self._pm_session_id = None
+
+    async def _spawn_pm_proactive_review(self, worker_manager: WorkerManager) -> None:
+        """Spawn project-manager for proactive system health review."""
+        prompt = """## Proactive System Review
+
+You are being called for a periodic health check. Review the system and take action.
+
+### Step 1: Check System Status
+```bash
+curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
+  http://localhost:8000/api/status/overview
+```
+
+### Step 2: Check Recent Activity
+```bash
+curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
+  http://localhost:8000/api/status/activity
+```
+
+### Step 3: Check for Stuck/Failed Tasks
+```bash
+curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
+  "http://localhost:8000/api/tasks?status=active&work_state=failed"
+```
+
+### Step 4: Check Agent Health
+```bash
+curl -s -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
+  http://localhost:8000/api/agents
+```
+
+### What to Do
+Based on your review:
+
+1. **Stuck tasks** → Re-route to a different agent or reset work_state
+2. **Failed tasks with high retry count** → Analyze why, maybe re-scope or break down
+3. **Idle system with no work** → Look for small improvements:
+   - Code that could use better error handling
+   - Missing tests
+   - Documentation gaps
+   - Config improvements
+   - Performance opportunities
+4. **Issues needing Rafe** → Create inbox item (POST /api/inbox)
+
+### Approval Rules
+- 🟢 Small improvements (bug fixes, docs, tests): Create task with agent assigned
+- 🟡 Medium changes (refactors, new utilities): Create task with agent assigned (you're approving)
+- 🔴 Large changes (UI, features, architecture): Create inbox item for Rafe
+
+### Creating Tasks
+```bash
+curl -s -X POST -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \
+  -H "Content-Type: application/json" \
+  http://localhost:8000/api/tasks \
+  -d '{
+    "id": "UNIQUE-UUID-HERE",
+    "title": "Short title",
+    "project_id": "project-name",
+    "notes": "What and why",
+    "status": "active",
+    "work_state": "not_started",
+    "agent": "programmer"
+  }'
+```
+
+Be efficient. Only create tasks for genuinely useful work. Quality over quantity."""
+
+        try:
+            spawn_result = await worker_manager._spawn_session(
+                task_prompt=prompt,
+                agent_id="project-manager",
+                model="anthropic/claude-haiku-4-5",
+                label="pm-proactive-review"
+            )
+
+            if spawn_result:
+                self._pm_active = True
+                self._pm_session_id = spawn_result.get("runId")
+                logger.info(
+                    f"[ENGINE] Spawned PM for proactive review: {spawn_result['runId']}"
+                )
+
+                run_id = spawn_result["runId"]
+                async def reset_pm_status():
+                    await asyncio.sleep(150)
+                    if self._pm_session_id == run_id:
+                        self._pm_active = False
+                        self._pm_session_id = None
+
+                asyncio.create_task(reset_pm_status())
+            else:
+                logger.warning("[ENGINE] Failed to spawn PM proactive review")
+
+        except Exception as e:
+            logger.error(f"[ENGINE] Failed to spawn PM proactive review: {e}", exc_info=True)
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""

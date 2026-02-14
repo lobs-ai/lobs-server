@@ -1,1139 +1,688 @@
-# WebSocket Reconnection Handling: Best Practices Research
+# WebSocket Reconnection Handling: Best Practices & Implementation Strategies
 
-**Date:** February 14, 2026  
+**Research Date:** 2026-02-14  
 **Project:** lobs-server  
-**Context:** Real-time WebSocket messaging with OpenClaw agent bridge  
+**Context:** Real-time WebSocket messaging with OpenClaw agent bridge
 
 ---
 
 ## Executive Summary
 
-WebSocket connections are inherently unreliable and will disconnect due to network issues, server restarts, or client sleep modes. **Production applications must implement automatic reconnection** with exponential backoff to provide resilient real-time experiences.
+WebSocket connections are inherently fragile and will disconnect due to network issues, server restarts, client sleep/wake cycles, and other transient failures. Production-grade WebSocket implementations require robust auto-reconnection with exponential backoff and jitter to handle these scenarios gracefully.
 
 **Key Findings:**
-1. **Native WebSocket API does not include reconnection** - must be implemented at application level
-2. **Exponential backoff with jitter** is the industry standard (prevents thundering herd)
-3. **Connection state tracking** is critical for managing subscriptions and messages
-4. **Popular libraries** (reconnecting-websocket, centrifuge-js) provide battle-tested patterns
-
-**Recommended for lobs-server:**
-- Implement **client-side** reconnection wrapper (server stays simple)
-- Use exponential backoff: `min=1s, max=20s, factor=1.3, +jitter`
-- Add **connection state indicators** in UI
-- **Buffer messages** during disconnection for delivery on reconnect
+- **Exponential backoff with jitter** is the industry standard for reconnection
+- **Full jitter** provides best balance of reduced server load and reasonable reconnection time
+- **Maximum retry limits** prevent infinite reconnection loops
+- **Connection state recovery** is critical for seamless user experience
+- **Heartbeat/ping mechanisms** detect stale connections proactively
 
 ---
 
-## 1. WHY RECONNECTION IS ESSENTIAL
+## 1. Core Concepts
 
-### 1.1 Common Disconnect Scenarios
+### 1.1 Why WebSockets Disconnect
 
-**Network-related:**
-- Mobile device switches WiFi ↔ cellular
-- User enters tunnel, loses signal temporarily
-- Corporate firewall closes idle connections
-- Network proxy times out connection
+WebSocket connections can fail for numerous reasons ([javascript.info](https://javascript.info/websocket)):
 
-**Server-related:**
-- Server restart/deployment (planned maintenance)
-- Load balancer failover
-- Server crash/OOM
+- **Network failures**: WiFi/cellular handoff, packet loss, router issues
+- **Server-side issues**: Deployments, restarts, scaling events, load balancer timeouts
+- **Client-side issues**: Browser backgrounding, device sleep, mobile network changes
+- **Proxy/intermediary problems**: Corporate firewalls, NAT timeouts, CDN issues
+- **Ping timeout**: Server didn't send PING within `pingInterval + pingTimeout` ([Socket.io docs](https://socket.io/docs/v4/client-api/))
 
-**Client-related:**
-- Browser tab backgrounded (mobile Safari aggressive cleanup)
-- Device sleep mode
-- User navigates away and returns
+### 1.2 WebSocket Close Codes
 
-**Statistics:**
-- WebSocket connections drop **every 2-10 minutes** on mobile networks (source: centrifuge-js docs)
-- Desktop browsers: ~1-5% of connections drop per hour
+Understanding close codes helps determine reconnection strategy ([RFC 6455](https://www.rfc-editor.org/rfc/rfc6455), [javascript.info](https://javascript.info/websocket)):
 
-### 1.2 Current lobs-server Implementation
+| Code | Meaning | Auto-Reconnect? |
+|------|---------|----------------|
+| 1000 | Normal closure | ❌ No |
+| 1001 | Going away (server shutdown, page navigation) | ✅ Yes |
+| 1006 | Abnormal closure (no close frame) | ✅ Yes |
+| 1009 | Message too big | ❌ No |
+| 1011 | Unexpected server error | ✅ Yes |
 
-From `/Users/lobs/lobs-server/app/routers/chat.py`:
+**Rule of thumb**: Reconnect on network/transport errors (1001, 1006, 1011+), but NOT on intentional closes (1000) or protocol violations (1002-1009).
 
+---
+
+## 2. Exponential Backoff Strategies
+
+### 2.1 Why Exponential Backoff?
+
+When multiple clients disconnect simultaneously (e.g., during a server deployment), naive immediate reconnection causes a **thundering herd problem**: all clients hammer the recovering server at once, potentially causing cascading failures.
+
+Exponential backoff solves this by:
+- **Spreading load** over time
+- **Reducing contention** for server resources
+- **Allowing transient issues to resolve** before retry
+
+### 2.2 Backoff Algorithm Variants
+
+Based on [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) and [Wikipedia: Exponential Backoff](https://en.wikipedia.org/wiki/Exponential_backoff):
+
+#### **A. Simple Exponential Backoff (Not Recommended)**
+```javascript
+delay = min(maxDelay, baseDelay * (2 ** attemptNumber))
+```
+**Problem**: All clients retry at the same intervals, causing synchronized waves of requests.
+
+#### **B. Full Jitter (Recommended)**
+```javascript
+delay = random(0, min(maxDelay, baseDelay * (2 ** attemptNumber)))
+```
+**Benefits**:
+- **50% reduction** in total client work vs. no jitter (AWS study)
+- Randomization prevents synchronized retries
+- Best for high-contention scenarios
+
+#### **C. Equal Jitter**
+```javascript
+temp = min(maxDelay, baseDelay * (2 ** attemptNumber))
+delay = temp / 2 + random(0, temp / 2)
+```
+**Benefits**: Always maintains some minimum delay, preventing very short sleeps
+
+#### **D. Decorrelated Jitter**
+```javascript
+delay = min(maxDelay, random(baseDelay, prevDelay * 3))
+```
+**Benefits**: Bases next delay on previous, creating more natural spread
+
+### 2.3 Recommended Parameters
+
+Based on [reconnecting-websocket](https://github.com/joewalnes/reconnecting-websocket) and [Socket.io](https://socket.io/docs/v4/client-api/):
+
+| Parameter | Typical Value | Purpose |
+|-----------|---------------|---------|
+| `reconnectInterval` | 1000ms (1s) | Initial retry delay |
+| `maxReconnectInterval` | 30000ms (30s) | Cap on retry delay |
+| `reconnectDecay` | 1.5 | Exponential growth rate |
+| `timeoutInterval` | 2000ms (2s) | Connection attempt timeout |
+| `maxReconnectAttempts` | `null` (infinite) or `10-20` | Prevents infinite loops |
+
+**Example progression with decay=1.5**:
+1. 1s
+2. 1.5s  
+3. 2.25s
+4. 3.375s
+5. 5.06s
+6. 7.59s
+7. 11.39s
+8. 17.09s
+9. 25.63s
+10. 30s (capped)
+
+---
+
+## 3. Production Implementation Patterns
+
+### 3.1 Socket.io Approach
+
+Socket.io ([docs](https://socket.io/docs/v4/client-api/)) implements sophisticated reconnection with:
+
+**Auto-Reconnection Triggers** ([Event: 'disconnect'](https://socket.io/docs/v4/client-api/#event-disconnect)):
+- ✅ `ping timeout` - Server didn't send PING
+- ✅ `transport close` - Network disconnection
+- ✅ `transport error` - Connection error
+- ❌ `io server disconnect` - Server explicitly closed
+- ❌ `io client disconnect` - Client called `disconnect()`
+
+**Key Features**:
+- **Connection state recovery** (`socket.recovered`) - missed events replayed on reconnect
+- **Randomized delay** - `reconnectionDelay` with jitter
+- **Exponential growth** - up to `reconnectionDelayMax`
+- **Attempt counting** - fires `reconnect_attempt` event with count
+
+**Configuration**:
+```javascript
+const socket = io({
+  reconnection: true,
+  reconnectionDelay: 1000,        // starts at 1s
+  reconnectionDelayMax: 5000,     // caps at 5s  
+  reconnectionAttempts: Infinity, // never give up
+  randomizationFactor: 0.5        // jitter: ±50%
+});
+```
+
+### 3.2 reconnecting-websocket Library
+
+[reconnecting-websocket](https://github.com/joewalnes/reconnecting-websocket) provides a minimal decorator:
+
+```javascript
+const ws = new ReconnectingWebSocket('wss://example.com', null, {
+  reconnectInterval: 1000,
+  maxReconnectInterval: 30000,
+  reconnectDecay: 1.5,
+  timeoutInterval: 2000,
+  maxReconnectAttempts: null,
+  debug: false,
+  automaticOpen: true
+});
+
+// API-compatible with native WebSocket
+ws.addEventListener('open', () => console.log('Connected'));
+ws.addEventListener('message', (event) => console.log(event.data));
+```
+
+**Key Characteristics**:
+- Drop-in replacement for native WebSocket
+- Exponential backoff with configurable decay
+- Less than 600 bytes gzipped
+- No external dependencies
+
+### 3.3 Ably Real-time Client
+
+[Ably SDK](https://sdk.ably.com/builds/ably/specification/main/features/) demonstrates enterprise-grade reconnection:
+
+**Fallback Host Strategy**:
+- Primary domain: `main.realtime.ably.net`
+- Fallback domains: `main.{a,b,c,d,e}.fallback.ably-realtime.com`
+- Random fallback selection on failure
+- Per-fallback timeout tracking
+- Automatic retry across datacenters
+
+**Connection State Machine**:
+- `CONNECTING` → `CONNECTED` → `DISCONNECTED` → `SUSPENDED` → `FAILED`
+- Different reconnection logic per state
+- Exponential backoff increases with each state transition
+
+---
+
+## 4. Heartbeat & Connection Health
+
+### 4.1 Ping/Pong Mechanism
+
+WebSocket protocol includes built-in heartbeat ([RFC 6455](https://www.rfc-editor.org/rfc/rfc6455), [javascript.info](https://javascript.info/websocket)):
+
+**Server-side** (most common):
 ```python
-@router.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket, ...):
-    await manager.connect(websocket, session_key)
-    
+# FastAPI/Starlette WebSocket
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
     try:
         while True:
-            data = await websocket.receive_json()
-            # Handle messages...
-    
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, session_key)  # ✅ Clean disconnect
-    except Exception as e:
-        manager.disconnect(websocket, session_key)
-        print(f"WebSocket error: {e}")
-```
-
-**Current behavior:**
-- ✅ Server handles disconnect gracefully (cleanup)
-- ❌ No client-side reconnection logic
-- ❌ Messages sent during disconnect are lost
-- ❌ User must manually refresh page to reconnect
-
----
-
-## 2. EXPONENTIAL BACKOFF STRATEGIES
-
-### 2.1 The Problem: Thundering Herd
-
-When a server restarts, **all clients** attempt to reconnect simultaneously. If using fixed retry interval:
-
-```
-Server crashes at t=0
-1000 clients all retry at t=5s → server overload → crashes again
-1000 clients all retry at t=10s → server overload → crashes again
-(infinite loop)
-```
-
-**Solution:** Exponential backoff + jitter
-
-### 2.2 Industry Standard Pattern
-
-**Formula:**
-```javascript
-delay = min(maxDelay, minDelay * (growthFactor ** attemptNumber)) + random(0, jitter)
-```
-
-**Typical values (from production libraries):**
-
-| Library | Min Delay | Max Delay | Growth Factor | Jitter | Max Retries |
-|---------|-----------|-----------|---------------|--------|-------------|
-| **reconnecting-websocket** | 1s + rand(0-4s) | 10s | 1.3 | Built-in | ∞ |
-| **centrifuge-js** | 500ms | 20s | 1.3 | Yes | ∞ |
-| **Socket.io** | 1s | 5s | 2.0 | Yes | ∞ |
-
-**Why these values:**
-- **Min delay (500ms-1s):** Fast recovery for transient issues
-- **Max delay (10-20s):** Prevents indefinite waiting, but not too aggressive
-- **Growth factor (1.3-2.0):** 1.3 is gentler, 2.0 backs off faster
-- **Jitter:** Random 0-25% prevents synchronized retries
-- **Max retries (∞):** Network apps should always try to reconnect
-
-### 2.3 Exponential Backoff Example
-
-**Reconnection timeline with min=1s, max=20s, factor=1.3:**
-
-| Attempt | Base Delay | With Jitter (±25%) | Cumulative Time |
-|---------|------------|---------------------|-----------------|
-| 1 | 1.0s | 0.8s - 1.2s | ~1s |
-| 2 | 1.3s | 1.0s - 1.6s | ~2.5s |
-| 3 | 1.7s | 1.3s - 2.1s | ~4.5s |
-| 4 | 2.2s | 1.7s - 2.8s | ~7s |
-| 5 | 2.9s | 2.2s - 3.6s | ~10s |
-| 10 | 13.8s | 10.4s - 17.3s | ~70s |
-| 15+ | 20s (max) | 15s - 25s | Ongoing |
-
-**Observations:**
-- First reconnect happens quickly (~1s) - good UX
-- By attempt 10, backing off to max delay - prevents server overload
-- Jitter spreads reconnections over time window
-
----
-
-## 3. PRODUCTION PATTERNS & LIBRARIES
-
-### 3.1 Reconnecting-WebSocket Library
-
-**Source:** https://github.com/pladaria/reconnecting-websocket  
-**Downloads:** 1.5M/week on npm  
-**Battle-tested:** Used by major production apps  
-
-**Key Features:**
-```javascript
-import ReconnectingWebSocket from 'reconnecting-websocket';
-
-const options = {
-    minReconnectionDelay: 1000,      // 1s min
-    maxReconnectionDelay: 10000,     // 10s max
-    reconnectionDelayGrowFactor: 1.3, // Exponential factor
-    connectionTimeout: 4000,          // Timeout for connection attempt
-    maxRetries: Infinity,             // Never give up
-    maxEnqueuedMessages: Infinity,    // Buffer messages during disconnect
-    debug: false                      // Debug logging
-};
-
-const rws = new ReconnectingWebSocket('ws://localhost:8000/ws', [], options);
-
-// Drop-in replacement for WebSocket
-rws.addEventListener('open', () => {
-    console.log('Connected');
-});
-
-rws.addEventListener('message', (event) => {
-    console.log('Message:', event.data);
-});
-
-// Automatically reconnects on disconnect!
-```
-
-**How it works:**
-1. Wraps native WebSocket with reconnection logic
-2. Maintains WebSocket-compatible API (drop-in replacement)
-3. Queues messages sent during disconnect
-4. Delivers queued messages on reconnect
-5. Exposes `readyState` and `retryCount` for UI indicators
-
-**Advantages:**
-- ✅ Minimal code changes (wrapper pattern)
-- ✅ Handles message buffering automatically
-- ✅ Works in browser, React Native, Node.js
-- ✅ No dependencies
-
-**Disadvantages:**
-- ❌ No built-in authentication token refresh
-- ❌ No subscription state management (just transport layer)
-
-### 3.2 Centrifuge-JS Pattern
-
-**Source:** https://github.com/centrifugal/centrifuge-js  
-**Used by:** Centrifugo real-time messaging server  
-
-**Architecture:**
-```javascript
-import { Centrifuge } from 'centrifuge';
-
-const centrifuge = new Centrifuge('ws://localhost:8000/connection/websocket', {
-    minReconnectDelay: 500,           // 500ms min
-    maxReconnectDelay: 20000,         // 20s max
-    timeout: 5000,                    // Operation timeout
-    debug: true                       // Debug logging
-});
-
-// Connection lifecycle events
-centrifuge.on('connecting', (ctx) => {
-    console.log('Connecting...', ctx.code, ctx.reason);
-});
-
-centrifuge.on('connected', (ctx) => {
-    console.log('Connected');
-});
-
-centrifuge.on('disconnected', (ctx) => {
-    console.log('Disconnected:', ctx.code, ctx.reason);
-    // Will automatically reconnect
-});
-
-centrifuge.connect();
-```
-
-**Advanced features:**
-- **Connection state machine:** connecting → connected → disconnected
-- **Subscription management:** Separate connection vs. subscription states
-- **Token refresh:** Built-in JWT token refresh mechanism
-- **Multiple transports:** WebSocket, HTTP-streaming, SSE fallbacks
-- **Backpressure handling:** `bufferedAmount` checks before sending
-
-**Key insight from docs:**
-
-> "WebSocket by itself does not include reconnection, authentication and many other high-level mechanisms. So there are client/server libraries for that."  
-> — javascript.info/websocket
-
-### 3.3 Connection State Tracking
-
-**State machine (from centrifuge-js):**
-
-```
-                ┌─────────────┐
-                │ DISCONNECTED │
-                └──────┬───────┘
-                       │
-                  .connect()
-                       │
-                       ▼
-                ┌─────────────┐
-           ┌────│ CONNECTING  │◄────┐
-           │    └──────┬───────┘     │
-           │           │             │
-    (error)│   (success)            │(reconnect)
-           │           │             │
-           │           ▼             │
-           │    ┌─────────────┐     │
-           └───►│  CONNECTED  │─────┘
-                └─────────────┘
-                       │
-                  .disconnect()
-                       │
-                       ▼
-                ┌─────────────┐
-                │ DISCONNECTED │
-                └─────────────┘
-```
-
-**Why state tracking matters:**
-
-1. **UI indicators:** Show "Connecting...", "Connected", "Offline" badges
-2. **Message handling:** Queue messages during CONNECTING, send during CONNECTED
-3. **Subscription sync:** Re-subscribe to channels on reconnect
-4. **Error recovery:** Different logic for transient vs. permanent errors
-
----
-
-## 4. KEY DESIGN CONSIDERATIONS
-
-### 4.1 Message Buffering
-
-**Problem:** User sends message while disconnected. What happens?
-
-**Options:**
-
-| Approach | Pros | Cons | Use When |
-|----------|------|------|----------|
-| **Drop message** | Simple | Lost data, bad UX | Never |
-| **Show error** | User aware | Requires retry UI | Low-value messages |
-| **Queue & retry** | No data loss, good UX | Memory usage, complexity | Chat, notifications |
-| **Local storage** | Survives page reload | Stale on reconnect | Offline-first apps |
-
-**Recommendation for lobs-server:** **Queue & retry** (limited buffer)
-
-```javascript
-class WebSocketManager {
-    constructor() {
-        this.messageQueue = [];
-        this.maxQueueSize = 100;  // Prevent memory leak
-        this.state = 'disconnected';
-    }
-    
-    send(message) {
-        if (this.state === 'connected') {
-            this.ws.send(JSON.stringify(message));
-        } else {
-            // Queue for later delivery
-            if (this.messageQueue.length < this.maxQueueSize) {
-                this.messageQueue.push(message);
-            } else {
-                console.warn('Message queue full, dropping message');
-            }
-        }
-    }
-    
-    onReconnect() {
-        // Flush queued messages
-        while (this.messageQueue.length > 0) {
-            const msg = this.messageQueue.shift();
-            this.ws.send(JSON.stringify(msg));
-        }
-    }
-}
-```
-
-### 4.2 Heartbeat / Ping-Pong
-
-**Problem:** How to detect connection is dead without waiting for send() to fail?
-
-**Solution:** Server sends periodic ping, client responds with pong.
-
-**Implementation (server-side, FastAPI):**
-
-```python
-# In chat manager
-async def heartbeat_loop(self, websocket: WebSocket, session_key: str):
-    """Send ping every 30s to detect dead connections."""
-    try:
-        while True:
+            # Send ping every 30s
+            await websocket.send_text('{"type": "ping"}')
             await asyncio.sleep(30)
-            await websocket.send_json({"type": "ping"})
-            # If this fails, connection is dead
-    except:
-        self.disconnect(websocket, session_key)
-
-# In websocket_endpoint
-asyncio.create_task(heartbeat_loop(websocket, session_key))
+            
+            # Wait for pong with timeout
+            try:
+                msg = await asyncio.wait_for(
+                    websocket.receive_text(), 
+                    timeout=5.0
+                )
+            except asyncio.TimeoutError:
+                # No pong received, connection is stale
+                await websocket.close(code=1001)
+                break
+    except WebSocketDisconnect:
+        pass
 ```
 
-**Client response:**
-
+**Client-side**:
 ```javascript
 ws.addEventListener('message', (event) => {
-    const data = JSON.parse(event.data);
-    if (data.type === 'ping') {
-        ws.send(JSON.stringify({type: 'pong'}));
-    }
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'ping') {
+    ws.send(JSON.stringify({type: 'pong'}));
+  }
 });
 ```
 
-**Alternative:** Client detects missing pings
+### 4.2 Detecting Stale Connections
 
-```javascript
-let lastPingTime = Date.now();
+Per [Martin Fowler: HeartBeat pattern](https://martinfowler.com/articles/patterns-of-distributed-systems/heartbeat.html):
 
-ws.addEventListener('message', (event) => {
-    if (data.type === 'ping') {
-        lastPingTime = Date.now();
-    }
-});
+**Problem**: Network partitions can leave both ends thinking the connection is alive when it's actually dead.
 
-setInterval(() => {
-    if (Date.now() - lastPingTime > 60000) {
-        console.warn('No ping in 60s, assuming connection dead');
-        ws.close();  // Triggers reconnect
-    }
-}, 10000);
-```
+**Solution**: 
+- Server sends heartbeat at regular interval `T`
+- Client expects heartbeat within `T + timeout`
+- If no heartbeat received, client initiates reconnection
 
-**Centrifuge-js approach:**
-
-```javascript
-const centrifuge = new Centrifuge('ws://...', {
-    maxServerPingDelay: 10000  // Reconnect if no ping for 10s
-});
-```
-
-### 4.3 Connection Quality Indicators
-
-**Best practice:** Show connection state in UI
-
-**Examples:**
-
-**Subtle indicator (recommended):**
-```html
-<!-- Top-right corner badge -->
-<div class="connection-badge" :class="connectionState">
-    {{ connectionState === 'connected' ? '●' : connectionState }}
-</div>
-
-<style>
-.connection-badge.connected { color: green; }
-.connection-badge.connecting { color: orange; animation: pulse 1s infinite; }
-.connection-badge.disconnected { color: red; }
-</style>
-```
-
-**Prominent banner (for critical apps):**
-```html
-<div v-if="connectionState !== 'connected'" class="alert">
-    {{ connectionState === 'connecting' ? 'Reconnecting...' : 'Connection lost. Retrying...' }}
-</div>
-```
-
-**Message send feedback:**
-```javascript
-async function sendMessage(content) {
-    if (wsManager.state !== 'connected') {
-        // Show warning
-        showNotification('Message will be sent when connection restored', 'warning');
-    }
-    
-    await wsManager.send({type: 'send_message', content});
-}
-```
-
-### 4.4 Authentication Token Refresh
-
-**Challenge:** WebSocket connections are long-lived, but JWT tokens expire.
-
-**Pattern 1: Server sends token expiry warning**
-
-```python
-# Server sends before token expires
-await websocket.send_json({
-    "type": "token_expiring",
-    "expires_in": 300  # 5 minutes
-})
-```
-
-```javascript
-// Client refreshes token
-ws.addEventListener('message', async (event) => {
-    if (data.type === 'token_expiring') {
-        const newToken = await fetch('/api/refresh-token').then(r => r.json());
-        ws.send(JSON.stringify({type: 'update_token', token: newToken.token}));
-    }
-});
-```
-
-**Pattern 2: Client proactively refreshes**
-
-```javascript
-class WebSocketManager {
-    constructor(url, tokenProvider) {
-        this.tokenProvider = tokenProvider;  // async function
-        this.tokenRefreshInterval = 15 * 60 * 1000; // 15 min
-        
-        setInterval(async () => {
-            if (this.state === 'connected') {
-                const newToken = await this.tokenProvider();
-                this.send({type: 'update_token', token: newToken});
-            }
-        }, this.tokenRefreshInterval);
-    }
-}
-```
-
-**Pattern 3: Reconnect with fresh token (simplest)**
-
-```javascript
-// On reconnect, always fetch fresh token
-async function connect() {
-    const token = await fetch('/api/token').then(r => r.json());
-    const ws = new WebSocket(`ws://localhost:8000/ws?token=${token.token}`);
-    // ...
-}
-```
-
-**Recommendation for lobs-server:** **Pattern 3** (reconnect with fresh token)
-- Simplest implementation
-- Token refresh is implicit in reconnection
-- Current `/ws` endpoint already validates token on connect
-
-### 4.5 Subscription State Management
-
-**Challenge:** Client subscribed to channels. On reconnect, must re-establish subscriptions.
-
-**Bad pattern:**
-```javascript
-// ❌ User must manually re-subscribe after reconnect
-ws.addEventListener('open', () => {
-    ws.send(JSON.stringify({type: 'subscribe', channel: 'news'}));
-});
-```
-
-**Good pattern:**
-```javascript
-class SubscriptionManager {
-    constructor(ws) {
-        this.subscriptions = new Set();
-        
-        ws.addEventListener('open', () => {
-            // Auto-resubscribe to all channels
-            for (const channel of this.subscriptions) {
-                ws.send(JSON.stringify({type: 'subscribe', channel}));
-            }
-        });
-    }
-    
-    subscribe(channel) {
-        this.subscriptions.add(channel);
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({type: 'subscribe', channel}));
-        }
-        // If not open, will be sent on reconnect
-    }
-    
-    unsubscribe(channel) {
-        this.subscriptions.delete(channel);
-        ws.send(JSON.stringify({type: 'unsubscribe', channel}));
-    }
-}
-```
-
-**Current lobs-server pattern:**
-
-From `chat.py`:
-```python
-elif event_type == "switch_session":
-    new_session_key = data.get("session_key", "main")
-    manager.disconnect(websocket, session_key)
-    session_key = new_session_key
-    await manager.connect(websocket, session_key)
-```
-
-**Gap:** Client doesn't track which session it's on. On reconnect, defaults to `?session_key=main`.
-
-**Fix:** Client should remember current session and pass it on reconnect:
-
-```javascript
-let currentSessionKey = localStorage.getItem('lastSessionKey') || 'main';
-
-function connect() {
-    const ws = new WebSocket(`ws://localhost:8000/chat/ws?session_key=${currentSessionKey}&token=${token}`);
-    // ...
-}
-```
+**Recommended intervals**:
+- `pingInterval`: 25-30 seconds (less than typical proxy timeouts)
+- `pingTimeout`: 5-10 seconds (network RTT + processing)
+- Total window: ~35 seconds before declaring connection dead
 
 ---
 
-## 5. COMPARISON: RECONNECTION STRATEGIES
+## 5. Connection State Recovery
 
-### 5.1 Fixed Interval (Naive)
+### 5.1 The Problem
 
+When WebSocket disconnects and reconnects, naive implementations lose:
+- **In-flight messages** not yet sent
+- **Pending acknowledgements** 
+- **Events received during disconnect**
+- **Subscription state** on channels
+
+This creates poor UX: missing chat messages, duplicate notifications, inconsistent state.
+
+### 5.2 Solutions
+
+#### **A. Client-Side Message Queue**
 ```javascript
-function connect() {
-    const ws = new WebSocket('ws://localhost:8000/ws');
-    
-    ws.onclose = () => {
-        setTimeout(connect, 5000);  // Always retry after 5s
-    };
+class ResilientWebSocket {
+  constructor(url) {
+    this.url = url;
+    this.queue = [];
+    this.connected = false;
+    this.connect();
+  }
+  
+  send(data) {
+    if (this.connected) {
+      this.ws.send(data);
+    } else {
+      this.queue.push(data);
+    }
+  }
+  
+  onOpen() {
+    this.connected = true;
+    // Flush queued messages
+    while (this.queue.length > 0) {
+      this.ws.send(this.queue.shift());
+    }
+  }
 }
 ```
 
-**Pros:**
-- ✅ Simple (4 lines of code)
+#### **B. Server-Side State Reconciliation**
 
-**Cons:**
-- ❌ Thundering herd (all clients retry simultaneously)
-- ❌ No backoff (hammers server after crash)
-- ❌ No max delay (wastes resources if server down for hours)
-
-**Verdict:** ❌ Never use in production
-
-### 5.2 Exponential Backoff (No Jitter)
-
+Socket.io's connection recovery ([docs](https://socket.io/docs/v4/client-api/)):
 ```javascript
-let retryCount = 0;
-
-function connect() {
-    const ws = new WebSocket('ws://localhost:8000/ws');
-    
-    ws.onopen = () => { retryCount = 0; };  // Reset on success
-    
-    ws.onclose = () => {
-        const delay = Math.min(10000, 1000 * Math.pow(1.3, retryCount));
-        retryCount++;
-        setTimeout(connect, delay);
-    };
-}
-```
-
-**Pros:**
-- ✅ Backs off under load
-- ✅ Caps max delay
-
-**Cons:**
-- ❌ Still synchronized (all clients use same timing)
-- ❌ No jitter
-
-**Verdict:** ⚠️ Better than fixed, but not production-ready
-
-### 5.3 Exponential Backoff + Jitter (Recommended)
-
-```javascript
-let retryCount = 0;
-
-function connect() {
-    const ws = new WebSocket('ws://localhost:8000/ws');
-    
-    ws.onopen = () => { retryCount = 0; };
-    
-    ws.onclose = () => {
-        const baseDelay = Math.min(10000, 1000 * Math.pow(1.3, retryCount));
-        const jitter = baseDelay * 0.25 * Math.random();  // ±25% jitter
-        const delay = baseDelay + jitter;
-        
-        retryCount++;
-        setTimeout(connect, delay);
-    };
-}
-```
-
-**Pros:**
-- ✅ Backs off exponentially
-- ✅ Jitter prevents thundering herd
-- ✅ Production-ready
-
-**Cons:**
-- ❌ More complex (but still ~10 lines)
-
-**Verdict:** ✅ **Recommended for manual implementation**
-
-### 5.4 Library-based (reconnecting-websocket)
-
-```javascript
-import ReconnectingWebSocket from 'reconnecting-websocket';
-
-const rws = new ReconnectingWebSocket('ws://localhost:8000/ws', [], {
-    minReconnectionDelay: 1000,
-    maxReconnectionDelay: 10000,
-    reconnectionDelayGrowFactor: 1.3,
-    maxRetries: Infinity,
+socket.on('connect', () => {
+  if (socket.recovered) {
+    // Connection was recovered, server replayed missed events
+    console.log('State synchronized');
+  } else {
+    // New/unrecoverable session, must re-subscribe
+    socket.emit('subscribe', channels);
+  }
 });
-
-// Use like normal WebSocket
-rws.addEventListener('message', handleMessage);
 ```
 
-**Pros:**
-- ✅ Battle-tested (1.5M downloads/week)
-- ✅ Zero implementation complexity
-- ✅ Message buffering included
-- ✅ Works everywhere (browser, React Native, Node.js)
+Server tracks:
+- Last acknowledged message ID per client
+- Message buffer (time-limited)
+- On reconnect, replay messages since last ack
 
-**Cons:**
-- ❌ External dependency (but small: 5KB gzipped)
+#### **C. Idempotency Tokens**
 
-**Verdict:** ✅ **Recommended for most projects**
+For critical operations (payments, mutations):
+```javascript
+const idempotencyKey = generateUUID();
+ws.send(JSON.stringify({
+  type: 'order',
+  idempotencyKey,
+  data: orderData
+}));
+```
+
+Server deduplicates based on `idempotencyKey` within time window.
 
 ---
 
-## 6. RECOMMENDATIONS FOR LOBS-SERVER
+## 6. Implementation Example (Python/FastAPI)
 
-### 6.1 Short-term (Quick Win)
+### 6.1 Server-Side (FastAPI/Starlette)
 
-**Use `reconnecting-websocket` library on client side.**
+```python
+import asyncio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from datetime import datetime
+import random
 
-**Implementation:**
+app = FastAPI()
 
-1. Install library:
-```bash
-npm install reconnecting-websocket
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: list[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+    
+    def disconnect(self, websocket: WebSocket):
+        self.active_connections.remove(websocket)
+    
+    async def broadcast(self, message: str):
+        for connection in self.active_connections:
+            try:
+                await connection.send_text(message)
+            except:
+                pass
+
+manager = ConnectionManager()
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    
+    # Heartbeat task
+    async def heartbeat():
+        try:
+            while True:
+                await asyncio.sleep(25)  # Ping every 25s
+                await websocket.send_json({
+                    "type": "ping",
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+        except:
+            pass
+    
+    heartbeat_task = asyncio.create_task(heartbeat())
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            msg = json.loads(data)
+            
+            if msg.get('type') == 'pong':
+                # Heartbeat acknowledged
+                continue
+            
+            # Handle other messages
+            await manager.broadcast(data)
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+        heartbeat_task.cancel()
 ```
 
-2. Wrap existing WebSocket code:
+### 6.2 Client-Side (JavaScript)
 
 ```javascript
-// Before (in lobs-mission-control frontend)
-const ws = new WebSocket(`ws://localhost:8000/chat/ws?session_key=${sessionKey}&token=${token}`);
-
-// After
-import ReconnectingWebSocket from 'reconnecting-websocket';
-
-const options = {
-    minReconnectionDelay: 1000,
-    maxReconnectionDelay: 20000,
-    reconnectionDelayGrowFactor: 1.3,
-    connectionTimeout: 4000,
-    maxRetries: Infinity,
-    debug: import.meta.env.DEV  // Debug in dev mode
-};
-
-const rws = new ReconnectingWebSocket(
-    `ws://localhost:8000/chat/ws?session_key=${sessionKey}&token=${token}`,
-    [],
-    options
-);
-
-// Rest of code unchanged (API compatible)
-rws.addEventListener('open', () => { /* ... */ });
-rws.addEventListener('message', handleMessage);
-```
-
-3. Add connection state indicator:
-
-```vue
-<!-- In ChatView.vue -->
-<template>
-    <div class="connection-status" :class="connectionState">
-        <span v-if="connectionState === 'connecting'">Connecting...</span>
-        <span v-if="connectionState === 'connected'">●</span>
-        <span v-if="connectionState === 'closed'">Offline</span>
-    </div>
-</template>
-
-<script>
-export default {
-    data() {
-        return {
-            connectionState: 'connecting'  // 'connecting' | 'connected' | 'closed'
-        };
-    },
+class ResilientWebSocket extends EventTarget {
+  constructor(url, options = {}) {
+    super();
+    this.url = url;
+    this.options = {
+      reconnectInterval: 1000,
+      maxReconnectInterval: 30000,
+      reconnectDecay: 1.5,
+      timeoutInterval: 2000,
+      maxReconnectAttempts: null,
+      ...options
+    };
     
-    mounted() {
-        this.rws.addEventListener('open', () => {
-            this.connectionState = 'connected';
-        });
-        
-        this.rws.addEventListener('close', () => {
-            this.connectionState = 'closed';
-        });
-        
-        this.rws.addEventListener('connecting', () => {
-            this.connectionState = 'connecting';
-        });
-    }
-}
-</script>
-```
-
-**Effort:** 1-2 hours  
-**Impact:** Massive UX improvement, production-ready reconnection
-
-### 6.2 Medium-term (Better Token Handling)
-
-**Problem:** Token in query string is passed on every reconnect. If token expired, reconnect fails.
-
-**Solution:** Refresh token before reconnecting.
-
-```javascript
-import ReconnectingWebSocket from 'reconnecting-websocket';
-
-class WebSocketManager {
-    constructor(sessionKey, getTokenFn) {
-        this.sessionKey = sessionKey;
-        this.getTokenFn = getTokenFn;  // async () => string
-        this.connect();
+    this.reconnectAttempts = 0;
+    this.messageQueue = [];
+    this.shouldReconnect = true;
+    
+    this.connect();
+  }
+  
+  connect() {
+    this.ws = new WebSocket(this.url);
+    
+    this.ws.onopen = () => {
+      console.log('WebSocket connected');
+      this.reconnectAttempts = 0;
+      
+      // Flush message queue
+      while (this.messageQueue.length > 0) {
+        this.ws.send(this.messageQueue.shift());
+      }
+      
+      this.dispatchEvent(new Event('open'));
+    };
+    
+    this.ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      
+      // Handle heartbeat
+      if (msg.type === 'ping') {
+        this.ws.send(JSON.stringify({type: 'pong'}));
+        return;
+      }
+      
+      this.dispatchEvent(new MessageEvent('message', {data: event.data}));
+    };
+    
+    this.ws.onclose = (event) => {
+      console.log('WebSocket closed:', event.code, event.reason);
+      
+      if (this.shouldReconnect && this.shouldAttemptReconnect(event.code)) {
+        this.scheduleReconnect();
+      } else {
+        this.dispatchEvent(new CloseEvent('close', {
+          code: event.code,
+          reason: event.reason
+        }));
+      }
+    };
+    
+    this.ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+      this.dispatchEvent(new Event('error'));
+    };
+  }
+  
+  shouldAttemptReconnect(closeCode) {
+    // Don't reconnect on normal closure or protocol errors
+    if (closeCode === 1000) return false;
+    if (closeCode >= 1002 && closeCode <= 1009) return false;
+    
+    // Check attempt limit
+    const {maxReconnectAttempts} = this.options;
+    if (maxReconnectAttempts !== null && 
+        this.reconnectAttempts >= maxReconnectAttempts) {
+      return false;
     }
     
-    async connect() {
-        // Get fresh token before each connection attempt
-        const token = await this.getTokenFn();
-        
-        const url = `ws://localhost:8000/chat/ws?session_key=${this.sessionKey}&token=${token}`;
-        
-        this.rws = new ReconnectingWebSocket(url, [], {
-            minReconnectionDelay: 1000,
-            maxReconnectionDelay: 20000,
-            reconnectionDelayGrowFactor: 1.3,
-        });
-        
-        return this.rws;
+    return true;
+  }
+  
+  scheduleReconnect() {
+    this.reconnectAttempts++;
+    
+    const {
+      reconnectInterval,
+      maxReconnectInterval,
+      reconnectDecay
+    } = this.options;
+    
+    // Exponential backoff with full jitter
+    const maxDelay = Math.min(
+      maxReconnectInterval,
+      reconnectInterval * Math.pow(reconnectDecay, this.reconnectAttempts - 1)
+    );
+    const delay = Math.random() * maxDelay;
+    
+    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    
+    setTimeout(() => this.connect(), delay);
+  }
+  
+  send(data) {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(data);
+    } else {
+      // Queue messages while disconnected
+      this.messageQueue.push(data);
     }
+  }
+  
+  close() {
+    this.shouldReconnect = false;
+    this.ws.close(1000);
+  }
 }
 
 // Usage
-const wsManager = new WebSocketManager('main', async () => {
-    const response = await fetch('/api/token');
-    const data = await response.json();
-    return data.token;
+const ws = new ResilientWebSocket('wss://example.com/ws');
+
+ws.addEventListener('open', () => {
+  console.log('Connected!');
 });
+
+ws.addEventListener('message', (event) => {
+  console.log('Message:', event.data);
+});
+
+ws.send(JSON.stringify({type: 'chat', message: 'Hello'}));
 ```
-
-**Effort:** 2-3 hours  
-**Impact:** Never fails reconnect due to expired token
-
-### 6.3 Long-term (Advanced Features)
-
-**Heartbeat mechanism:**
-
-Add server-side ping every 30s to detect dead connections faster.
-
-```python
-# In chat manager
-async def start_heartbeat(self, websocket: WebSocket, session_key: str):
-    try:
-        while True:
-            await asyncio.sleep(30)
-            await manager.send_to_connection(websocket, {"type": "ping"})
-    except:
-        manager.disconnect(websocket, session_key)
-```
-
-**Message delivery guarantees:**
-
-Track message IDs and confirm delivery.
-
-```javascript
-class ReliableWebSocket {
-    constructor(url) {
-        this.pendingMessages = new Map();  // id -> {message, timestamp}
-        this.messageId = 0;
-        
-        this.rws = new ReconnectingWebSocket(url);
-        
-        this.rws.addEventListener('message', (event) => {
-            const data = JSON.parse(event.data);
-            if (data.type === 'ack') {
-                this.pendingMessages.delete(data.messageId);
-            }
-        });
-        
-        this.rws.addEventListener('open', () => {
-            // Resend pending messages
-            for (const [id, {message}] of this.pendingMessages) {
-                this.rws.send(JSON.stringify(message));
-            }
-        });
-    }
-    
-    send(message) {
-        const id = this.messageId++;
-        message.id = id;
-        
-        this.pendingMessages.set(id, {message, timestamp: Date.now()});
-        this.rws.send(JSON.stringify(message));
-        
-        // Clean up old pending messages (1 minute timeout)
-        setTimeout(() => {
-            if (this.pendingMessages.has(id)) {
-                console.warn('Message', id, 'never acknowledged');
-                this.pendingMessages.delete(id);
-            }
-        }, 60000);
-    }
-}
-```
-
-**Effort:** 1-2 days  
-**Impact:** Enterprise-grade reliability
 
 ---
 
-## 7. COMPARISON TABLE: RECONNECTION LIBRARIES
+## 7. Common Gotchas & Anti-Patterns
 
-| Library | Stars | Downloads/week | Size | Key Features |
-|---------|-------|----------------|------|--------------|
-| **reconnecting-websocket** | 4.2K | 1.5M | 5KB | Simple, WebSocket-compatible API |
-| **centrifuge-js** | 600 | 50K | 40KB | Full real-time framework, token refresh |
-| **Socket.io-client** | 10K | 10M | 50KB | Full framework, fallbacks (long-polling) |
-| **ws** (Node.js only) | 21K | 100M | N/A | Native WebSocket, no reconnect built-in |
-
-**Recommendation:** `reconnecting-websocket` for lobs-server
-- ✅ Lightweight (5KB vs 40-50KB for alternatives)
-- ✅ Drop-in replacement (minimal code changes)
-- ✅ Battle-tested (1.5M downloads/week)
-- ✅ No framework lock-in
-
----
-
-## 8. GOTCHAS & ANTI-PATTERNS
-
-### 8.1 ❌ Don't: Infinite Retries Without User Control
-
+### ❌ **Anti-Pattern 1: Immediate Reconnect on Every Failure**
 ```javascript
-// Bad: User stuck in infinite loop
 ws.onclose = () => {
-    setTimeout(connect, 5000);  // Forever, no escape
+  new WebSocket(url); // Instant retry → thundering herd!
 };
 ```
+**Fix**: Always use exponential backoff.
 
-**Better:**
+### ❌ **Anti-Pattern 2: No Reconnection Limit**
 ```javascript
-let manuallyDisconnected = false;
-
-function disconnect() {
-    manuallyDisconnected = true;
-    ws.close();
-}
-
-ws.onclose = () => {
-    if (!manuallyDisconnected) {
-        setTimeout(connect, 5000);
-    }
-};
-```
-
-### 8.2 ❌ Don't: Reconnect on Every Close Code
-
-```javascript
-ws.onclose = (event) => {
-    // Bad: Some close codes are permanent
-    setTimeout(connect, 1000);
-};
-```
-
-**Better:**
-```javascript
-ws.onclose = (event) => {
-    // 1000 = normal close
-    // 1001 = going away
-    // 1006 = abnormal close (network issue)
-    // 1008 = policy violation (bad auth)
-    
-    if (event.code === 1008) {
-        console.error('Authentication failed, not reconnecting');
-        return;  // Don't retry on auth failure
-    }
-    
-    setTimeout(connect, 1000);
-};
-```
-
-**Close codes reference (RFC 6455):**
-- 1000: Normal closure
-- 1001: Going away (page navigation)
-- 1006: Abnormal (network failure) - **should reconnect**
-- 1008: Policy violation (bad token) - **should NOT reconnect**
-- 1011: Server error - **should reconnect**
-
-### 8.3 ❌ Don't: Forget to Clean Up Timers
-
-```javascript
-let reconnectTimer;
-
-function connect() {
-    const ws = new WebSocket('ws://...');
-    
-    ws.onclose = () => {
-        reconnectTimer = setTimeout(connect, 1000);  // Memory leak!
-    };
-}
-
-// If user manually disconnects:
-function disconnect() {
-    ws.close();
-    clearTimeout(reconnectTimer);  // ✅ Clean up!
+// Infinite loop if server permanently rejects connection
+while (true) {
+  try { connect(); } catch { sleep(1000); }
 }
 ```
+**Fix**: Cap attempts or detect auth failures.
 
-### 8.4 ❌ Don't: Block Main Thread During Reconnect
-
+### ❌ **Anti-Pattern 3: Ignoring Close Codes**
 ```javascript
-// Bad: Blocks UI
-while (ws.readyState !== WebSocket.OPEN) {
-    connect();
-    sleep(1000);  // NEVER DO THIS
-}
+ws.onclose = () => scheduleReconnect(); // Reconnects even on 1000 (normal)
 ```
+**Fix**: Only reconnect on transient failures (see table in §1.2).
 
-**Better:**
+### ❌ **Anti-Pattern 4: No Heartbeat**
 ```javascript
-// Good: Async reconnection
-async function connectWithRetry() {
-    while (true) {
-        try {
-            await connect();
-            break;  // Success!
-        } catch (err) {
-            await sleep(1000);  // Non-blocking
-        }
-    }
-}
+// Connection looks alive but is actually severed by proxy
+ws.readyState === WebSocket.OPEN // → true, but no data flows
 ```
+**Fix**: Implement ping/pong with timeout (see §4.1).
+
+### ❌ **Anti-Pattern 5: Losing Messages on Disconnect**
+```javascript
+ws.send(data); // Fails silently if connection just closed
+```
+**Fix**: Queue messages and flush on reconnect (see §5.2).
 
 ---
 
-## 9. TESTING RECOMMENDATIONS
+## 8. Recommendations for lobs-server
 
-### 9.1 How to Test Reconnection Logic
+Based on the research findings and the project context (FastAPI + SQLite REST API with WebSocket chat):
 
-**Manual testing:**
+### 8.1 Server Implementation
 
-1. **Server restart:**
-   ```bash
-   # Terminal 1: Run server
-   uvicorn app.main:app
-   
-   # Terminal 2: Tail logs
-   # Open app in browser, send message
-   # Ctrl+C server → observe reconnect
-   # Restart server → message should be delivered
+1. **Ping/Pong Heartbeat**
+   - Send ping every 25 seconds
+   - Close connection if no pong received within 5 seconds
+   - Use JSON message format for cross-platform compatibility
+
+2. **Connection State Tracking**
+   - Store `client_id`, `last_seen`, `last_message_id`
+   - Implement message buffer (last 100 messages or 5 minute window)
+   - Enable connection recovery on reconnect
+
+3. **Graceful Shutdown**
+   - Send close code 1001 ("going away") during deployments
+   - Allows clients to immediately reconnect to healthy instance
+
+### 8.2 Client Implementation
+
+1. **Exponential Backoff with Full Jitter**
+   ```javascript
+   reconnectInterval: 1000,      // 1s initial
+   maxReconnectInterval: 30000,  // 30s cap
+   reconnectDecay: 1.5,          // growth rate
+   maxReconnectAttempts: 20      // prevent infinite loops
    ```
 
-2. **Network disconnect:**
-   - Chrome DevTools → Network tab → Offline checkbox
-   - Should see "Connecting..." indicator
-   - Uncheck Offline → should reconnect
+2. **Message Queuing**
+   - Queue messages while `readyState !== OPEN`
+   - Flush queue on `onopen` event
+   - Add message IDs for deduplication
 
-3. **Token expiration:**
-   - Generate token with 30s expiry
-   - Wait 31s
-   - Send message → should fail if no token refresh
+3. **Connection State UI**
+   ```javascript
+   // Show connection status to user
+   ws.addEventListener('open', () => showStatus('Connected'));
+   ws.addEventListener('close', () => showStatus('Reconnecting...'));
+   ws.addEventListener('error', () => showStatus('Connection error'));
+   ```
 
-**Automated testing:**
+4. **Heartbeat Response**
+   - Auto-respond to `{type: 'ping'}` with `{type: 'pong'}`
+   - Don't surface pings to application layer
 
-```javascript
-describe('WebSocket Reconnection', () => {
-    it('reconnects after server restart', async () => {
-        const ws = new ReconnectingWebSocket('ws://localhost:8000/ws');
-        
-        await waitForEvent(ws, 'open');
-        expect(ws.readyState).toBe(WebSocket.OPEN);
-        
-        // Simulate server crash
-        ws.close();
-        
-        // Should reconnect
-        await waitForEvent(ws, 'open');
-        expect(ws.readyState).toBe(WebSocket.OPEN);
-    });
-    
-    it('uses exponential backoff', async () => {
-        const ws = new ReconnectingWebSocket('ws://localhost:9999', [], {
-            minReconnectionDelay: 100,
-            maxReconnectionDelay: 1000,
-        });
-        
-        const delays = [];
-        ws.addEventListener('connecting', () => {
-            delays.push(Date.now());
-        });
-        
-        await sleep(5000);
-        
-        // Check delays are increasing
-        for (let i = 1; i < delays.length; i++) {
-            const delay = delays[i] - delays[i-1];
-            expect(delay).toBeGreaterThan(100);  // Min delay
-        }
-    });
-});
-```
+### 8.3 Testing Strategy
+
+1. **Network Resilience Tests**
+   - Simulate network disconnects (kill connection)
+   - Test server restarts (graceful close)
+   - Proxy timeout simulation (70+ second idle)
+
+2. **Load Tests**
+   - 100+ clients disconnecting simultaneously
+   - Verify backoff prevents thundering herd
+   - Monitor reconnection distribution
+
+3. **Message Integrity Tests**
+   - Send messages during disconnect
+   - Verify queuing and replay
+   - Test duplicate detection
 
 ---
 
-## 10. SUMMARY & ACTION ITEMS
+## 9. Further Reading
 
-### What We Learned
+### Primary Sources
+- **RFC 6455 - WebSocket Protocol**: https://www.rfc-editor.org/rfc/rfc6455
+- **MDN WebSocket API**: https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
+- **javascript.info WebSocket Tutorial**: https://javascript.info/websocket
 
-1. **WebSocket reconnection is not automatic** - must be implemented
-2. **Exponential backoff + jitter** is the industry standard
-3. **Production libraries exist** and are battle-tested
-4. **Connection state tracking** is essential for good UX
-5. **Message buffering** prevents data loss during disconnects
+### Exponential Backoff
+- **Wikipedia: Exponential Backoff**: https://en.wikipedia.org/wiki/Exponential_backoff
+- **AWS: Exponential Backoff and Jitter**: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
+- **Amazon Builders' Library - Timeouts, Retries, Backoff**: https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
 
-### Recommended Implementation Path
+### Production Implementations
+- **Socket.io Client API**: https://socket.io/docs/v4/client-api/
+- **reconnecting-websocket**: https://github.com/joewalnes/reconnecting-websocket
+- **Ably SDK Specification**: https://sdk.ably.com/builds/ably/specification/main/features/
 
-**Phase 1: Quick Win (1-2 hours)**
-- ✅ Install `reconnecting-websocket` npm package
-- ✅ Wrap existing WebSocket initialization
-- ✅ Add connection state indicator to UI
-
-**Phase 2: Token Refresh (2-3 hours)**
-- ✅ Implement `getToken` callback for fresh tokens on reconnect
-- ✅ Handle token expiry gracefully
-
-**Phase 3: Polish (4-6 hours)**
-- ✅ Add server-side heartbeat (ping/pong)
-- ✅ Implement message delivery confirmation (optional)
-- ✅ Add automated reconnection tests
-
-### Configuration Recommendations
-
-```javascript
-const reconnectOptions = {
-    // Fast initial retry
-    minReconnectionDelay: 1000,  // 1s
-    
-    // Cap exponential growth
-    maxReconnectionDelay: 20000,  // 20s
-    
-    // Gentle backoff
-    reconnectionDelayGrowFactor: 1.3,
-    
-    // Detect connection timeout
-    connectionTimeout: 4000,  // 4s
-    
-    // Never give up (network apps)
-    maxRetries: Infinity,
-    
-    // Buffer up to 100 messages
-    maxEnqueuedMessages: 100,
-    
-    // Debug in development
-    debug: process.env.NODE_ENV === 'development'
-};
-```
-
-### What NOT to Do
-
-- ❌ Fixed retry intervals (thundering herd)
-- ❌ No jitter (synchronized reconnects)
-- ❌ No max delay (resource waste)
-- ❌ Reconnect on auth failure (infinite loop)
-- ❌ Block main thread (bad UX)
+### Distributed Systems Patterns
+- **Martin Fowler: HeartBeat**: https://martinfowler.com/articles/patterns-of-distributed-systems/heartbeat.html
 
 ---
 
-## References
+## 10. Conclusion
 
-1. **reconnecting-websocket library**  
-   https://github.com/pladaria/reconnecting-websocket  
-   1.5M downloads/week, 4.2K stars
+WebSocket reconnection is a solved problem with well-established best practices:
 
-2. **Centrifuge-js library**  
-   https://github.com/centrifugal/centrifuge-js  
-   Production real-time framework with advanced reconnection
+✅ **Use exponential backoff with full jitter** (random delay from 0 to max)  
+✅ **Implement ping/pong heartbeats** (25-30s interval)  
+✅ **Respect close codes** (don't reconnect on normal closure)  
+✅ **Queue messages during disconnect** (flush on reconnect)  
+✅ **Limit reconnection attempts** (prevent infinite loops)  
+✅ **Show connection state to users** (transparency builds trust)
 
-3. **MDN WebSocket API**  
-   https://developer.mozilla.org/en-US/docs/Web/API/WebSocket  
-   Official WebSocket API documentation
+The cost of not implementing proper reconnection is poor user experience: lost messages, confused users, and support tickets. The cost of implementing it correctly is minimal—existing libraries like `reconnecting-websocket` and Socket.io do the heavy lifting.
 
-4. **JavaScript.info WebSocket Tutorial**  
-   https://javascript.info/websocket  
-   Comprehensive WebSocket guide with examples
+For **lobs-server**, I recommend:
+1. Adopt the full jitter exponential backoff pattern
+2. Implement server-side heartbeat (FastAPI WebSocket already supports this)
+3. Add client-side message queuing
+4. Track connection state for potential message replay
+5. Test thoroughly with network simulation tools
 
-5. **RFC 6455 - WebSocket Protocol**  
-   https://datatracker.ietf.org/doc/html/rfc6455  
-   Official WebSocket specification (close codes, etc.)
-
-6. **Current lobs-server implementation**  
-   `/Users/lobs/lobs-server/app/routers/chat.py`  
-   Existing WebSocket endpoint (FastAPI)
+**Next steps**: Review the code examples in §6 and adapt them to your FastAPI WebSocket implementation. Consider using Socket.io for automatic reconnection if building a browser-based client, or implement the `ResilientWebSocket` pattern for custom clients.
 
 ---
 
-**Last updated:** February 14, 2026  
-**Next steps:** Implement Phase 1 (reconnecting-websocket wrapper)
+**Document Version**: 1.0  
+**Last Updated**: 2026-02-14  
+**Author**: Researcher Agent  
+**Status**: Complete
