@@ -218,6 +218,7 @@ class EventScheduler:
                     id=str(uuid.uuid4()),
                     title=event.title,
                     status="active",
+                    work_state="not_started",
                     project_id=event.task_project_id,
                     notes=event.task_notes or event.description,
                     owner=event.target_type if event.target_type != "orchestrator" else None,
