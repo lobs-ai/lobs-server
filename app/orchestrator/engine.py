@@ -56,6 +56,10 @@ class OrchestratorEngine:
         self._scheduler_interval = 60  # Check events every 60 seconds
         self._last_inbox_check = 0.0
         self._inbox_interval = 45  # Process inbox every 45 seconds
+        self._last_pm_check = 0.0
+        self._pm_interval = 60  # PM review every 60 seconds max
+        self._pm_active = False
+        self._pm_session_id: Optional[str] = None
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -207,13 +211,24 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
                     await db.rollback()
 
-            # 3. Check active workers
+            # 3. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
+            if not self._paused and self._openclaw_available and current_time - self._last_pm_check >= self._pm_interval:
+                try:
+                    unrouted_tasks = await scanner.get_unrouted_tasks()
+                    if unrouted_tasks and not self._pm_active:
+                        await self._spawn_pm_review(unrouted_tasks, worker_manager)
+                        activity = True
+                    self._last_pm_check = current_time
+                except Exception as e:
+                    logger.error(f"[ENGINE] PM coordination failed: {e}", exc_info=True)
+
+            # 4. Check active workers
             initial_active = len(worker_manager.active_workers)
             await worker_manager.check_workers()
             if len(worker_manager.active_workers) != initial_active:
                 activity = True
 
-            # 4. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
+            # 5. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
             try:
                 monitor_result = await monitor_enhanced.run_full_check()
                 if monitor_result.get("issues_found", 0) > 0:
@@ -227,14 +242,14 @@ class OrchestratorEngine:
             except Exception as e:
                 logger.error(f"[ENGINE] Enhanced monitor check failed: {e}", exc_info=True)
 
-            # 5. Skip work assignment if paused or OpenClaw unavailable
+            # 6. Skip work assignment if paused or OpenClaw unavailable
             if self._paused:
                 return activity
             
             if not self._openclaw_available:
                 return activity
 
-            # 6. Scan for eligible tasks
+            # 7. Scan for eligible tasks (already routed by PM)
             eligible_tasks = await scanner.get_eligible_tasks()
             
             if not eligible_tasks:
@@ -249,7 +264,7 @@ class OrchestratorEngine:
                     f"{len(eligible_tasks)} task(s) queued."
                 )
 
-            # 7. Process eligible tasks
+            # 8. Process eligible tasks (spawn specialists for PM-routed tasks)
             for task_dict in eligible_tasks:
                 activity = True
                 
@@ -261,18 +276,25 @@ class OrchestratorEngine:
                     logger.warning("[ENGINE] Task missing ID or project_id, skipping")
                     continue
 
-                # Route task to agent
-                try:
-                    agent_type = self.router.route(task_dict)
-                    logger.info(
-                        f"[ENGINE] Routing task {task_id[:8]} to {agent_type} agent"
+                # Use PM-assigned agent or fallback to router (legacy support)
+                agent_type = task_dict.get("agent")
+                if not agent_type:
+                    # Fallback to regex-based router (shouldn't happen if PM is working)
+                    try:
+                        agent_type = self.router.route(task_dict)
+                        logger.info(
+                            f"[ENGINE] Fallback routing task {task_id[:8]} to {agent_type} agent"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"[ENGINE] Failed to route task {task_id[:8]}: {e}. "
+                            f"Using default (programmer)"
+                        )
+                        agent_type = "programmer"
+                else:
+                    logger.debug(
+                        f"[ENGINE] Task {task_id[:8]} already routed to {agent_type} (by PM)"
                     )
-                except Exception as e:
-                    logger.warning(
-                        f"[ENGINE] Failed to route task {task_id[:8]}: {e}. "
-                        f"Using default (programmer)"
-                    )
-                    agent_type = "programmer"
 
                 # Check circuit breaker before spawning
                 allowed, reason = await circuit_breaker.should_allow_spawn(
@@ -306,6 +328,90 @@ class OrchestratorEngine:
                     )
 
         return activity
+
+    async def _spawn_pm_review(self, unrouted_tasks: list[dict[str, Any]], worker_manager: WorkerManager) -> None:
+        """Spawn project-manager to review and route unrouted tasks."""
+        # Limit to 10 tasks at a time to avoid overwhelming the PM
+        tasks_to_route = unrouted_tasks[:10]
+        
+        task_summaries = []
+        for t in tasks_to_route:
+            task_id = t.get('id', 'unknown')
+            title = t.get('title', 'untitled')
+            project_id = t.get('project_id', 'unknown')
+            notes = t.get('notes') or ''
+            
+            task_summaries.append(
+                f"- [{task_id[:8]}] {title}\n"
+                f"  Project: {project_id}\n"
+                f"  Notes: {notes[:200]}"
+            )
+        
+        prompt = f"""## Task Routing Review
+
+You have {len(tasks_to_route)} task(s) that need agent assignment. Review each and assign the best agent.
+
+### Available Agents
+- programmer: Code implementation, bug fixes, features (sonnet)
+- researcher: Investigation, analysis, comparison (sonnet)
+- architect: System design, technical strategy (opus)
+- reviewer: Code review, quality checks (sonnet)
+- writer: Documentation, summaries, content (sonnet)
+
+### Tasks to Route
+{chr(10).join(task_summaries)}
+
+### Instructions
+For each task, call the lobs-server API to set the agent:
+```bash
+curl -s -X PATCH -H "Authorization: Bearer z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU" \\
+  -H "Content-Type: application/json" \\
+  http://localhost:8000/api/tasks/TASK_ID \\
+  -d '{{"agent": "AGENT_TYPE"}}'
+```
+
+Choose the agent based on:
+1. Task title and notes content
+2. Keywords (research → researcher, design → architect, etc.)
+3. Default to programmer if unclear
+
+Route ALL tasks. Do not skip any."""
+
+        try:
+            # Spawn PM via Gateway API (same mechanism as specialist workers)
+            spawn_result = await worker_manager._spawn_session(
+                task_prompt=prompt,
+                agent_id="project-manager",
+                model="anthropic/claude-haiku-4-5",  # Routing is lightweight
+                label="pm-task-routing"
+            )
+            
+            if not spawn_result:
+                logger.warning("[ENGINE] Failed to spawn PM review session")
+                return
+            
+            self._pm_active = True
+            self._pm_session_id = spawn_result.get("runId")
+            logger.info(
+                f"[ENGINE] Spawned PM for task routing: {spawn_result['runId']} "
+                f"({len(tasks_to_route)} task(s))"
+            )
+            
+            # Schedule PM status reset after timeout
+            run_id = spawn_result["runId"]
+            async def reset_pm_status():
+                await asyncio.sleep(150)  # 2.5 minutes
+                if self._pm_session_id == run_id:
+                    self._pm_active = False
+                    self._pm_session_id = None
+                    logger.debug(f"[ENGINE] PM session {run_id} timeout - resetting active flag")
+            
+            asyncio.create_task(reset_pm_status())
+            
+        except Exception as e:
+            logger.error(f"[ENGINE] Failed to spawn PM review: {e}", exc_info=True)
+            self._pm_active = False
+            self._pm_session_id = None
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""

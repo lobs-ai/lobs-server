@@ -24,12 +24,15 @@ class Scanner:
         Returns tasks where:
         - status='active'
         - work_state='not_started'
+        - agent is assigned (routed by PM)
         """
         try:
             result = await self.db.execute(
                 select(Task).where(
                     Task.status == "active",
-                    Task.work_state == "not_started"
+                    Task.work_state == "not_started",
+                    Task.agent != None,
+                    Task.agent != ""
                 )
             )
             tasks = result.scalars().all()
@@ -37,6 +40,29 @@ class Scanner:
             return [self._task_to_dict(task) for task in tasks]
         except Exception as e:
             logger.error(f"Failed to get eligible tasks: {e}")
+            return []
+
+    async def get_unrouted_tasks(self) -> list[dict[str, Any]]:
+        """Get tasks that need routing (no agent assigned, not started).
+        
+        Returns tasks where:
+        - status='active'
+        - work_state='not_started'
+        - agent is null or empty (needs PM routing)
+        """
+        try:
+            result = await self.db.execute(
+                select(Task).where(
+                    Task.status == "active",
+                    Task.work_state == "not_started",
+                    (Task.agent == None) | (Task.agent == "")
+                )
+            )
+            tasks = result.scalars().all()
+            
+            return [self._task_to_dict(task) for task in tasks]
+        except Exception as e:
+            logger.error(f"Failed to get unrouted tasks: {e}")
             return []
 
     async def get_projects(self) -> list[dict[str, Any]]:

@@ -229,7 +229,7 @@ class InboxProcessor:
             # Get available projects
             valid_projects = await self._get_valid_project_ids()
             
-            # Build payload for inbox-responder agent
+            # Build payload for project-manager agent
             payload = {
                 "inbox_item": {
                     "title": inbox_item.title,
@@ -295,14 +295,14 @@ class InboxProcessor:
     
     def _call_inbox_agent(self, payload_json: str, session_id: str) -> str | None:
         """
-        Call inbox-responder agent via subprocess.
+        Call project-manager agent via subprocess for inbox analysis.
         Synchronous method meant to be called in executor.
         """
         try:
             cmd = [
                 "openclaw",
                 "agent",
-                "--agent", "inbox-responder",
+                "--agent", "project-manager",
                 "--session-id", session_id,
                 "-m", payload_json,
                 "--json",
@@ -320,16 +320,16 @@ class InboxProcessor:
                 return result.stdout.strip()
             else:
                 logger.warning(
-                    f"[INBOX] inbox-responder agent failed with exit code {result.returncode}: "
+                    f"[INBOX] project-manager agent failed with exit code {result.returncode}: "
                     f"{result.stderr[:200]}"
                 )
                 return None
                 
         except subprocess.TimeoutExpired:
-            logger.warning("[INBOX] inbox-responder agent timed out")
+            logger.warning("[INBOX] project-manager agent timed out")
             return None
         except Exception as e:
-            logger.error(f"[INBOX] Error calling inbox-responder agent: {e}")
+            logger.error(f"[INBOX] Error calling project-manager agent: {e}")
             return None
 
     def _analyze_response_fallback(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
