@@ -30,7 +30,7 @@ async def create_event(
 ) -> ScheduledEventResponse:
     """Create a new scheduled event."""
     # Validate event_type
-    valid_types = ["reminder", "task", "meeting", "lecture", "teaching", "office_hours", "lab"]
+    valid_types = ["reminder", "task", "meeting", "lecture", "teaching", "office_hours", "lab", "discussion"]
     if event.event_type not in valid_types:
         raise HTTPException(
             status_code=400,
