@@ -8,6 +8,7 @@ Index of design documents, implementation notes, and research findings.
 - **[QUICKSTART.md](../QUICKSTART.md)** ✨ **NEW 2026-02-14** — Get started in 5 minutes
 - **[ARCHITECTURE.md](../ARCHITECTURE.md)** — System architecture, data flow, components (comprehensive overview) ✨ **Updated 2026-02-14**
 - **[AGENTS.md](../AGENTS.md)** — API reference, development guide, agent integration
+- **[CHANGELOG.md](../CHANGELOG.md)** ✨ **NEW 2026-02-14** — API changes and version history
 - **[README.md](../README.md)** — Project overview, quick start, setup
 - **[.env.example](../.env.example)** ✨ **NEW 2026-02-14** — Environment configuration reference
 
@@ -41,8 +42,11 @@ Index of design documents, implementation notes, and research findings.
 
 | Topic | Document |
 |-------|----------|
+| **Quick start** | [QUICKSTART.md](../QUICKSTART.md) ✨ |
 | **System architecture** | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | **API reference** | [AGENTS.md](../AGENTS.md) |
+| **API changelog** | [CHANGELOG.md](../CHANGELOG.md) ✨ |
+| **Environment config** | [.env.example](../.env.example) ✨ |
 | **Testing** | [TESTING.md](TESTING.md) |
 | **Known issues & limitations** | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
 | Project manager workflow | [project-manager-agent.md](project-manager-agent.md) |

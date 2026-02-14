@@ -8,7 +8,36 @@ This document tracks known issues, limitations, and technical debt across lobs-s
 
 ## Critical Issues
 
-### 1. WebSocket Test Infrastructure Broken
+### 1. /api/worker/activity Endpoint Lacks Test Coverage
+
+**Status:** 🔴 Critical — New endpoint untested  
+**Affected:** `app/routers/worker.py::list_activity`  
+**Impact:** Production endpoint deployed without verification
+
+**Problem:**
+The recently added `/api/worker/activity` endpoint (commit 0d7daa5, 2026-02-14) has zero test coverage:
+- Queries database and joins with tasks
+- Returns activity data with task details
+- Handles pagination
+- None of this is tested
+
+**Missing Tests:**
+- Empty activity list
+- Activity with task details
+- Activity with missing/null task_id
+- Pagination (limit/offset)
+- Response schema validation
+- Task fields properly populated (task_title, project_id, agent)
+
+**Workaround:** None — endpoint is in production use  
+**Fix Required:** Add comprehensive test coverage in `tests/test_worker.py`  
+**Priority:** Immediate — untested production code
+
+**Reference:** [Code Quality Review 2026-02-14](~/self-improvement/review-notes.md)
+
+---
+
+### 2. WebSocket Test Infrastructure Broken
 
 **Status:** 🔴 Critical — Tests failing  
 **Affected:** `tests/test_chat.py::TestChatWebSocket` (6 tests)  
@@ -38,7 +67,69 @@ AttributeError: 'AsyncClient' object has no attribute 'websocket_connect'
 
 ## Important Issues
 
-### 2. Pydantic v1 Configuration (Deprecated)
+### 1. WorkerRun Schema Missing summary Field
+
+**Status:** 🟡 Important — Schema incomplete  
+**Affected:** `app/schemas.py::WorkerRunBase`, `app/routers/worker.py::list_activity`  
+**Impact:** Activity endpoint may return incomplete data
+
+**Problem:**
+The `WorkerRun` model has a `summary` field (added 2026-02-14), but the Pydantic schema doesn't include it:
+
+```python
+# app/models.py (HAS the field)
+class WorkerRun(Base):
+    summary = Column(String)  # Work summary from .work-summary file
+
+# app/schemas.py (MISSING the field)
+class WorkerRunBase(BaseModel):
+    # summary field not defined
+```
+
+**Impact:**
+- `/api/worker/activity` endpoint doesn't return summaries
+- Frontend can't display agent work summaries
+- Schema validation may fail if summary is accessed
+
+**Workaround:** None  
+**Fix Required:** Add `summary: Optional[str] = None` to `WorkerRunBase` schema  
+**Priority:** Important — affects new feature functionality
+
+**Reference:** [Code Quality Review 2026-02-14](~/self-improvement/review-notes.md)
+
+---
+
+### 2. /api/worker/activity Has N+1 Query Problem
+
+**Status:** 🟡 Important — Performance issue  
+**Affected:** `app/routers/worker.py::list_activity`  
+**Impact:** Slow response times with many worker runs
+
+**Problem:**
+The activity endpoint currently fetches task details with separate queries:
+
+```python
+for run in runs:
+    if run.task_id:
+        task = await get_task(db, run.task_id)  # N separate queries
+```
+
+For 50 worker runs, this makes 50+ database queries instead of 1 join query.
+
+**Impact:**
+- Slow API responses with many runs
+- Unnecessary database load
+- Poor scalability
+
+**Workaround:** Use pagination (limit results)  
+**Fix Required:** Rewrite query to use SQL join instead of loop  
+**Priority:** Important — affects performance
+
+**Reference:** [Code Quality Review 2026-02-14](~/self-improvement/review-notes.md)
+
+---
+
+### 3. Pydantic v1 Configuration (Deprecated)
 
 **Status:** 🟡 Important — Works but deprecated  
 **Affected:** `app/routers/chat.py` (2 models)  

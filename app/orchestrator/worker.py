@@ -251,8 +251,8 @@ class WorkerManager:
         """
         Call Gateway API to spawn a new session.
         
-        Routes announce results to agent:main:orchestrator-sink (dead-letter)
-        to avoid wasting tokens. Uses cleanup=delete for auto-archival.
+        Uses cleanup=delete for auto-archival. No announce session —
+        orchestrator tracks completion directly via polling.
         
         Returns:
             Dict with runId and childSessionKey, or None on failure
@@ -264,7 +264,6 @@ class WorkerManager:
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
                         "tool": "sessions_spawn",
-                        "sessionKey": "agent:main:orchestrator-sink",
                         "args": {
                             "task": task_prompt,
                             "agentId": agent_id,

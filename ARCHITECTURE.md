@@ -204,8 +204,12 @@ programmer   researcher   (or other specialist)
 #### Worker (`worker.py`)
 - Spawns OpenClaw sessions via Gateway API
 - Passes task context to agents via prompt
-- Captures agent output and result summaries
+- Captures agent output and result summaries (via `sessions_history` API)
 - Updates database with worker status
+- **Concurrency:** Up to `MAX_WORKERS=5` can run in parallel
+  - **Agent locks removed** (2026-02-14) — Multiple instances of same agent type can run concurrently
+  - **Project locks enforced** — Prevents concurrent workers modifying same repository
+  - **Example:** 3 programmers + 2 writers can work simultaneously on different projects
 
 #### Monitor Enhanced (`monitor_enhanced.py`)
 - Detects stuck tasks (running too long)

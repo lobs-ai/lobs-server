@@ -35,6 +35,7 @@ python bin/generate_token.py my-token
 - **[QUICKSTART.md](QUICKSTART.md)** — Get up and running in 5 minutes
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — System architecture, data flow, key components
 - **[AGENTS.md](AGENTS.md)** — Complete API reference and development guide
+- **[CHANGELOG.md](CHANGELOG.md)** — API changes and version history
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — Development guide for contributors and AI agents
 - **[docs/](docs/)** — Implementation guides, design documents, investigations
   - [Testing Guide](docs/TESTING.md) — How to run and write tests
