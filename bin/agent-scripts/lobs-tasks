@@ -1,0 +1,145 @@
+#!/bin/bash
+# lobs-tasks — Simple task management for agents
+# Usage:
+#   lobs-tasks list                          # List active tasks
+#   lobs-tasks list-mine                     # List tasks assigned to me (uses $AGENT_TYPE)
+#   lobs-tasks get <task-id>                 # Get task details
+#   lobs-tasks create <title> [--project <id>] [--agent <type>] [--notes <text>]
+#   lobs-tasks set-agent <task-id> <agent>   # Assign agent to task
+#   lobs-tasks set-status <task-id> <status> # Set status (active/completed/todo)
+#   lobs-tasks set-work-state <task-id> <ws> # Set work_state (not_started/ready/in_progress/completed/failed/blocked)
+#   lobs-tasks complete <task-id>            # Mark task as completed
+#   lobs-tasks fail <task-id> [reason]       # Mark task as failed
+#   lobs-tasks block <task-id> [reason]      # Mark task as blocked
+
+set -euo pipefail
+API="http://localhost:8000"
+TOKEN="z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU"
+AUTH="Authorization: Bearer $TOKEN"
+CT="Content-Type: application/json"
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  list)
+    curl -s -H "$AUTH" "$API/api/tasks?status=active" | python3 -c "
+import json,sys
+tasks=json.load(sys.stdin)
+if isinstance(tasks,list):
+    for t in tasks:
+        ws=t.get('work_state') or '?'
+        agent=t.get('agent') or 'unrouted'
+        print(f'  [{ws:15}] [{agent:12}] {t[\"id\"][:12]}  {t[\"title\"][:55]}')
+    print(f'Total: {len(tasks)}')
+"
+    ;;
+  list-mine)
+    agent="${AGENT_TYPE:-unknown}"
+    curl -s -H "$AUTH" "$API/api/tasks?status=active" | python3 -c "
+import json,sys
+agent='$agent'
+tasks=json.load(sys.stdin)
+if isinstance(tasks,list):
+    mine=[t for t in tasks if t.get('agent')==agent]
+    for t in mine:
+        ws=t.get('work_state','?')
+        print(f'  [{ws:15}] {t[\"id\"][:12]}  {t[\"title\"][:55]}')
+    print(f'Total: {len(mine)} (agent={agent})')
+"
+    ;;
+  get)
+    curl -s -H "$AUTH" "$API/api/tasks/$1" | python3 -m json.tool
+    ;;
+  create)
+    title="$1"; shift
+    project="self-improvement"
+    agent=""
+    notes=""
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --project) project="$2"; shift 2;;
+        --agent) agent="$2"; shift 2;;
+        --notes) notes="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    id=$(python3 -c "import uuid; print(str(uuid.uuid4()).upper())")
+    body="{\"id\":\"$id\",\"title\":\"$title\",\"project_id\":\"$project\",\"status\":\"active\",\"work_state\":\"not_started\""
+    [[ -n "$agent" ]] && body="$body,\"agent\":\"$agent\""
+    [[ -n "$notes" ]] && body="$body,\"notes\":$(python3 -c "import json; print(json.dumps('$notes'))")"
+    body="$body}"
+    curl -s -X POST -H "$AUTH" -H "$CT" "$API/api/tasks" -d "$body" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Created: {r.get(\"id\",\"?\")} — {r.get(\"title\",\"?\")}')
+"
+    ;;
+  set-agent)
+    curl -s -X PUT -H "$AUTH" -H "$CT" "$API/api/tasks/$1" -d "{\"agent\":\"$2\"}" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Updated {r.get(\"id\",\"?\")}: agent={r.get(\"agent\",\"?\")}')
+"
+    ;;
+  set-status)
+    curl -s -X PATCH -H "$AUTH" -H "$CT" "$API/api/tasks/$1/status" -d "{\"status\":\"$2\"}" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Updated {r.get(\"id\",\"?\")}: status={r.get(\"status\",\"?\")}')
+"
+    ;;
+  set-work-state)
+    curl -s -X PATCH -H "$AUTH" -H "$CT" "$API/api/tasks/$1/work-state" -d "{\"work_state\":\"$2\"}" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Updated {r.get(\"id\",\"?\")}: work_state={r.get(\"work_state\",\"?\")}')
+"
+    ;;
+  complete)
+    curl -s -X PATCH -H "$AUTH" -H "$CT" "$API/api/tasks/$1/status" -d '{"status":"completed"}' > /dev/null
+    curl -s -X PATCH -H "$AUTH" -H "$CT" "$API/api/tasks/$1/work-state" -d '{"work_state":"completed"}' | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Completed: {r.get(\"id\",\"?\")} — {r.get(\"title\",\"?\")}')
+"
+    ;;
+  fail)
+    reason="${1:-}"
+    task_id="${1:-}"
+    shift 2>/dev/null || true
+    reason="${*:-unknown failure}"
+    curl -s -X PATCH -H "$AUTH" -H "$CT" "$API/api/tasks/$task_id/work-state" -d "{\"work_state\":\"failed\"}" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Failed: {r.get(\"id\",\"?\")} — reason: $reason')
+"
+    ;;
+  block)
+    task_id="$1"; shift
+    reason="${*:-blocked}"
+    curl -s -X PATCH -H "$AUTH" -H "$CT" "$API/api/tasks/$task_id/work-state" -d "{\"work_state\":\"blocked\"}" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Blocked: {r.get(\"id\",\"?\")} — reason: $reason')
+"
+    ;;
+  help|*)
+    echo "Usage: lobs-tasks <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  list                          List active tasks"
+    echo "  list-mine                     List my tasks (uses \$AGENT_TYPE)"
+    echo "  get <task-id>                 Get task details"
+    echo "  create <title> [options]      Create a task"
+    echo "    --project <id>              Project ID (default: self-improvement)"
+    echo "    --agent <type>              Agent to assign"
+    echo "    --notes <text>              Task notes"
+    echo "  set-agent <task-id> <agent>   Assign agent"
+    echo "  set-status <task-id> <status> Set status"
+    echo "  set-work-state <id> <state>   Set work state"
+    echo "  complete <task-id>            Mark completed"
+    echo "  fail <task-id> [reason]       Mark failed"
+    echo "  block <task-id> [reason]      Mark blocked"
+    ;;
+esac

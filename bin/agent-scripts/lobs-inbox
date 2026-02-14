@@ -1,0 +1,65 @@
+#!/bin/bash
+# lobs-inbox — Inbox management for agents
+# Usage:
+#   lobs-inbox list                                    # List inbox items
+#   lobs-inbox get <id>                                # Get inbox item details
+#   lobs-inbox create <title> --content <text> [--severity low|medium|high]
+#   lobs-inbox resolve <id>                            # Mark as resolved
+
+set -euo pipefail
+API="http://localhost:8000"
+TOKEN="z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU"
+AUTH="Authorization: Bearer $TOKEN"
+CT="Content-Type: application/json"
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+case "$cmd" in
+  list)
+    curl -s -H "$AUTH" "$API/api/inbox" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+items=data if isinstance(data,list) else data.get('items',[])
+for item in items:
+    status=item.get('triage_status') or item.get('status','?')
+    severity=item.get('severity','?')
+    print(f'  [{status:15}] [{severity:6}] {item.get(\"id\",\"?\")[:12]}  {item.get(\"title\",\"?\")[:50]}')
+print(f'Total: {len(items)}')
+"
+    ;;
+  get)
+    curl -s -H "$AUTH" "$API/api/inbox/$1" | python3 -m json.tool
+    ;;
+  create)
+    title="$1"; shift
+    content=""
+    severity="medium"
+    source="${AGENT_TYPE:-agent}"
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --content) content="$2"; shift 2;;
+        --severity) severity="$2"; shift 2;;
+        --source) source="$2"; shift 2;;
+        *) shift;;
+      esac
+    done
+    curl -s -X POST -H "$AUTH" -H "$CT" "$API/api/inbox" \
+      -d "{\"title\":\"$title\",\"content\":$(python3 -c "import json; print(json.dumps('$content'))"),\"severity\":\"$severity\",\"source\":\"$source\"}" | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+print(f'Created inbox item: {r.get(\"id\",\"?\")} — {r.get(\"title\",\"?\")}')
+"
+    ;;
+  help|*)
+    echo "Usage: lobs-inbox <command> [args]"
+    echo ""
+    echo "Commands:"
+    echo "  list                          List inbox items"
+    echo "  get <id>                      Get inbox details"
+    echo "  create <title> [options]      Create inbox item"
+    echo "    --content <text>            Content/description"
+    echo "    --severity <low|medium|high> Severity level"
+    echo "  resolve <id>                  Mark as resolved"
+    ;;
+esac

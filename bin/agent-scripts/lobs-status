@@ -1,0 +1,81 @@
+#!/bin/bash
+# lobs-status — System status for agents
+# Usage:
+#   lobs-status                    # Quick overview
+#   lobs-status overview           # Full system overview
+#   lobs-status agents             # Agent statuses
+#   lobs-status activity           # Recent activity
+#   lobs-status orchestrator       # Orchestrator status
+#   lobs-status projects           # List projects
+
+set -euo pipefail
+API="http://localhost:8000"
+TOKEN="z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU"
+AUTH="Authorization: Bearer $TOKEN"
+
+cmd="${1:-overview}"
+
+case "$cmd" in
+  overview)
+    curl -s -H "$AUTH" "$API/api/status/overview" | python3 -m json.tool
+    ;;
+  agents)
+    curl -s -H "$AUTH" "$API/api/agents" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+if isinstance(data,list):
+    for a in data:
+        name=a.get('agent_type','?')
+        status=a.get('status','?')
+        task=a.get('current_task_id') or 'none'
+        completed=a.get('stats',{}).get('tasksCompleted',0)
+        failed=a.get('stats',{}).get('tasksFailed',0)
+        print(f'  {name:15} {status:10} completed={completed} failed={failed} current={task[:12]}')
+elif isinstance(data,dict):
+    for name,a in data.items():
+        status=a.get('status','?')
+        completed=a.get('stats',{}).get('tasksCompleted',0)
+        failed=a.get('stats',{}).get('tasksFailed',0)
+        print(f'  {name:15} {status:10} completed={completed} failed={failed}')
+"
+    ;;
+  activity)
+    curl -s -H "$AUTH" "$API/api/status/activity" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+if isinstance(data,list):
+    for item in data[:15]:
+        ts=(item.get('timestamp') or '?')[:16]
+        print(f'  [{ts}] {item.get(\"type\",\"?\"):20} {item.get(\"title\",\"?\")[:55]}')
+"
+    ;;
+  orchestrator|orch)
+    curl -s -H "$AUTH" "$API/api/orchestrator/status" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print(f'Running: {d.get(\"running\")}  Paused: {d.get(\"paused\")}')
+w=d.get('worker',{})
+print(f'Worker: state={w.get(\"state\")} active={w.get(\"active_count\",0)} current={w.get(\"current_task\",\"none\")}')
+"
+    ;;
+  projects)
+    curl -s -H "$AUTH" "$API/api/projects" | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+if isinstance(data,list):
+    for p in data:
+        if not p.get('archived'):
+            print(f'  {p[\"id\"]:30} {p.get(\"title\",\"?\")[:40]}')
+"
+    ;;
+  help|*)
+    echo "Usage: lobs-status [command]"
+    echo ""
+    echo "Commands:"
+    echo "  overview      Full system overview (default)"
+    echo "  agents        Agent statuses"
+    echo "  activity      Recent activity feed"
+    echo "  orchestrator  Orchestrator status"
+    echo "  projects      List projects"
+    ;;
+esac
