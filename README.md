@@ -13,6 +13,9 @@ Central backend for [Lobs Mission Control](https://github.com/RafeSymonds/lobs-m
 - **Auth** — Bearer token authentication on all endpoints
 
 ## Setup
+
+**Quick start:** See [QUICKSTART.md](QUICKSTART.md) for detailed setup instructions.
+
 ```bash
 git clone git@github.com:RafeSymonds/lobs-server.git
 cd lobs-server
@@ -29,8 +32,10 @@ python bin/generate_token.py my-token
 
 ## Documentation
 
+- **[QUICKSTART.md](QUICKSTART.md)** — Get up and running in 5 minutes
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — System architecture, data flow, key components
+- **[AGENTS.md](AGENTS.md)** — Complete API reference and development guide
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — Development guide for contributors and AI agents
-- **[AGENTS.md](AGENTS.md)** — Complete API reference, architecture, development guide
 - **[docs/](docs/)** — Implementation guides, design documents, investigations
   - [Testing Guide](docs/TESTING.md) — How to run and write tests
   - [Known Issues](docs/KNOWN_ISSUES.md) — Technical debt and known problems

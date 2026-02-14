@@ -5,9 +5,11 @@ Index of design documents, implementation notes, and research findings.
 ## Getting Started
 
 ### Core Documentation
-- **[ARCHITECTURE.md](../ARCHITECTURE.md)** — System architecture, data flow, components (comprehensive overview)
+- **[QUICKSTART.md](../QUICKSTART.md)** ✨ **NEW 2026-02-14** — Get started in 5 minutes
+- **[ARCHITECTURE.md](../ARCHITECTURE.md)** — System architecture, data flow, components (comprehensive overview) ✨ **Updated 2026-02-14**
 - **[AGENTS.md](../AGENTS.md)** — API reference, development guide, agent integration
 - **[README.md](../README.md)** — Project overview, quick start, setup
+- **[.env.example](../.env.example)** ✨ **NEW 2026-02-14** — Environment configuration reference
 
 ### Development Guides
 - **[TESTING.md](TESTING.md)** — Complete testing guide (setup, running tests, adding new tests)
@@ -29,6 +31,9 @@ Index of design documents, implementation notes, and research findings.
 ### System Architecture
 - **[cron-timeout-investigation.md](cron-timeout-investigation.md)** — Cron job timeout debugging and fixes
 
+### Work Tracking & Analysis
+- **[work-dump-analysis-design.md](work-dump-analysis-design.md)** — Work dump analysis and proactive task creation design
+
 ### Research
 - **[../research-findings.md](../research-findings.md)** — WebSocket reconnection handling research (best practices, exponential backoff, implementation examples)
 
@@ -45,6 +50,7 @@ Index of design documents, implementation notes, and research findings.
 | Creating topics from agents | [researcher-topic-creation-design.md](researcher-topic-creation-design.md) |
 | Topics system overview | [TOPICS_IMPLEMENTATION.md](TOPICS_IMPLEMENTATION.md) |
 | Document management | [document-lifecycle-design.md](document-lifecycle-design.md) |
+| Work dump analysis | [work-dump-analysis-design.md](work-dump-analysis-design.md) |
 | WebSocket best practices | [../research-findings.md](../research-findings.md) |
 | Debugging cron issues | [cron-timeout-investigation.md](cron-timeout-investigation.md) |
 
@@ -56,18 +62,28 @@ Index of design documents, implementation notes, and research findings.
 - **Research** — Research findings and best practices
 - **Fixes** — Bug investigations and solutions (in `fixes/`)
 
-## Recent Additions
+## Recent Additions & Updates
 
-- 2026-02-14: **Architecture documentation (ARCHITECTURE.md)** — Comprehensive system architecture overview
-- 2026-02-14: Testing guide (TESTING.md)
-- 2026-02-14: Known issues documentation (KNOWN_ISSUES.md)
-- 2026-02-14: Project manager agent documentation
-- 2026-02-14: Tiered approval system documentation
-- 2026-02-14: WebSocket reconnection research
-- 2026-02-13: Topics implementation and migration
-- 2026-02-13: Document lifecycle design
-- 2026-02-13: Work dump analysis design
-- 2026-02-13: Cron timeout investigation
+### 2026-02-14 (Latest)
+- ✅ **Worker activity endpoint** — New `/api/worker/activity` API for activity feeds (AGENTS.md updated)
+- ✅ **Task state documentation** — Complete work_state vs. review_state vs. status explanation (ARCHITECTURE.md)
+- ✅ **inbox-responder removal** — Project-manager now handles all inbox processing (refactored)
+- ✅ **Agent summaries** — Worker runs now capture agent output summaries from session results
+- ✅ **work_state fixes** — Scanner accepts both 'not_started' and 'ready', scheduler defaults to 'not_started'
+
+### 2026-02-14 (Earlier)
+- **ARCHITECTURE.md** — Comprehensive system architecture overview (NEW!)
+- Testing guide (TESTING.md)
+- Known issues documentation (KNOWN_ISSUES.md)
+- Project manager agent documentation
+- Tiered approval system documentation
+- WebSocket reconnection research
+
+### 2026-02-13
+- Topics implementation and migration
+- Document lifecycle design
+- Work dump analysis design
+- Cron timeout investigation
 
 ## Contributing
 

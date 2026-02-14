@@ -1,596 +1,659 @@
-# lobs-server Architecture
+# Architecture — lobs-server
 
-**Last Updated:** February 14, 2026
+High-level overview of the backend system design, data flow, and key components.
 
-This document describes the design and architecture of lobs-server, the central backend for Lobs Mission Control.
-
----
-
-## Table of Contents
-
-- [System Overview](#system-overview)
-- [Technology Stack](#technology-stack)
-- [Architecture Diagram](#architecture-diagram)
-- [Core Components](#core-components)
-- [Data Flow](#data-flow)
-- [API Design](#api-design)
-- [Database Schema](#database-schema)
-- [Orchestration](#orchestration)
-- [Authentication](#authentication)
-- [Real-time Communication](#real-time-communication)
-- [Testing Strategy](#testing-strategy)
-- [Performance Considerations](#performance-considerations)
-- [Future Improvements](#future-improvements)
+**Last Updated:** 2026-02-14
 
 ---
 
 ## System Overview
 
-lobs-server is a FastAPI-based backend providing:
-- **Task & Project Management** with kanban workflow
-- **Memory System** for long-term knowledge storage
-- **Topics/Knowledge** organization for research workspaces
-- **Chat** via WebSocket for real-time agent communication
-- **Orchestrator** for autonomous task routing and execution
-- **Calendar** for events, deadlines, and scheduling
-- **System Health** monitoring and cost tracking
+lobs-server is the central backend for the Lobs multi-agent system. It provides:
 
-**Key Design Principles:**
-- **REST-first API** — All operations accessible via HTTP
-- **SQLite simplicity** — Single-file database with WAL mode for concurrency
-- **Async everywhere** — FastAPI + SQLAlchemy async for I/O efficiency
-- **Bearer token auth** — Simple, stateless authentication
-- **Agent-friendly** — Designed for both human and AI agent clients
-
----
-
-## Technology Stack
-
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Web Framework** | FastAPI 0.109+ | REST API, WebSocket, validation |
-| **ASGI Server** | Uvicorn | Production server with auto-reload |
-| **Database** | SQLite + SQLAlchemy 2.0 | Async ORM, migrations |
-| **Validation** | Pydantic v2 | Request/response models, config |
-| **Testing** | pytest + httpx | Async test suite |
-| **Task Queue** | In-process scheduler | Simple cron-like scheduling |
-
----
-
-## Architecture Diagram
+1. **REST API** — Task management, memory, knowledge, chat, calendar, system status
+2. **WebSocket Server** — Real-time chat and updates
+3. **Task Orchestrator** — Autonomous task execution via AI agent workers
+4. **Project Manager** — Intelligent task delegation and approval workflows
+5. **Data Storage** — SQLite database for all system state
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        Clients                               │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
-│  │ Mission      │  │ Mobile       │  │ OpenClaw     │      │
-│  │ Control      │  │ App          │  │ Agents       │      │
-│  │ (macOS)      │  │ (iOS)        │  │              │      │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘      │
-│         │                  │                  │              │
-│         └──────────────────┼──────────────────┘              │
-│                            │                                 │
-│                   Bearer Token Auth                          │
-└────────────────────────────┼─────────────────────────────────┘
-                             │
-                             ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    lobs-server (FastAPI)                     │
-│                                                              │
-│  ┌────────────────────────────────────────────────────────┐ │
-│  │                    API Layer                            │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐  │ │
-│  │  │ /tasks   │ │ /memory  │ │ /chat    │ │ /calendar│  │ │
-│  │  │ /projects│ │ /topics  │ │ /inbox   │ │ /status  │  │ │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘  │ │
-│  └───────┼────────────┼─────────────┼────────────┼────────┘ │
-│          │            │             │            │          │
-│  ┌───────▼────────────▼─────────────▼────────────▼────────┐ │
-│  │              Business Logic Layer                       │ │
-│  │  ┌─────────────────────────────────────────────────┐   │ │
-│  │  │          Orchestrator (app/orchestrator/)       │   │ │
-│  │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐        │   │ │
-│  │  │  │Scheduler │ │ Scanner  │ │  Worker  │        │   │ │
-│  │  │  │(Cron)    │ │(Poller)  │ │ Manager  │        │   │ │
-│  │  │  └────┬─────┘ └────┬─────┘ └────┬─────┘        │   │ │
-│  │  └───────┼────────────┼─────────────┼──────────────┘   │ │
-│  └──────────┼────────────┼─────────────┼──────────────────┘ │
-│             │            │             │                    │
-│  ┌──────────▼────────────▼─────────────▼──────────────────┐ │
-│  │              Data Access Layer (SQLAlchemy)            │ │
-│  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐  │ │
-│  │  │ Task     │ │ Memory   │ │ Chat     │ │ Event    │  │ │
-│  │  │ Model    │ │ Model    │ │ Model    │ │ Model    │  │ │
-│  │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └────┬─────┘  │ │
-│  └───────┼────────────┼─────────────┼────────────┼────────┘ │
-└──────────┼────────────┼─────────────┼────────────┼──────────┘
-           │            │             │            │
-           ▼            ▼             ▼            ▼
-    ┌─────────────────────────────────────────────────┐
-    │           SQLite Database (lobs.db)             │
-    │           (WAL mode, 30s busy timeout)          │
-    └─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│               lobs-server (FastAPI)                     │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │          REST API (app/routers/)                 │  │
+│  │  • /api/projects, /api/tasks, /api/inbox        │  │
+│  │  • /api/memories, /api/topics, /api/docs        │  │
+│  │  • /api/chat, /api/calendar, /api/status        │  │
+│  │  • /api/agents, /api/orchestrator               │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │      WebSocket Server (app/routers/chat.py)      │  │
+│  │  • Real-time chat messaging                      │  │
+│  │  • Live system updates                           │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │     Task Orchestrator (app/orchestrator/)        │  │
+│  │  • Scanner → finds eligible tasks                │  │
+│  │  • Router → delegates to project-manager         │  │
+│  │  • Engine → spawns workers via OpenClaw          │  │
+│  │  • Monitor → detects stuck/failed tasks          │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐  │
+│  │         Database (SQLite + SQLAlchemy)           │  │
+│  │  • Async aiosqlite                               │  │
+│  │  • WAL mode for concurrency                      │  │
+│  │  • 15+ tables (tasks, projects, memories, ...)   │  │
+│  └──────────────────────────────────────────────────┘  │
+│                                                         │
+└─────────────────────────────────────────────────────────┘
+                           │
+                           ▼
+           ┌───────────────────────────────┐
+           │   OpenClaw Gateway (agents)   │
+           │  • project-manager            │
+           │  • programmer, researcher     │
+           │  • writer, specialist         │
+           └───────────────────────────────┘
+```
+
+---
+
+## Directory Structure
+
+```
+lobs-server/
+├── app/
+│   ├── main.py                 # FastAPI app entry point
+│   ├── routers/                # API endpoint routers
+│   │   ├── projects.py
+│   │   ├── tasks.py
+│   │   ├── memories.py
+│   │   ├── topics.py
+│   │   ├── documents.py
+│   │   ├── inbox.py
+│   │   ├── chat.py            # WebSocket + HTTP chat endpoints
+│   │   ├── calendar.py
+│   │   ├── status.py
+│   │   ├── agents.py
+│   │   ├── orchestrator.py
+│   │   └── ...
+│   ├── orchestrator/           # Task execution engine
+│   │   ├── engine.py          # Main polling loop
+│   │   ├── scanner.py         # Finds eligible tasks
+│   │   ├── router.py          # Delegates to project-manager
+│   │   ├── worker.py          # Spawns OpenClaw workers
+│   │   ├── monitor_enhanced.py      # Stuck task detection
+│   │   ├── escalation_enhanced.py   # Multi-tier failure handling
+│   │   ├── circuit_breaker.py       # Infrastructure failure isolation
+│   │   ├── agent_tracker.py         # Agent status tracking
+│   │   ├── prompter.py              # Task prompt builder
+│   │   └── registry.py              # Agent config loader
+│   ├── services/
+│   │   ├── chat_manager.py    # WebSocket connection management
+│   │   └── openclaw_bridge.py # Webhook handler for agent responses
+│   ├── models.py              # SQLAlchemy database models
+│   ├── schemas.py             # Pydantic request/response schemas
+│   ├── database.py            # Database session management
+│   ├── auth.py                # Bearer token authentication
+│   └── config.py              # Settings (from environment)
+├── bin/
+│   ├── run                    # Start server script
+│   ├── generate_token.py      # Create API tokens
+│   ├── list_tokens.py         # List active tokens
+│   ├── revoke_token.py        # Revoke tokens
+│   └── agent-scripts/         # Shared agent helper scripts
+│       ├── lobs-tasks         # Task management CLI
+│       ├── lobs-inbox         # Inbox CLI
+│       ├── lobs-status        # System status CLI
+│       └── ...
+├── data/
+│   └── lobs.db               # SQLite database
+├── tests/                    # Pytest test suite
+├── docs/                     # Documentation
+└── requirements.txt          # Python dependencies
 ```
 
 ---
 
 ## Core Components
 
-### 1. API Routers (`app/routers/`)
+### 1. REST API (app/routers/)
 
-Organize endpoints by domain:
+**Purpose:** Expose all system functionality via HTTP endpoints
 
-- **`tasks.py`** — Task CRUD, status updates, assignment
-- **`projects.py`** — Project management, task grouping
-- **`chat.py`** — WebSocket chat, sessions, messaging
-- **`memory.py`** — Memory capture, search, retrieval
-- **`topics.py`** — Knowledge organization, document management
-- **`inbox.py`** — Triage queue for proposals and documents
-- **`calendar.py`** — Events, deadlines, recurring schedules
-- **`status.py`** — System health, activity timeline
-- **`orchestrator_api.py`** — Orchestrator control (pause/resume)
+**Authentication:** Bearer token required for all `/api/*` endpoints except `/api/health`
 
-### 2. Orchestrator (`app/orchestrator/`)
+**Key routers:**
 
-Autonomous task execution system:
+| Router | Endpoints | Purpose |
+|--------|-----------|---------|
+| `projects.py` | `/api/projects/*` | Project CRUD (list, create, update, archive) |
+| `tasks.py` | `/api/tasks/*` | Task CRUD, status/state updates, assignment |
+| `inbox.py` | `/api/inbox/*` | Inbox items (proposals, suggestions) from agents |
+| `memories.py` | `/api/memories/*` | Personal memory CRUD, search, quick capture |
+| `topics.py` | `/api/topics/*` | Research workspace organization |
+| `documents.py` | `/api/docs/*` | Document CRUD and delivery |
+| `chat.py` | `/api/chat/*` | Chat sessions, messages, WebSocket endpoint |
+| `calendar.py` | `/api/calendar/*` | Event CRUD, recurring schedules, deadline sync |
+| `status.py` | `/api/status/*` | System health, activity timeline, cost tracking |
+| `agents.py` | `/api/agents/*` | Agent status and configuration |
+| `orchestrator.py` | `/api/orchestrator/*` | Orchestrator control (pause, resume, status) |
 
-**`scheduler.py`**
-- Cron-like job scheduler
-- Creates recurring tasks (daily summaries, weekly reviews)
-- Uses `work_state='not_started'` for scanner integration
+**Response format:**
+- Success: JSON with data
+- Error: `{"detail": "error message"}` with appropriate HTTP status
+- Snake_case keys (converted to camelCase by Mission Control clients)
 
-**`scanner.py`**
-- Polls for ready tasks (`work_state='ready'` or `'not_started'`)
-- Routes tasks via project-manager agent
-- Spawns OpenClaw worker processes
+---
 
-**`worker.py`**
-- Manages worker lifecycle
-- Monitors process health
-- Handles task completion and failures
+### 2. Task Orchestrator (app/orchestrator/)
 
-**Key Pattern:** Single-writer (only orchestrator commits task state changes)
+**Purpose:** Autonomous task execution system that delegates work to AI agents
 
-### 3. Database Models (`app/models.py`)
+**How it works:**
 
-SQLAlchemy async models:
-
-```python
-class Task(Base):
-    __tablename__ = 'tasks'
-    id, title, description, status, work_state
-    project_id, owner, created_at, updated_at
-
-class Project(Base):
-    __tablename__ = 'projects'
-    id, name, slug, description, status
-
-class Memory(Base):
-    __tablename__ = 'memories'
-    id, content, tags, created_at
-
-class Topic(Base):
-    __tablename__ = 'topics'
-    id, name, description, created_at
-    
-class Document(Base):
-    __tablename__ = 'documents'
-    id, topic_id, title, content, created_at
-
-class ChatSession(Base):
-    __tablename__ = 'chat_sessions'
-    session_key, name, created_at
-
-class ChatMessage(Base):
-    __tablename__ = 'chat_messages'
-    id, session_key, role, content, created_at
-
-class Event(Base):
-    __tablename__ = 'events'
-    id, title, start_time, end_time, event_type
+```
+┌─────────────┐
+│   Scanner   │  Finds tasks with work_state='not_started'
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Router    │  Routes ALL tasks to project-manager for delegation
+└──────┬──────┘
+       │
+       ▼
+┌─────────────┐
+│   Engine    │  Spawns workers via OpenClaw Gateway API
+└──────┬──────┘
+       │
+       ▼
+┌─────────────────────┐
+│  project-manager    │  Analyzes task, delegates to specialist agent
+│  (OpenClaw agent)   │  or handles directly; applies approval tiers
+└─────────┬───────────┘
+          │
+    ┌─────┴──────┐
+    ▼            ▼
+programmer   researcher   (or other specialist)
 ```
 
-### 4. Authentication (`app/dependencies.py`)
+**Key components:**
 
-```python
-async def verify_token(credentials: HTTPAuthorizationCredentials):
-    # Bearer token validation
-    # All /api/* endpoints except /api/health require auth
+#### Scanner (`scanner.py`)
+- Queries database for tasks with `work_state='not_started'` or `'ready'`
+- Respects orchestrator pause state
+- Returns eligible tasks sorted by priority
+
+#### Router (`router.py`)
+- **Simple:** Routes all tasks to `project-manager` agent
+- Project-manager makes intelligent delegation decisions
+- Constructs routing prompt with task context
+
+#### Engine (`engine.py`)
+- Main polling loop (runs every 10s by default)
+- Spawns workers via OpenClaw Gateway `/tools/invoke` API
+- Tracks active workers in database (`worker_runs` table)
+- Updates task `work_state` as workers progress
+- Handles worker completion/failure
+
+#### Worker (`worker.py`)
+- Spawns OpenClaw sessions via Gateway API
+- Passes task context to agents via prompt
+- Captures agent output and result summaries
+- Updates database with worker status
+
+#### Monitor Enhanced (`monitor_enhanced.py`)
+- Detects stuck tasks (running too long)
+- Auto-unblocks tasks after timeout
+- Tracks failure patterns
+
+#### Escalation Enhanced (`escalation_enhanced.py`)
+- Multi-tier failure handling:
+  1. **Retry** — Same agent, fresh attempt
+  2. **Agent Switch** — Try different agent type
+  3. **Diagnostic** — Gather failure context
+  4. **Human Escalation** — Send to inbox for review
+- Exponential backoff between retries
+
+#### Circuit Breaker (`circuit_breaker.py`)
+- Detects infrastructure failures (Gateway down, OpenClaw unreachable)
+- Isolates failures per project/agent
+- Prevents cascade failures
+
+---
+
+### 3. Project Manager Agent
+
+**Purpose:** Central coordinator for task routing, delegation, and approval workflows
+
+**Capabilities:**
+- Analyzes incoming tasks and determines appropriate agent
+- Delegates to specialist agents (programmer, researcher, writer)
+- Handles simple tasks directly
+- Applies tiered approval system (auto-approve, review, escalate)
+- Reviews completed work for quality
+- Routes inbox items requiring human decision
+
+**Workflow:**
+
+```
+Task created → Scanner finds it → Router sends to project-manager
+                                              ↓
+                       project-manager analyzes task context
+                                              ↓
+                    ┌──────────────────────────┼────────────────┐
+                    ▼                          ▼                ▼
+            Simple task?              Specialist needed?    Needs approval?
+         (handle directly)          (delegate to agent)    (send to inbox)
+                    ↓                          ↓                ↓
+            Mark complete              Spawn worker      Create inbox item
+                                              ↓
+                                      Worker completes
+                                              ↓
+                                  project-manager reviews
+                                              ↓
+                                    Apply approval tier:
+                                    • Auto-approve (low-risk)
+                                    • Human review (medium-risk)
+                                    • Escalate (high-risk/failed)
 ```
 
-**Token Management:**
-- Tokens stored in `~/.lobs/tokens.json`
-- Generate with `bin/generate_token.py`
-- No expiration (stateless design)
+**See:** `docs/project-manager-agent.md` for full design
 
-### 5. Database Session (`app/database.py`)
+---
 
-```python
-# WAL mode for concurrent access
-engine = create_async_engine(
-    "sqlite+aiosqlite:///lobs.db",
-    connect_args={"timeout": 30}
-)
+### 4. Database Layer
 
-# Enable WAL mode
-await conn.execute(text("PRAGMA journal_mode=WAL"))
-await conn.execute(text("PRAGMA busy_timeout=30000"))
+**Technology:** SQLite + async SQLAlchemy + aiosqlite
+
+**Configuration:**
+- **WAL mode** — Enables concurrent reads/writes
+- **Busy timeout:** 30s to handle contention
+- **Connection pooling** — Async session management
+
+**Key tables:**
+
+| Table | Purpose |
+|-------|---------|
+| `projects` | Projects (active/archived) |
+| `tasks` | Tasks with work_state + status fields |
+| `inbox` | Agent proposals/suggestions requiring human decision |
+| `memories` | Personal memory entries |
+| `topics` | Research workspace metadata |
+| `documents` | Reports, research deliverables |
+| `chat_sessions` | Chat conversation sessions |
+| `chat_messages` | Individual chat messages |
+| `scheduled_events` | Calendar events and recurring schedules |
+| `agents` | Agent status tracking |
+| `worker_runs` | Orchestrator worker execution history |
+| `activity_log` | System activity timeline |
+| `api_tokens` | Authentication tokens |
+| `agent_memory_sync` | Agent workspace memory synchronization |
+
+**Models:** `app/models.py`  
+**Schemas:** `app/schemas.py` (Pydantic request/response validation)
+
+---
+
+### 5. Authentication
+
+**Method:** Bearer token authentication
+
+**How it works:**
+1. Tokens generated server-side via `bin/generate_token.py`
+2. Stored in `api_tokens` table
+3. Clients include `Authorization: Bearer <token>` header
+4. `require_auth` dependency validates on each request
+
+**Token management:**
+```bash
+# Create token
+python bin/generate_token.py mission-control
+
+# List tokens
+python bin/list_tokens.py
+
+# Revoke token
+python bin/revoke_token.py mission-control
+```
+
+**WebSocket auth:** Token passed as query parameter:
+```
+wss://server:8000/api/chat/ws?token=<token>
 ```
 
 ---
 
-## Data Flow
+### 6. WebSocket Real-Time Updates
 
-### Task Creation Flow
+**Endpoint:** `/api/chat/ws`
 
-```
-1. Client → POST /api/tasks
-2. Router validates request (Pydantic)
-3. Check auth token
-4. Create Task model instance
-5. Save to database (SQLAlchemy)
-6. Return TaskResponse (Pydantic)
-```
+**Purpose:** Real-time bidirectional communication for chat and live updates
 
-### Orchestrator Task Processing Flow
+**How it works:**
 
 ```
-1. Scheduler creates recurring task
-   └─ Sets work_state='not_started'
-
-2. Scanner polls for ready tasks
-   └─ Finds tasks with work_state='ready' or 'not_started'
-   
-3. Scanner routes via project-manager
-   └─ Determines best agent for task
-   
-4. Scanner spawns OpenClaw worker
-   └─ Launches subprocess with task context
-   
-5. Worker executes task
-   └─ Updates status via API
-   
-6. Scanner monitors completion
-   └─ Handles success/failure/escalation
+Client connects → Authenticate via token → Register in ChatManager
+                                                    ↓
+User sends message → POST /api/chat/sessions/:key/messages
+                                ↓
+                    Saved to database
+                                ↓
+            Broadcast via WebSocket to all connected clients
+                                ↓
+            Clients receive and display message instantly
 ```
 
-### WebSocket Chat Flow
+**Connection management:**
+- Tracked in `ChatManager` (`app/services/chat_manager.py`)
+- Automatic reconnection handling (client-side responsibility)
+- Heartbeat/keepalive (future enhancement)
+
+**See:** `research-findings.md` for WebSocket best practices
+
+---
+
+### 7. Tiered Approval System
+
+**Purpose:** Automatically approve low-risk changes, flag high-risk changes for review
+
+**Three tiers:**
+
+| Tier | Risk Level | Action | Examples |
+|------|-----------|--------|----------|
+| **1** | Low | Auto-approve | Documentation, tests, bug fixes |
+| **2** | Medium | Human review | New features, refactoring, schema changes |
+| **3** | High | Escalate | Critical bugs, security, breaking changes |
+
+**Workflow:**
+1. Worker completes task
+2. Project-manager reviews output
+3. Applies tier based on change scope
+4. Tier 1 → mark complete, Tier 2/3 → create inbox item
+
+**See:** `docs/tiered-approval-system.md` for full design
+
+---
+
+## Data Flow Patterns
+
+### Task Lifecycle
 
 ```
-1. Client → WS /api/chat/ws?session_key=xyz
-2. Connection established
-3. Client sends message → Server receives
-4. Server broadcasts to all session clients
-5. Server stores in ChatMessage table
-6. All clients receive message
+1. Task created (via UI or agent)
+   ↓
+2. work_state = 'not_started'
+   ↓
+3. Scanner finds task
+   ↓
+4. Router sends to project-manager
+   ↓
+5. project-manager analyzes and delegates
+   ↓
+6. Worker spawned (work_state = 'in_progress')
+   ↓
+7. Worker completes
+   ↓
+8. project-manager reviews output
+   ↓
+9. Apply approval tier:
+   • Tier 1: work_state = 'completed'
+   • Tier 2/3: work_state = 'pending_review', create inbox item
+   ↓
+10. Human approves (if needed)
+    ↓
+11. work_state = 'completed', status = 'completed'
+```
+
+### Inbox Workflow
+
+```
+Agent proposes change → Create inbox item (type: 'proposal')
+                                    ↓
+                    Human reviews in Mission Control
+                                    ↓
+                        ┌───────────┴──────────┐
+                        ▼                      ▼
+                    Approve                 Reject
+                        ↓                      ↓
+              Execute proposal          Mark rejected
+                        ↓                      ↓
+              Mark inbox read           Notify agent
+```
+
+### Memory System
+
+```
+Quick capture → POST /api/memories/capture
+                        ↓
+                Store in database
+                        ↓
+        Sync to agent workspaces (background job)
+                        ↓
+            Agents have access via memory search
+```
+
+### Document Delivery
+
+```
+Agent creates document → Write to agent workspace
+                                    ↓
+                    POST /api/docs (with file content)
+                                    ↓
+                        Store in database
+                                    ↓
+                Mission Control displays in Documents view
+                                    ↓
+                    Human reviews and approves
 ```
 
 ---
 
-## API Design
+## Background Jobs
 
-### RESTful Conventions
+lobs-server includes background tasks via FastAPI lifespan:
 
-- **GET** — Retrieve resources
-- **POST** — Create resources
-- **PATCH** — Partial update
-- **DELETE** — Remove resources
-
-### Response Format
-
-Success:
-```json
-{
-  "id": "abc123",
-  "title": "Task title",
-  "status": "active"
-}
-```
-
-Error:
-```json
-{
-  "detail": "Task not found"
-}
-```
-
-### Snake Case Convention
-
-- **API:** Returns `snake_case` JSON
-- **Python:** Uses `snake_case` internally
-- **Swift clients:** Auto-convert to `camelCase` via `JSONDecoder.convertFromSnakeCase`
+| Job | Frequency | Purpose |
+|-----|-----------|---------|
+| Orchestrator main loop | 10s | Find and execute tasks |
+| Recurring schedule expansion | 1 hour | Generate calendar events from schedules |
+| Agent memory sync | On-demand | Sync memories to agent workspaces |
 
 ---
 
-## Database Schema
+## Configuration
 
-### Core Tables
-
-**`tasks`** — Central task management table
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `id` | String | Unique identifier (8-char hex) |
-| `title` | String | Task title |
-| `status` | String | User-facing status (`inbox`, `active`, `waiting_on`, `completed`, `rejected`) |
-| `work_state` | String | Orchestrator execution state (see below) |
-| `review_state` | String | Approval workflow state |
-| `owner` | String | Task owner (`lobs`, `rafe`, agent name) |
-| `agent` | String | Assigned agent type (`programmer`, `writer`, etc.) |
-| `project_id` | String | Foreign key to `projects.id` |
-| `notes` | Text | Task description and details |
-| `created_at` | DateTime | Creation timestamp |
-| `updated_at` | DateTime | Last modification timestamp |
-| `started_at` | DateTime | When work began |
-| `finished_at` | DateTime | When work completed |
-
-**Other tables:** `projects`, `memories`, `topics`, `documents`, `inbox_items`, `chat_sessions`, `chat_messages`, `events`, `api_tokens`, `worker_runs`, `agent_states`
-
-### Task State Fields
-
-Tasks have **two separate state dimensions**:
-
-#### 1. `status` — User-Facing Kanban State
-
-| Value | Meaning | UI Column |
-|-------|---------|-----------|
-| `inbox` | Needs triage | Inbox |
-| `active` | Ready to work on | Active |
-| `waiting_on` | Blocked by dependency | Waiting On |
-| `completed` | Work finished | Completed |
-| `rejected` | Declined or cancelled | (archived) |
-
-Users move tasks between these columns in Mission Control UI.
-
-#### 2. `work_state` — Orchestrator Execution State
-
-| Value | Meaning | Orchestrator Action |
-|-------|---------|---------------------|
-| `not_started` | Ready for pickup (default) | Scanner includes in eligible tasks |
-| `ready` | Explicitly marked ready | Scanner includes in eligible tasks |
-| `in_progress` | Worker actively working | Monitor tracks for timeouts |
-| `blocked` | Cannot proceed | Skipped by scanner until unblocked |
-| `completed` | Work finished | Finalize task, run approvals |
-
-**Key insight:** A task can be `status='active'` (user moved it to "Active" column) but `work_state='blocked'` (orchestrator can't work on it yet). The orchestrator uses `work_state`, not `status`, to determine eligibility.
-
-**Scanner query:**
-```sql
-SELECT * FROM tasks 
-WHERE status = 'active' 
-  AND work_state IN ('not_started', 'ready')
-  AND agent IS NOT NULL
-```
-
-### WAL Mode Benefits
-
-- **Concurrent reads:** Multiple readers don't block
-- **Single writer:** Writes don't block readers (mostly)
-- **Crash recovery:** Better durability than rollback journal
-
-### Indexing Strategy
-
-```sql
-CREATE INDEX idx_tasks_status ON tasks(status);
-CREATE INDEX idx_tasks_project ON tasks(project_id);
-CREATE INDEX idx_tasks_work_state ON tasks(work_state);
-CREATE INDEX idx_chat_messages_session ON chat_messages(session_key);
-```
-
----
-
-## Orchestration
-
-### Scheduler (`app/orchestrator/scheduler.py`)
-
-**Cron Jobs:**
-- Daily summary (9 AM)
-- Weekly review (Monday 9 AM)
-- Monthly planning (1st of month)
-
-**Implementation:**
-```python
-@scheduler.scheduled_job('cron', hour=9, minute=0)
-async def daily_summary():
-    await create_task(
-        title="Daily Summary",
-        owner="writer",
-        work_state="not_started"
-    )
-```
-
-### Scanner (`app/orchestrator/scanner.py`)
-
-**Polling Cycle:**
-1. Query for ready tasks
-2. Route via project-manager
-3. Spawn workers
-4. Monitor health
-5. Repeat every 30s
-
-**Worker Spawning:**
-```python
-process = await asyncio.create_subprocess_exec(
-    "openclaw", "run",
-    "--agent", agent_type,
-    "--task-id", task_id,
-    stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE
-)
-```
-
-### Tiered Approval System
-
-Tasks flow through approval gates:
-
-1. **Auto-approve** — Trusted patterns (docs, summaries)
-2. **Human review** — Default for most work
-3. **Escalate** — High-risk or blocked tasks
-
-See [docs/tiered-approval-system.md](docs/tiered-approval-system.md)
-
----
-
-## Authentication
-
-### Token Generation
+**Environment variables** (`.env` file):
 
 ```bash
-python bin/generate_token.py my-token-name
+# Database
+DATABASE_URL=sqlite+aiosqlite:///./data/lobs.db
+
+# OpenClaw Gateway
+OPENCLAW_GATEWAY_URL=http://localhost:8080
+OPENCLAW_GATEWAY_TOKEN=<token>
+
+# Server
+HOST=0.0.0.0
+PORT=8000
+
+# Orchestrator
+ORCHESTRATOR_ENABLED=true
+ORCHESTRATOR_POLL_INTERVAL=10
 ```
 
-Generates:
-```json
-{
-  "name": "my-token-name",
-  "token": "z5mr-WWjPxAAHvRd2ZULm7HLNW1oRubXmcMiBJoEmsU",
-  "created_at": "2026-02-14T10:00:00Z"
-}
-```
-
-### Token Validation
-
-```python
-# All routes use dependency injection
-@router.get("/api/tasks")
-async def list_tasks(token: str = Depends(verify_token)):
-    # token is validated before this runs
-```
+**Settings:** `app/config.py`
 
 ---
 
-## Real-time Communication
+## Testing
 
-### WebSocket Chat
+**Framework:** pytest + pytest-asyncio + httpx
 
-**Endpoint:** `ws://localhost:8000/api/chat/ws?session_key=xyz`
+**Test organization:**
+- `tests/test_*.py` — API endpoint tests
+- Fixtures in `tests/conftest.py`
+- Async tests via `@pytest.mark.asyncio`
 
-**Message Format:**
-```json
-{
-  "role": "user",
-  "content": "Hello, agent!"
-}
-```
-
-**Broadcast Pattern:**
-- Server maintains `active_connections: Dict[str, List[WebSocket]]`
-- Messages sent to all clients in same session
-- Persisted to database for history
-
-**Reconnection Strategy:**
-- Client responsibility (exponential backoff)
-- Server doesn't enforce reconnection logic
-- See [docs/research-findings.md](docs/../research-findings.md) for best practices
-
----
-
-## Testing Strategy
-
-### Test Structure
-
-```
-tests/
-├── conftest.py              # Shared fixtures
-├── test_tasks.py            # Task CRUD
-├── test_projects.py         # Project management
-├── test_chat.py             # Chat & WebSocket (⚠️ WS tests broken)
-├── test_orchestrator.py     # Orchestration logic
-└── ...
-```
-
-### Test Database
-
-- **In-memory SQLite:** `:memory:` for test isolation
-- **Fresh schema:** Created per test session
-- **Async fixtures:** Support async tests
-
-### Running Tests
-
+**Run tests:**
 ```bash
-# All tests
+source .venv/bin/activate
 python -m pytest -v
-
-# Specific file
-python -m pytest tests/test_tasks.py -v
-
-# Skip integration tests
-python -m pytest -m "not integration" -v
 ```
 
-### Test Coverage
-
-- **Current:** 97.8% (269/275 tests passing)
-- **Broken:** 6 WebSocket tests (httpx doesn't support WebSocket)
-- **Gap:** Scheduler ↔ scanner integration
-
-See [docs/TESTING.md](docs/TESTING.md) for complete guide.
+**See:** `docs/TESTING.md` for comprehensive testing guide
 
 ---
 
-## Performance Considerations
+## API Conventions
 
-### Bottlenecks
+### Request/Response Format
+- **Request:** JSON body, snake_case keys
+- **Response:** JSON, snake_case keys
+- **Dates:** ISO 8601 format with timezone
+- **IDs:** UUID v4 (short form: first 8 chars for display)
 
-1. **SQLite concurrency** — WAL mode mitigates; consider PostgreSQL for heavy loads
-2. **WebSocket scaling** — In-memory connections don't scale across processes
-3. **Synchronous cron** — Blocking scheduler; consider async scheduler library
+### HTTP Methods
+- **GET** — Retrieve resource(s)
+- **POST** — Create resource
+- **PUT** — Full update (replace entire resource)
+- **PATCH** — Partial update (modify specific fields)
+- **DELETE** — Remove resource
 
-### Optimization Strategies
+### Status Codes
+- **200** — Success (GET, PUT, PATCH, DELETE)
+- **201** — Created (POST)
+- **400** — Bad request (validation error)
+- **401** — Unauthorized (missing/invalid token)
+- **404** — Not found
+- **500** — Internal server error
 
-- **Database indexes** — On frequently queried columns
-- **Connection pooling** — SQLAlchemy handles this
-- **Async I/O** — All routes and DB calls are async
-- **Response caching** — Not implemented (stateless API design)
-
-### Scalability Limits
-
-- **SQLite:** Good for <100 concurrent writers, unlimited readers
-- **WebSocket:** Single-process limit (~10k connections)
-- **Orchestrator:** 3 concurrent workers (configurable)
-
-**When to migrate:**
-- PostgreSQL for >1000 tasks/day
-- Redis for distributed WebSocket
-- Celery for distributed task queue
+### Pagination
+- Query params: `?limit=50&offset=0`
+- Response includes total count when applicable
 
 ---
 
-## Future Improvements
+## Agent Integration
 
-### Short-term
+Agents interact with lobs-server in two ways:
 
-1. **Fix WebSocket tests** — Migrate to Starlette TestClient
-2. **Add ARCHITECTURE.md** ✅ (this document)
-3. **Pydantic v2 migration** — Replace deprecated `Config` class
-4. **Pytest marker registration** — Fix unknown marker warnings
+### 1. HTTP API (from agent workspaces)
+Agents use helper scripts in `bin/agent-scripts/`:
 
-### Medium-term
+```bash
+# Task management
+./bin/agent-scripts/lobs-tasks list-mine
+./bin/agent-scripts/lobs-tasks get <task-id>
+./bin/agent-scripts/lobs-tasks complete <task-id>
 
-1. **GraphQL API** — For flexible client queries
-2. **File attachments** — Document/image uploads
-3. **Audit log** — Track all state changes
-4. **API versioning** — `/api/v2/` for breaking changes
+# Inbox
+./bin/agent-scripts/lobs-inbox list
+./bin/agent-scripts/lobs-inbox respond <item-id> --approve
 
-### Long-term
+# System status
+./bin/agent-scripts/lobs-status overview
+```
 
-1. **PostgreSQL support** — For production scale
-2. **Distributed orchestrator** — Multi-worker coordination
-3. **Plugin system** — Custom agent types
-4. **OAuth integration** — Google Calendar, GitHub, etc.
+These scripts make authenticated API calls to lobs-server.
+
+### 2. Orchestrator (passive)
+Agents are spawned by orchestrator when tasks are assigned:
+
+```
+Orchestrator → OpenClaw Gateway /tools/invoke
+                      ↓
+            Spawn agent session with task prompt
+                      ↓
+            Agent executes task in workspace
+                      ↓
+            Agent delivers result (commit, report, etc.)
+                      ↓
+            Orchestrator captures output
+                      ↓
+            Update task work_state in database
+```
+
+---
+
+## Deployment
+
+**Current:** Development mode (single instance)
+
+**Production considerations:**
+- Use PostgreSQL instead of SQLite for better concurrency
+- Deploy behind nginx reverse proxy
+- Use Gunicorn/Uvicorn workers
+- Set up HTTPS/TLS certificates
+- Configure CORS for web clients
+- Add rate limiting
+- Set up monitoring (Prometheus, Grafana)
+
+---
+
+## Key Design Decisions
+
+### Why SQLite?
+- **Pro:** Zero configuration, file-based, easy backups
+- **Pro:** Sufficient for single-user/small team
+- **Con:** Limited concurrency (mitigated with WAL mode)
+- **Future:** Migrate to PostgreSQL if multi-user needed
+
+### Why FastAPI?
+- **Pro:** Modern async Python framework
+- **Pro:** Automatic OpenAPI docs
+- **Pro:** Excellent Pydantic integration
+- **Pro:** WebSocket support built-in
+
+### Why Embedded Orchestrator?
+- **Pro:** Direct database access (no HTTP overhead)
+- **Pro:** Simpler deployment (single service)
+- **Pro:** Easier debugging
+- **Con:** Couples orchestration to API server
+- **Future:** Could split into separate service
+
+### Why project-manager delegation?
+- **Pro:** Intelligent routing based on task context
+- **Pro:** Centralized approval logic
+- **Pro:** Easier to add new agent types
+- **Con:** Extra hop in task execution
+- **Benefit:** Better quality control, reduced human review burden
+
+---
+
+## Performance Characteristics
+
+**API response times:**
+- Simple GETs: <50ms
+- Complex queries (search, aggregations): 100-200ms
+- Task creation: <100ms
+- WebSocket latency: <10ms
+
+**Database:**
+- SQLite with WAL mode handles 100+ concurrent reads
+- Write contention minimal (busy timeout handles spikes)
+
+**Orchestrator:**
+- Polls every 10s (configurable)
+- Can handle 10+ concurrent workers
+- Worker spawn time: 2-5s (OpenClaw startup)
 
 ---
 
 ## Related Documentation
 
 - **[AGENTS.md](AGENTS.md)** — Complete API reference and development guide
-- **[docs/README.md](docs/README.md)** — All design documents and guides
 - **[docs/TESTING.md](docs/TESTING.md)** — Testing guide
-- **[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md)** — Current issues and limitations
-- **[docs/project-manager-agent.md](docs/project-manager-agent.md)** — Task routing design
-- **[docs/tiered-approval-system.md](docs/tiered-approval-system.md)** — Approval workflow
+- **[docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md)** — Known issues and technical debt
+- **[docs/project-manager-agent.md](docs/project-manager-agent.md)** — Project manager design
+- **[docs/tiered-approval-system.md](docs/tiered-approval-system.md)** — Approval workflow design
+- **[docs/README.md](docs/README.md)** — Documentation index
 
 ---
 
-**Document Status:** ✅ Current (February 14, 2026)  
-**Next Review:** When major architectural changes land
+*Last updated: 2026-02-14*

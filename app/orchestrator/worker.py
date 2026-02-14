@@ -60,7 +60,8 @@ class WorkerManager:
     Manages spawning and tracking concurrent workers via OpenClaw Gateway.
     
     Tracks active workers in memory and syncs state to DB.
-    Enforces domain locks (one worker per project, one per agent type).
+    Enforces domain locks (one worker per project). Multiple instances of
+    the same agent type can run concurrently on different projects.
     """
 
     def __init__(self, db: AsyncSession):
@@ -69,11 +70,8 @@ class WorkerManager:
         # In-memory tracking: worker_id -> WorkerInfo
         self.active_workers: dict[str, WorkerInfo] = {}
         
-        # Domain locks: one worker per project
+        # Domain locks: one worker per project (prevents repo conflicts)
         self.project_locks: dict[str, str] = {}  # project_id -> task_id
-        
-        # Per-agent-type limiting (one worker per agent type)
-        self.agent_locks: dict[str, str] = {}  # agent_type -> task_id
 
         self.max_workers = MAX_WORKERS
 
@@ -118,14 +116,9 @@ class WorkerManager:
             )
             return False
 
-        # Check agent type lock (one worker per agent type)
-        if agent_type in self.agent_locks:
-            locked_task = self.agent_locks[agent_type]
-            logger.info(
-                f"[WORKER] Agent type {agent_type} locked by task {locked_task[:8]}. "
-                f"Task {task_id[:8]} queued."
-            )
-            return False
+        # Note: agent type lock removed — multiple instances of the same
+        # agent can now run concurrently (Gateway sessions are isolated).
+        # Project lock still enforced to prevent repo conflicts.
 
         task_id_short = task_id[:8]
         
@@ -207,7 +200,6 @@ class WorkerManager:
             )
             self.active_workers[worker_id] = worker_info
             self.project_locks[project_id] = task_id
-            self.agent_locks[agent_type] = task_id
 
             # Update DB: worker status
             await self._update_worker_status(
@@ -506,7 +498,6 @@ class WorkerManager:
         # Remove from tracking
         self.active_workers.pop(worker_id, None)
         self.project_locks.pop(project_id, None)
-        self.agent_locks.pop(agent_type, None)
 
         if succeeded:
             # Success

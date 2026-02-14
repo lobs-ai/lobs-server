@@ -38,7 +38,7 @@ FastAPI App (app/main.py)
 | calendar.py | /api/calendar | Scheduled events, calendar views, deadlines |
 | status.py | /api/status | System health, activity, costs |
 | agents.py | /api/agents | Agent statuses and personality files |
-| worker.py | /api/worker | Worker status and history |
+| worker.py | /api/worker | Worker status, history, and activity feed |
 | orchestrator.py | /api/orchestrator | Orchestrator control (pause/resume) |
 | tracker.py | /api/tracker | Project tracker items |
 | templates.py | /api/templates | Task templates |
@@ -176,6 +176,56 @@ Agents write files in their workspace that the orchestrator processes on finaliz
 - **Add orchestrator feature**: Edit files in `app/orchestrator/`
 - **Add agent type**: Create template in `agents/<agent-name>/` with AGENTS.md + SOUL.md
 - **Add agent script**: Create in `bin/agent-scripts/`, make executable, document in SKILLS-REFERENCE.md
+
+## Worker API Endpoints
+
+### GET /api/worker/status
+Get current worker orchestrator status (active/paused, task counts, token usage).
+
+**Response:**
+```json
+{
+  "active": true,
+  "tasks_completed": 42,
+  "input_tokens": 125000,
+  "output_tokens": 38000
+}
+```
+
+### GET /api/worker/history
+List recent worker runs (limit/offset pagination).
+
+**Query params:** `?limit=20&offset=0`
+
+**Response:** Array of worker run objects with task_id, started_at, ended_at, succeeded, summary.
+
+### GET /api/worker/activity
+List recent agent activity with task details and summaries. Joins worker runs with task information for display in activity feeds.
+
+**Query params:** `?limit=20&offset=0`
+
+**Response:**
+```json
+[
+  {
+    "id": 123,
+    "worker_id": "abc123",
+    "started_at": "2026-02-14T11:30:00Z",
+    "ended_at": "2026-02-14T11:45:00Z",
+    "succeeded": true,
+    "summary": "Added authentication middleware to API router",
+    "source": "task",
+    "task_id": "A1B2C3D4",
+    "task_title": "Implement auth middleware",
+    "project_id": "lobs-server",
+    "agent": "programmer"
+  }
+]
+```
+
+**Use case:** Display recent agent work in dashboard activity feeds with task context.
+
+---
 
 ## Networking
 - Binds to `0.0.0.0:8000`
