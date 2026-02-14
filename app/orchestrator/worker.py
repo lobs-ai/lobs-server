@@ -292,13 +292,15 @@ class WorkerManager:
                     return None
                 
                 result = data.get("result", {})
-                if result.get("status") != "accepted":
+                # Gateway wraps tool results in {content, details}
+                details = result.get("details", result)
+                if details.get("status") != "accepted":
                     logger.error(f"[GATEWAY] sessions_spawn not accepted: {result}")
                     return None
                 
                 return {
-                    "runId": result["runId"],
-                    "childSessionKey": result["childSessionKey"]
+                    "runId": details["runId"],
+                    "childSessionKey": details["childSessionKey"]
                 }
                 
         except Exception as e:
@@ -389,11 +391,27 @@ class WorkerManager:
                     logger.warning(f"[GATEWAY] sessions_list failed: {data}")
                     return None
                 
-                sessions = data.get("result", {}).get("sessions", [])
+                # Gateway wraps tool results in {content, details}
+                result = data.get("result", {})
+                # Try to parse sessions from content text or details
+                sessions = []
+                if "details" in result:
+                    sessions = result["details"].get("sessions", [])
+                elif "content" in result:
+                    import json as _json
+                    for c in result["content"]:
+                        if c.get("type") == "text":
+                            try:
+                                parsed = _json.loads(c["text"])
+                                sessions = parsed.get("sessions", [])
+                            except (ValueError, KeyError):
+                                pass
+                else:
+                    sessions = result.get("sessions", [])
                 
                 # Find our session
                 for sess in sessions:
-                    if sess.get("sessionKey") == session_key:
+                    if sess.get("key") == session_key or sess.get("sessionKey") == session_key:
                         return {
                             "completed": sess.get("status") in ["completed", "failed"],
                             "success": sess.get("status") == "completed",
