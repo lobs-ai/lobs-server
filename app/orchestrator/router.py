@@ -7,7 +7,24 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "inbox-responder"}
+VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "inbox-responder", "project-manager"}
+
+# Model tiers for different agent types
+AGENT_MODEL_MAP = {
+    "programmer": "anthropic/claude-sonnet-4-5",
+    "researcher": "anthropic/claude-sonnet-4-5",
+    "architect": "anthropic/claude-opus-4-6",
+    "reviewer": "anthropic/claude-sonnet-4-5",
+    "writer": "anthropic/claude-sonnet-4-5",
+    "inbox-responder": "anthropic/claude-haiku-4-5",
+    "suggester": "anthropic/claude-haiku-4-5",
+    "project-manager": "anthropic/claude-sonnet-4-5",
+}
+
+
+def get_model_for_task(agent_type: str, task: dict[str, Any]) -> str:
+    """Select model based on agent type and task complexity."""
+    return AGENT_MODEL_MAP.get(agent_type, "anthropic/claude-sonnet-4-5")
 
 
 @dataclass(frozen=True, slots=True)

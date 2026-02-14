@@ -24,3 +24,7 @@ WORKER_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
 # Agent types
 AGENT_TYPES = ("architect", "programmer", "researcher", "reviewer", "writer")
+
+# OpenClaw Gateway API configuration
+GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789")
+GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "341c3e8015df9c77f6ed4cba1359403135994364caf7c668")
