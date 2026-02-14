@@ -356,11 +356,18 @@ class WorkerManager:
         # Check if session completed
         if session_status.get("completed"):
             success = session_status.get("success", False)
+            
+            # Try to fetch the session result summary
+            result_summary = await self._fetch_session_summary(
+                worker_info.child_session_key
+            )
+            
             await self._handle_worker_completion(
                 worker_id=worker_id,
                 worker_info=worker_info,
                 succeeded=success,
-                error_log=session_status.get("error", "")
+                error_log=session_status.get("error", ""),
+                result_summary=result_summary
             )
 
     async def _check_session_status(
@@ -433,12 +440,61 @@ class WorkerManager:
             )
             return None
 
+    async def _fetch_session_summary(
+        self, session_key: str
+    ) -> Optional[str]:
+        """Fetch the last assistant message from a completed session as its summary."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_history",
+                        "args": {
+                            "sessionKey": session_key,
+                            "limit": 3,
+                            "includeTools": False
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                data = await resp.json()
+                if not data.get("ok"):
+                    return None
+                
+                result = data.get("result", {})
+                details = result.get("details", result)
+                messages = details.get("messages", [])
+                
+                # Find last assistant message
+                for msg in reversed(messages):
+                    role = msg.get("role", "")
+                    if role == "assistant":
+                        text = msg.get("content", "")
+                        if isinstance(text, list):
+                            # Extract text from content blocks
+                            text = " ".join(
+                                b.get("text", "") for b in text
+                                if b.get("type") == "text"
+                            )
+                        # Truncate to reasonable size
+                        if text and len(text) > 2000:
+                            text = text[:2000] + "..."
+                        return text if text else None
+                
+                return None
+        except Exception as e:
+            logger.debug(f"[WORKER] Failed to fetch session summary: {e}")
+            return None
+
     async def _handle_worker_completion(
         self,
         worker_id: str,
         worker_info: WorkerInfo,
         succeeded: bool,
-        error_log: str
+        error_log: str,
+        result_summary: Optional[str] = None
     ) -> None:
         """Handle worker completion (success or failure)."""
         duration = time.time() - worker_info.start_time
@@ -541,9 +597,9 @@ class WorkerManager:
                     f"{escalation_result}"
                 )
 
-        # Read work summary if worker succeeded
-        summary = None
-        if succeeded:
+        # Get work summary: prefer session result, fall back to .work-summary file
+        summary = result_summary
+        if not summary and succeeded:
             summary = await self._read_work_summary(project_id)
         
         # Record worker run

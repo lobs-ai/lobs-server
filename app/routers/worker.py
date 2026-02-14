@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import WorkerStatus as WorkerStatusModel, WorkerRun as WorkerRunModel
+from app.models import WorkerStatus as WorkerStatusModel, WorkerRun as WorkerRunModel, Task
 from app.schemas import WorkerStatus, WorkerStatusUpdate, WorkerRun, WorkerRunCreate
 from app.config import settings
 
@@ -62,6 +62,51 @@ async def list_worker_runs(
     result = await db.execute(query)
     runs = result.scalars().all()
     return [WorkerRun.model_validate(r) for r in runs]
+
+
+@router.get("/activity")
+async def list_activity(
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db)
+) -> list[dict]:
+    """List recent agent activity with task details and summaries."""
+    query = (
+        select(WorkerRunModel)
+        .order_by(WorkerRunModel.id.desc())
+        .offset(offset)
+        .limit(min(limit, 100))
+    )
+    result = await db.execute(query)
+    runs = result.scalars().all()
+    
+    activity = []
+    for run in runs:
+        entry = {
+            "id": run.id,
+            "worker_id": run.worker_id,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
+            "ended_at": run.ended_at.isoformat() if run.ended_at else None,
+            "succeeded": run.succeeded,
+            "summary": run.summary,
+            "source": run.source,
+            "task_id": run.task_id,
+            "task_title": None,
+            "project_id": None,
+            "agent": None,
+        }
+        
+        # Join task info
+        if run.task_id:
+            task = await db.get(Task, run.task_id)
+            if task:
+                entry["task_title"] = task.title
+                entry["project_id"] = task.project_id
+                entry["agent"] = task.agent
+        
+        activity.append(entry)
+    
+    return activity
 
 
 @router.post("/history")

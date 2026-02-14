@@ -92,6 +92,34 @@ Built into the server — direct DB access, no HTTP overhead.
 - Models in `app/models.py` — 10+ tables (projects, tasks, memories, inbox, documents, agents, worker_runs, chat_sessions, chat_messages, api_tokens, etc.)
 - Auto-creates tables on startup via `init_db()`
 
+## Task State Management
+
+Tasks have two independent state fields for orchestration and review workflows:
+
+### work_state
+**Purpose:** Tracks orchestration/execution state  
+**Default:** `not_started`  
+**Values:** `not_started`, `ready`, `in_progress`, `completed`, `failed`
+
+**Usage:**
+- Scanner finds tasks with `work_state IN ('not_started', 'ready')`
+- Scheduler creates tasks with `work_state='not_started'`
+- Worker sets to `in_progress` on start, `completed`/`failed` on finish
+- Endpoint: `PUT /api/tasks/{task_id}/work_state` (body: `{"work_state": "ready"}`)
+
+### review_state  
+**Purpose:** Tracks approval/review workflow (tiered approval system)  
+**Default:** `null` (unreviewed)  
+**Values:** `null`, `auto_approved`, `needs_review`, `approved`, `rejected`
+
+**Usage:**
+- Project-manager sets after reviewing completed work
+- `auto_approved` — Routine work approved autonomously
+- `needs_review` — Sent to inbox for human review
+- `approved`/`rejected` — Human decision recorded
+
+**Note:** `status` field is separate (inbox/active/completed/rejected/waiting_on) and represents user-visible kanban state.
+
 ## Testing
 ```bash
 source .venv/bin/activate

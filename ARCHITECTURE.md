@@ -304,6 +304,64 @@ Error:
 
 ## Database Schema
 
+### Core Tables
+
+**`tasks`** — Central task management table
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `id` | String | Unique identifier (8-char hex) |
+| `title` | String | Task title |
+| `status` | String | User-facing status (`inbox`, `active`, `waiting_on`, `completed`, `rejected`) |
+| `work_state` | String | Orchestrator execution state (see below) |
+| `review_state` | String | Approval workflow state |
+| `owner` | String | Task owner (`lobs`, `rafe`, agent name) |
+| `agent` | String | Assigned agent type (`programmer`, `writer`, etc.) |
+| `project_id` | String | Foreign key to `projects.id` |
+| `notes` | Text | Task description and details |
+| `created_at` | DateTime | Creation timestamp |
+| `updated_at` | DateTime | Last modification timestamp |
+| `started_at` | DateTime | When work began |
+| `finished_at` | DateTime | When work completed |
+
+**Other tables:** `projects`, `memories`, `topics`, `documents`, `inbox_items`, `chat_sessions`, `chat_messages`, `events`, `api_tokens`, `worker_runs`, `agent_states`
+
+### Task State Fields
+
+Tasks have **two separate state dimensions**:
+
+#### 1. `status` — User-Facing Kanban State
+
+| Value | Meaning | UI Column |
+|-------|---------|-----------|
+| `inbox` | Needs triage | Inbox |
+| `active` | Ready to work on | Active |
+| `waiting_on` | Blocked by dependency | Waiting On |
+| `completed` | Work finished | Completed |
+| `rejected` | Declined or cancelled | (archived) |
+
+Users move tasks between these columns in Mission Control UI.
+
+#### 2. `work_state` — Orchestrator Execution State
+
+| Value | Meaning | Orchestrator Action |
+|-------|---------|---------------------|
+| `not_started` | Ready for pickup (default) | Scanner includes in eligible tasks |
+| `ready` | Explicitly marked ready | Scanner includes in eligible tasks |
+| `in_progress` | Worker actively working | Monitor tracks for timeouts |
+| `blocked` | Cannot proceed | Skipped by scanner until unblocked |
+| `completed` | Work finished | Finalize task, run approvals |
+
+**Key insight:** A task can be `status='active'` (user moved it to "Active" column) but `work_state='blocked'` (orchestrator can't work on it yet). The orchestrator uses `work_state`, not `status`, to determine eligibility.
+
+**Scanner query:**
+```sql
+SELECT * FROM tasks 
+WHERE status = 'active' 
+  AND work_state IN ('not_started', 'ready')
+  AND agent IS NOT NULL
+```
+
 ### WAL Mode Benefits
 
 - **Concurrent reads:** Multiple readers don't block
