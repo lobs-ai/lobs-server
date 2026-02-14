@@ -395,11 +395,26 @@ async def check_updates(client_commit: str | None = None) -> UpdateCheckResponse
             if rc != 0:
                 branch = "main"
 
-            # Fetch latest from origin (quiet)
-            await _run_git(path, "fetch", "origin", branch, "--quiet")
+            # Fetch latest from origin (with error checking)
+            fetch_rc, fetch_output = await _run_git(path, "fetch", "origin", branch)
+            if fetch_rc != 0:
+                repos.append(RepoUpdateInfo(
+                    name=name, path=path,
+                    local_commit="", local_message="",
+                    local_date="", error=f"Fetch failed: {fetch_output}"
+                ))
+                continue
 
             # Remote HEAD info (latest available)
-            _, remote_commit = await _run_git(path, "rev-parse", "--short", f"origin/{branch}")
+            rc_remote, remote_commit = await _run_git(path, "rev-parse", "--short", f"origin/{branch}")
+            if rc_remote != 0 or not remote_commit:
+                repos.append(RepoUpdateInfo(
+                    name=name, path=path,
+                    local_commit="", local_message="",
+                    local_date="", error=f"Could not find origin/{branch} - fetch may have failed"
+                ))
+                continue
+            
             _, remote_message = await _run_git(path, "log", "-1", f"origin/{branch}", "--format=%s")
             _, remote_date = await _run_git(path, "log", "-1", f"origin/{branch}", "--format=%ci")
 
@@ -416,20 +431,37 @@ async def check_updates(client_commit: str | None = None) -> UpdateCheckResponse
                     local_date = ""
 
                 # Count commits between client and origin
-                _, full_remote = await _run_git(path, "rev-parse", f"origin/{branch}")
-                _, full_local = await _run_git(path, "rev-parse", client_commit)
-                if full_remote.startswith(full_local[:7]):
-                    # Same commit
+                rc_remote, full_remote = await _run_git(path, "rev-parse", f"origin/{branch}")
+                rc_local, full_local = await _run_git(path, "rev-parse", client_commit)
+                
+                # If we can't resolve the client commit, it might be unknown to the server
+                if rc_local != 0:
+                    # Client is on a commit we don't know about - maybe ahead or on a different branch
+                    repos.append(RepoUpdateInfo(
+                        name=name, path=path, branch=branch,
+                        local_commit=client_commit, local_message="(unknown commit)",
+                        local_date="", error="Client commit not found on server - may need to fetch or client is ahead"
+                    ))
+                    continue
+                
+                # Compare full hashes (case-insensitive)
+                if full_remote.lower() == full_local.lower():
+                    # Same commit - up to date
                     ahead, behind = 0, 0
                 else:
-                    _, rev_list = await _run_git(
+                    # Different commits - count the difference
+                    rc_count, rev_list = await _run_git(
                         path, "rev-list", "--left-right", "--count",
                         f"{client_commit}...origin/{branch}"
                     )
                     ahead, behind = 0, 0
-                    parts = rev_list.split()
-                    if len(parts) == 2:
-                        ahead, behind = int(parts[0]), int(parts[1])
+                    if rc_count == 0:
+                        parts = rev_list.split()
+                        if len(parts) == 2:
+                            ahead, behind = int(parts[0]), int(parts[1])
+                    else:
+                        # rev-list failed - fall back to simple comparison
+                        behind = 1  # Assume there's an update if commits differ
             else:
                 # No client commit — use server's local HEAD
                 _, local_commit = await _run_git(path, "rev-parse", "--short", "HEAD")
