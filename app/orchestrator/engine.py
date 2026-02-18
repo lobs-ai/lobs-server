@@ -81,8 +81,6 @@ class OrchestratorEngine:
         self._pm_interval = 60  # PM routing review every 60 seconds max
         self._pm_active = False
         self._pm_session_id: Optional[str] = None
-        self._last_pm_proactive = 0.0
-        self._pm_proactive_interval = 1800  # PM proactive review every 30 minutes
         self._last_reflection_check = 0.0
         self._reflection_interval = 21600  # every 6 hours
         self._last_daily_compression_date: str | None = None
@@ -447,15 +445,6 @@ class OrchestratorEngine:
                 except Exception as e:
                     logger.error(f"[ENGINE] PM coordination failed: {e}", exc_info=True)
 
-            # 3b. PM Proactive Review (every 10 minutes)
-            if (not self._paused and self._openclaw_available 
-                    and not self._pm_active
-                    and current_time - self._last_pm_proactive >= self._pm_proactive_interval):
-                try:
-                    await self._spawn_pm_proactive_review(worker_manager)
-                    self._last_pm_proactive = current_time
-                except Exception as e:
-                    logger.error(f"[ENGINE] PM proactive review failed: {e}", exc_info=True)
 
             # 4. Check active workers
             initial_active = len(worker_manager.active_workers)
@@ -674,153 +663,14 @@ Route ALL tasks. Do not skip any."""
             self._pm_session_id = None
 
     async def _spawn_pm_proactive_review(self, worker_manager: WorkerManager) -> None:
-        """Spawn project-manager for proactive system health review.
-        
-        Passes all recent/active tasks to PM so it has full context and won't create duplicates.
-        Uses tiered approval system (small/medium/large) for autonomous task creation.
+        """Deprecated: proactive PM task creation is disabled.
+
+        All autonomous work proposals must flow through the 6-hour reflection -> initiative
+        sweep -> Lobs approval path before any task is created.
         """
-        # Gather recent task context so PM knows what already exists
-        async with self._session_factory() as check_db:
-            from sqlalchemy import select, or_, and_
-            from app.models import Task as TaskModel
-            
-            # Get all active + recently completed (24h) tasks
-            recent_cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
-            query = select(TaskModel).where(
-                or_(
-                    TaskModel.status == "active",
-                    and_(
-                        TaskModel.status == "completed",
-                        TaskModel.updated_at >= recent_cutoff
-                    )
-                )
-            ).order_by(TaskModel.updated_at.desc())
-            
-            result = await check_db.execute(query)
-            recent_tasks = result.scalars().all()
-            
-            # Build compact task summaries (title + status only)
-            task_summaries = []
-            for t in recent_tasks[:50]:
-                task_summaries.append(
-                    f"- {t.title} ({t.status}, {t.work_state or 'unknown'})"
-                )
-            
-            task_context = "\n".join(task_summaries) if task_summaries else "(No recent tasks)"
+        logger.info("[ENGINE] PM proactive review is disabled by governance policy")
+        return
 
-        prompt = f"""## Proactive System Review
-
-You are the Project Manager for the lobs-server system. Your job is to review system health and create small maintenance tasks when needed.
-
-### 🎯 Tiered Approval System
-
-**🟢 SMALL (Create directly)**
-- Bug fixes (clear, reproducible)
-- Missing documentation (specific gaps)
-- Test coverage for specific modules
-- Small refactors (< 50 lines)
-- Dependency updates (security/critical)
-
-**🟡 MEDIUM (Create with justification)**
-- Utility functions / helpers
-- Moderate refactors (50-200 lines)
-- Performance optimizations (specific bottlenecks)
-- Non-critical dependency updates
-
-**🔴 LARGE (Inbox item for Rafe)**
-- New features
-- UI/UX changes
-- Architecture changes
-- Breaking changes
-- Anything requiring design decisions
-
-### 📋 Recent/Active Tasks (DO NOT DUPLICATE)
-{task_context}
-
-### ⚠️ CRITICAL DEDUP RULES
-1. **Check the list above** before creating any task
-2. **DO NOT create** if a similar task exists (even if worded differently)
-3. **DO NOT create** "improvement" tasks without specific issues
-4. **DO NOT create** generic tasks (e.g., "improve code quality")
-
-### 🔍 Your Workflow
-
-**Step 1: Health Check**
-```bash
-./scripts/lobs-tasks list  # Check for stuck/failed tasks
-./scripts/lobs-status agents  # Check agent health
-```
-
-**Step 2: Triage Existing Issues**
-- Stuck tasks (in_progress with no worker) → Reset: `./scripts/lobs-tasks set-work-state TASK_ID not_started`
-- Failed tasks → Reset if retryable
-- Repeated failures (3+ times) → Create inbox item
-
-**Step 3: Identify New Work (if any)**
-Look for:
-- Missing tests for new code
-- Undocumented APIs or modules
-- Known bugs from recent failures
-- Security updates flagged by dependabot
-
-**Step 4: Create Tasks (Tier-Appropriate)**
-For **🟢 SMALL** tasks only:
-```bash
-./scripts/lobs-tasks create "specific task title" --project PROJECT_ID --notes "clear description" --agent AGENT_TYPE
-```
-
-For **🟡 MEDIUM** tasks:
-Create WITH justification explaining:
-- Why it's needed now
-- What specific problem it solves
-- Estimated scope
-
-For **🔴 LARGE** tasks:
-```bash
-./scripts/lobs-inbox create "proposal title" --content "detailed proposal" --severity low
-```
-
-### 🚫 DO NOT CREATE
-- Duplicate tasks (check the list!)
-- Vague "improvement" tasks
-- Tasks without clear acceptance criteria
-- Code review tasks (those are triggered by completion)
-- Generic "update docs" (be specific about what needs docs)
-
-### 📊 Token Efficiency
-- Keep it concise
-- Only create tasks if there's actual work to do
-- Skip this review if everything looks healthy
-- Exit cleanly if no action needed"""
-
-        try:
-            spawn_result = await worker_manager._spawn_session(
-                task_prompt=prompt,
-                agent_id="project-manager",
-                model="openai-codex/gpt-5.3-codex",
-                label="pm-proactive-review"
-            )
-
-            if spawn_result:
-                self._pm_active = True
-                self._pm_session_id = spawn_result.get("runId")
-                logger.info(
-                    f"[ENGINE] Spawned PM for proactive review: {spawn_result['runId']}"
-                )
-
-                run_id = spawn_result["runId"]
-                async def reset_pm_status():
-                    await asyncio.sleep(150)
-                    if self._pm_session_id == run_id:
-                        self._pm_active = False
-                        self._pm_session_id = None
-
-                asyncio.create_task(reset_pm_status())
-            else:
-                logger.warning("[ENGINE] Failed to spawn PM proactive review")
-
-        except Exception as e:
-            logger.error(f"[ENGINE] Failed to spawn PM proactive review: {e}", exc_info=True)
 
     async def _refresh_runtime_settings(self, db: Any) -> None:
         """Load runtime loop intervals from DB without restart."""
