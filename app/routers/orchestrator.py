@@ -17,6 +17,18 @@ from app.orchestrator.model_router import (
     MODEL_ROUTER_TIER_STRONG_KEY,
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
 )
+from app.orchestrator.runtime_settings import (
+    DEFAULT_RUNTIME_SETTINGS,
+    SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
+    SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
+    SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
+    SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
+    SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
+    SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
+    SETTINGS_KEY_MEMORY_BACKEND,
+    SETTINGS_KEY_MEMORY_QMD_CONFIG,
+    SETTINGS_KEY_MEMORY_SEARCH_PATHS,
+)
 
 router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
 
@@ -44,6 +56,24 @@ class InitiativeDecisionRequest(BaseModel):
     selected_project_id: str | None = None
     decision_summary: str | None = None
     learning_feedback: str | None = None
+
+
+class RuntimeIntervalsUpdate(BaseModel):
+    reflection_seconds: int | None = None
+    sweep_seconds: int | None = None
+    diagnostic_seconds: int | None = None
+    github_sync_seconds: int | None = None
+
+
+class MemoryConfigUpdate(BaseModel):
+    backend: str | None = None  # sqlite|qmd
+    qmd: dict[str, Any] | None = None
+    extra_paths: list[str] | None = None
+
+
+class ModelPolicyUpdate(BaseModel):
+    strict_coding_tier: bool | None = None
+    degrade_on_quota: bool | None = None
 
 
 def get_orchestrator(request: Request) -> OrchestratorEngine:
@@ -198,6 +228,99 @@ async def update_model_router_config(
     await db.commit()
 
     return await get_model_router_config(db)
+
+
+def _upsert_setting_payload(current: OrchestratorSetting | None, key: str, value: Any) -> OrchestratorSetting:
+    if current is None:
+        return OrchestratorSetting(key=key, value=value)
+    current.value = value
+    return current
+
+
+@router.get("/runtime")
+async def get_runtime_settings(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    keys = tuple(DEFAULT_RUNTIME_SETTINGS.keys())
+    result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
+    rows = {row.key: row.value for row in result.scalars().all()}
+
+    merged = dict(DEFAULT_RUNTIME_SETTINGS)
+    merged.update(rows)
+    return merged
+
+
+@router.put("/runtime/intervals")
+async def update_runtime_intervals(
+    payload: RuntimeIntervalsUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    updates: dict[str, int] = {}
+    if payload.reflection_seconds is not None:
+        updates[SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS] = max(60, int(payload.reflection_seconds))
+    if payload.sweep_seconds is not None:
+        updates[SETTINGS_KEY_SWEEP_INTERVAL_SECONDS] = max(60, int(payload.sweep_seconds))
+    if payload.diagnostic_seconds is not None:
+        updates[SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS] = max(60, int(payload.diagnostic_seconds))
+    if payload.github_sync_seconds is not None:
+        updates[SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS] = max(30, int(payload.github_sync_seconds))
+
+    for key, value in updates.items():
+        row = await db.get(OrchestratorSetting, key)
+        row = _upsert_setting_payload(row, key, value)
+        db.add(row)
+
+    await db.commit()
+    return await get_runtime_settings(db)
+
+
+@router.put("/runtime/memory")
+async def update_memory_runtime_config(
+    payload: MemoryConfigUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if payload.backend is not None:
+        backend = payload.backend.strip().lower()
+        if backend not in {"sqlite", "qmd"}:
+            raise HTTPException(status_code=400, detail="memory backend must be 'sqlite' or 'qmd'")
+        row = await db.get(OrchestratorSetting, SETTINGS_KEY_MEMORY_BACKEND)
+        row = _upsert_setting_payload(row, SETTINGS_KEY_MEMORY_BACKEND, backend)
+        db.add(row)
+
+    if payload.qmd is not None:
+        qmd_cfg = dict(DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_MEMORY_QMD_CONFIG])
+        qmd_cfg.update(payload.qmd)
+        row = await db.get(OrchestratorSetting, SETTINGS_KEY_MEMORY_QMD_CONFIG)
+        row = _upsert_setting_payload(row, SETTINGS_KEY_MEMORY_QMD_CONFIG, qmd_cfg)
+        db.add(row)
+
+    if payload.extra_paths is not None:
+        clean_paths = [p.strip() for p in payload.extra_paths if p and p.strip()]
+        row = await db.get(OrchestratorSetting, SETTINGS_KEY_MEMORY_SEARCH_PATHS)
+        row = _upsert_setting_payload(row, SETTINGS_KEY_MEMORY_SEARCH_PATHS, clean_paths)
+        db.add(row)
+
+    await db.commit()
+    return await get_runtime_settings(db)
+
+
+@router.put("/runtime/model-policy")
+async def update_model_policy(
+    payload: ModelPolicyUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    if payload.strict_coding_tier is not None:
+        row = await db.get(OrchestratorSetting, SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER)
+        row = _upsert_setting_payload(row, SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER, bool(payload.strict_coding_tier))
+        db.add(row)
+
+    if payload.degrade_on_quota is not None:
+        row = await db.get(OrchestratorSetting, SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA)
+        row = _upsert_setting_payload(row, SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA, bool(payload.degrade_on_quota))
+        db.add(row)
+
+    await db.commit()
+    return await get_runtime_settings(db)
 
 
 @router.get("/intelligence/summary")

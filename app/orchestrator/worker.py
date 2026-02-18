@@ -50,6 +50,10 @@ from app.orchestrator.model_router import (
     MODEL_ROUTER_TIER_STRONG_KEY,
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
 )
+from app.orchestrator.runtime_settings import (
+    SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
+    SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
+)
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
@@ -203,8 +207,14 @@ class WorkerManager:
             spawn_result: Optional[dict[str, str]] = None
             attempts: list[dict[str, Any]] = []
 
+            candidate_models = list(decision.models)
+            strict_coding_tier = bool(router_cfg.get("strict_coding_tier", True))
+            if agent_type == "programmer" and strict_coding_tier and candidate_models:
+                # Do not silently downgrade coding runs.
+                candidate_models = [candidate_models[0]]
+
             # Call Gateway API: sessions_spawn with fallback chain
-            for idx, candidate in enumerate(decision.models):
+            for idx, candidate in enumerate(candidate_models):
                 spawn_result, err = await self._spawn_session(
                     task_prompt=prompt_content,
                     agent_id=agent_type,
@@ -252,6 +262,8 @@ class WorkerManager:
                     "fallback_reason": (
                         "provider_failure" if chosen_model != decision.models[0] else None
                     ),
+                    "strict_coding_tier": strict_coding_tier,
+                    "degrade_on_quota": bool(router_cfg.get("degrade_on_quota", False)),
                 },
             )
             self.active_workers[worker_id] = worker_info
@@ -309,6 +321,8 @@ class WorkerManager:
             MODEL_ROUTER_TIER_STANDARD_KEY,
             MODEL_ROUTER_TIER_STRONG_KEY,
             MODEL_ROUTER_AVAILABLE_MODELS_KEY,
+            SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
+            SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
         )
 
         result = await self.db.execute(
@@ -329,6 +343,8 @@ class WorkerManager:
                 "strong": _list_value(MODEL_ROUTER_TIER_STRONG_KEY),
             },
             "available_models": _list_value(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
+            "strict_coding_tier": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER, True)),
+            "degrade_on_quota": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA, False)),
         }
 
     async def _spawn_session(

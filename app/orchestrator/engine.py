@@ -32,9 +32,16 @@ from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.config import POLL_INTERVAL
-from app.models import Project as ProjectModel
+from app.models import Project as ProjectModel, OrchestratorSetting
 from app.services.github_sync import GitHubSyncService
 from sqlalchemy import select
+from app.orchestrator.runtime_settings import (
+    DEFAULT_RUNTIME_SETTINGS,
+    SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
+    SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
+    SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
+    SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +88,8 @@ class OrchestratorEngine:
         self._diagnostic_interval = 600  # every 10 minutes
         self._last_github_sync_check = 0.0
         self._github_sync_interval = 120  # every 2 minutes
+        self._last_runtime_settings_refresh = 0.0
+        self._runtime_settings_refresh_interval = 60  # refresh from DB every minute
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -209,6 +218,14 @@ class OrchestratorEngine:
             # 1. Check scheduled events (every 60 seconds)
             import time
             current_time = time.time()
+
+            # 0. Refresh runtime-configurable loop intervals
+            if current_time - self._last_runtime_settings_refresh >= self._runtime_settings_refresh_interval:
+                try:
+                    await self._refresh_runtime_settings(db)
+                except Exception as e:
+                    logger.warning("[ENGINE] Runtime settings refresh failed: %s", e)
+                self._last_runtime_settings_refresh = current_time
             if current_time - self._last_scheduler_check >= self._scheduler_interval:
                 try:
                     result = await scheduler.check_due_events()
@@ -699,6 +716,30 @@ For **🔴 LARGE** tasks:
 
         except Exception as e:
             logger.error(f"[ENGINE] Failed to spawn PM proactive review: {e}", exc_info=True)
+
+    async def _refresh_runtime_settings(self, db: Any) -> None:
+        """Load runtime loop intervals from DB without restart."""
+        keys = (
+            SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
+            SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
+            SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
+            SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
+        )
+        result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
+        rows = {row.key: row.value for row in result.scalars().all()}
+
+        def _as_int(key: str) -> int:
+            default = int(DEFAULT_RUNTIME_SETTINGS[key])
+            raw = rows.get(key, default)
+            try:
+                return max(30, int(raw))
+            except Exception:
+                return default
+
+        self._reflection_interval = _as_int(SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS)
+        self._sweep_interval = _as_int(SETTINGS_KEY_SWEEP_INTERVAL_SECONDS)
+        self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
+        self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""

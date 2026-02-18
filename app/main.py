@@ -62,10 +62,18 @@ async def lifespan(app: FastAPI):
     settings.ensure_data_dir()
     await init_db()
     
-    # Sync memories from filesystem on startup
+    # Sync memories from filesystem on startup + resolve memory backend config
     try:
         from app.services.memory_sync import sync_agent_memories
+        from app.services.memory_backend import get_memory_runtime_config
         async with AsyncSessionLocal() as db:
+            runtime_mem = await get_memory_runtime_config(db)
+            logger.info(
+                "Memory backend runtime: backend=%s resolved=%s fallback=%s",
+                runtime_mem.get("backend"),
+                runtime_mem.get("resolved_backend"),
+                runtime_mem.get("fallback_reason"),
+            )
             logger.info("Syncing agent memories from filesystem...")
             stats = await sync_agent_memories(db)
             await db.commit()

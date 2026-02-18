@@ -18,6 +18,7 @@ from app.schemas import (
 )
 from app.config import settings
 from app.services.memory_sync import sync_agent_memories, get_agent_memory_counts
+from app.services.memory_backend import get_memory_runtime_config
 from app.auth import require_auth
 
 router = APIRouter(prefix="/memories", tags=["memories"])
@@ -27,6 +28,15 @@ class QuickCaptureRequest(BaseModel):
     """Schema for quick capture endpoint."""
     content: str
     agent: str = "main"
+
+
+@router.get("/runtime")
+async def memory_runtime(
+    _token: str = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Return active memory backend + QMD fallback config."""
+    return await get_memory_runtime_config(db)
 
 
 def generate_snippet(text: str, query: str, max_length: int = 200) -> str:
