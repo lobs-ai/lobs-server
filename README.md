@@ -7,7 +7,7 @@ Central backend for [Lobs Mission Control](https://github.com/RafeSymonds/lobs-m
 - **Memory System** — Second brain: daily notes, long-term memory, search, quick capture
 - **Topics/Knowledge** — Research workspaces with documents and auto-created topics
 - **Chat** — Real-time WebSocket messaging with OpenClaw agent bridge
-- **Orchestrator** — Automatic task routing via project-manager, worker spawning, failure escalation
+- **Orchestrator** — Automatic task routing via project-manager, worker spawning, model routing with fallback chains, failure escalation
 - **Calendar Integration** — Events, recurring schedules, tracker deadline sync
 - **System Health** — Activity timeline, cost tracking, monitoring
 - **Auth** — Bearer token authentication on all endpoints
@@ -54,6 +54,14 @@ See [AGENTS.md](AGENTS.md) for complete endpoint reference.
 source .venv/bin/activate
 python -m pytest -v
 ```
+
+## See Also
+
+**Lobs Ecosystem Documentation** (in `~/self-improvement/docs/`):
+- [LOBS_ECOSYSTEM.md](../self-improvement/docs/LOBS_ECOSYSTEM.md) — Cross-project architecture and feature matrix
+- [GETTING_STARTED.md](../self-improvement/docs/GETTING_STARTED.md) — 20-30 min ecosystem onboarding
+- [TECH_STACK_REFERENCE.md](../self-improvement/docs/TECH_STACK_REFERENCE.md) — Technology choices and patterns
+- [Code Quality System](../self-improvement/README.md) — Handoffs, reviews, technical debt tracking
 
 ## License
 Private

@@ -65,6 +65,47 @@ AttributeError: 'AsyncClient' object has no attribute 'websocket_connect'
 
 ---
 
+### 3. Time-Based Test Race Condition
+
+**Status:** 🔴 Critical — Flaky test  
+**Affected:** `tests/test_status.py::test_costs_with_worker_data`  
+**Impact:** Intermittent CI failures, test unreliability
+
+**Problem:**
+Test creates worker runs using timestamps relative to "now," but the endpoint queries data based on "today" boundaries. If the test runs near midnight UTC (23:00-01:00), the worker run may fall into yesterday while the query looks for today's data.
+
+**Example Failure:**
+```
+Test setup at 23:55 UTC Feb 14:
+  worker_run.started_at = now - timedelta(hours=1)  # 22:55 Feb 14
+
+Endpoint execution at 00:05 UTC Feb 15:
+  today_start = now.replace(hour=0, minute=0)  # 00:00 Feb 15
+  Query: WHERE started_at >= '2026-02-15 00:00:00'
+  
+Result: No matches (worker run is from Feb 14) → Test fails
+```
+
+**Observed Failure:**
+```
+FAILED tests/test_status.py::test_costs_with_worker_data - assert 0 == 1000
+```
+
+**Root Cause:** Test data uses relative timestamps instead of fixed timestamps within a known "today" boundary.
+
+**Impact:**
+- Flaky test causes false CI failures
+- Developers waste time debugging intermittent failures  
+- Test suite loses trust
+
+**Workaround:** Re-run tests during daytime UTC hours  
+**Fix Required:** Use deterministic timestamps that are always within "today" (e.g., set test time to noon, or freeze time in test)  
+**Priority:** Immediate — flaky tests erode confidence
+
+**Reference:** [Code Quality Review 2026-02-14 Evening](~/self-improvement/review-notes.md)
+
+---
+
 ## Important Issues
 
 ### 1. WorkerRun Schema Missing summary Field
