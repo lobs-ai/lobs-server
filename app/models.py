@@ -46,6 +46,12 @@ class Task(Base):
     shape = Column(String)
     github_issue_number = Column(Integer)
     agent = Column(String)
+    external_source = Column(String)  # github
+    external_id = Column(String)
+    external_updated_at = Column(DateTime)
+    sync_state = Column(String)  # synced/local_changed/conflict
+    conflict_payload = Column(JSON)
+    workspace_id = Column(String, ForeignKey("workspaces.id"))
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
     
@@ -491,3 +497,92 @@ class APIToken(Base):
     created_at = Column(DateTime, default=func.now(), nullable=False)
     last_used_at = Column(DateTime)
     active = Column(Boolean, default=True, nullable=False)
+
+
+class Workspace(Base):
+    """Workspace tenancy root."""
+    __tablename__ = "workspaces"
+
+    id = Column(String, primary_key=True)
+    slug = Column(String, nullable=False, unique=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text)
+    is_default = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class WorkspaceFile(Base):
+    """File metadata in a workspace."""
+    __tablename__ = "workspace_files"
+    __table_args__ = (UniqueConstraint("workspace_id", "path", name="ix_workspace_file_path_unique"),)
+
+    id = Column(String, primary_key=True)
+    workspace_id = Column(String, ForeignKey("workspaces.id"), nullable=False, index=True)
+    path = Column(String, nullable=False)
+    title = Column(String)
+    content = Column(Text)
+    content_hash = Column(String)
+    file_metadata = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class FileLink(Base):
+    """Link graph between workspace files."""
+    __tablename__ = "file_links"
+
+    id = Column(String, primary_key=True)
+    workspace_id = Column(String, ForeignKey("workspaces.id"), nullable=False, index=True)
+    source_file_id = Column(String, ForeignKey("workspace_files.id"), nullable=False)
+    target_file_id = Column(String, ForeignKey("workspace_files.id"), nullable=False)
+    relation = Column(String, nullable=False, default="references")
+    weight = Column(Float, default=1.0)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class AgentProfile(Base):
+    """Agent profile/prompt registry."""
+    __tablename__ = "agent_profiles"
+
+    id = Column(String, primary_key=True)
+    agent_type = Column(String, nullable=False, unique=True, index=True)
+    display_name = Column(String)
+    prompt_template = Column(Text)
+    config = Column(JSON)
+    policy_tier = Column(String, default="standard", nullable=False)
+    active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class RoutineRegistry(Base):
+    """Routine registry for automation policies."""
+    __tablename__ = "routine_registry"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False, unique=True)
+    description = Column(Text)
+    trigger = Column(String)
+    schedule = Column(String)
+    policy_tier = Column(String, default="standard", nullable=False)
+    enabled = Column(Boolean, default=True, nullable=False)
+    config = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class KnowledgeRequest(Base):
+    """Knowledge request model (successor to research requests)."""
+    __tablename__ = "knowledge_requests"
+
+    id = Column(String, primary_key=True)
+    workspace_id = Column(String, ForeignKey("workspaces.id"))
+    project_id = Column(String, ForeignKey("projects.id"))
+    topic_id = Column(String, ForeignKey("topics.id"))
+    prompt = Column(Text, nullable=False)
+    status = Column(String, default="pending", nullable=False)
+    response = Column(Text)
+    source_research_request_id = Column(String, ForeignKey("research_requests.id"))
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

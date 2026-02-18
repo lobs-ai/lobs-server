@@ -38,6 +38,9 @@ from app.routers import (
     memories,
     status,
     topics,
+    workspaces,
+    governance,
+    intent,
 )
 from app.routers import text_dumps
 
@@ -164,6 +167,9 @@ app.include_router(backup.router, prefix=settings.API_PREFIX, dependencies=[Depe
 app.include_router(chat.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(memories.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(status.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(workspaces.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(governance.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(intent.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 
 
 @app.get("/")

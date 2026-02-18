@@ -23,6 +23,10 @@ class Settings:
     ORCHESTRATOR_POLL_INTERVAL: int = int(os.getenv("ORCHESTRATOR_POLL_INTERVAL", "10"))
     ORCHESTRATOR_MAX_WORKERS: int = int(os.getenv("ORCHESTRATOR_MAX_WORKERS", "3"))
     
+    # Task Improvements roadmap
+    DEFAULT_INBOX_PROJECT_ID: str = os.getenv("DEFAULT_INBOX_PROJECT_ID", "inbox")
+    GITHUB_SYNC_PUSH_ENABLED: bool = os.getenv("GITHUB_SYNC_PUSH_ENABLED", "false").lower() in ("true", "1", "yes")
+
     # Backup
     BACKUP_ENABLED: bool = os.getenv("BACKUP_ENABLED", "true").lower() in ("true", "1", "yes")
     BACKUP_INTERVAL_HOURS: int = int(os.getenv("BACKUP_INTERVAL_HOURS", "6"))

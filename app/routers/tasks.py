@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models import Task as TaskModel
+from app.models import Task as TaskModel, Project as ProjectModel
 from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate
 from app.config import settings
 
@@ -56,7 +56,23 @@ async def create_task(
     existing = await db.execute(select(TaskModel).where(TaskModel.id == task.id))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail=f"Task with id '{task.id}' already exists")
-    db_task = TaskModel(**task.model_dump())
+
+    payload = task.model_dump()
+    if not payload.get("project_id"):
+        inbox_id = settings.DEFAULT_INBOX_PROJECT_ID
+        inbox_project = await db.execute(select(ProjectModel).where(ProjectModel.id == inbox_id))
+        if not inbox_project.scalar_one_or_none():
+            db.add(ProjectModel(
+                id=inbox_id,
+                title="Inbox",
+                notes="Default inbox project for unscoped tasks",
+                archived=False,
+                type="kanban",
+                sort_order=0,
+            ))
+        payload["project_id"] = inbox_id
+
+    db_task = TaskModel(**payload)
     db.add(db_task)
     await db.flush()
     await db.refresh(db_task)
@@ -91,7 +107,10 @@ async def update_task(
     update_data = task_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(task, key, value)
-    
+
+    if task.external_source == "github":
+        task.sync_state = "local_changed"
+
     await db.flush()
     await db.refresh(task)
     return Task.model_validate(task)

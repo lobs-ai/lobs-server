@@ -61,6 +61,12 @@ class TaskBase(BaseModel):
     shape: Optional[str] = None
     github_issue_number: Optional[int] = None
     agent: Optional[str] = None
+    external_source: Optional[str] = None
+    external_id: Optional[str] = None
+    external_updated_at: Optional[datetime] = None
+    sync_state: Optional[str] = None
+    conflict_payload: Optional[Any] = None
+    workspace_id: Optional[str] = None
 
 
 class TaskCreate(TaskBase):
@@ -84,6 +90,12 @@ class TaskUpdate(BaseModel):
     shape: Optional[str] = None
     github_issue_number: Optional[int] = None
     agent: Optional[str] = None
+    external_source: Optional[str] = None
+    external_id: Optional[str] = None
+    external_updated_at: Optional[datetime] = None
+    sync_state: Optional[str] = None
+    conflict_payload: Optional[Any] = None
+    workspace_id: Optional[str] = None
 
 
 class TaskStatusUpdate(BaseModel):
@@ -778,3 +790,128 @@ class CostSummary(BaseModel):
     week: CostPeriod
     month: CostPeriod
     by_agent: list[AgentCostBreakdown]
+
+
+class WorkspaceBase(BaseModel):
+    slug: str
+    name: str
+    description: Optional[str] = None
+    is_default: bool = False
+
+
+class WorkspaceCreate(WorkspaceBase):
+    id: str
+
+
+class WorkspaceUpdate(BaseModel):
+    slug: Optional[str] = None
+    name: Optional[str] = None
+    description: Optional[str] = None
+    is_default: Optional[bool] = None
+
+
+class Workspace(WorkspaceBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WorkspaceFileBase(BaseModel):
+    workspace_id: str
+    path: str
+    title: Optional[str] = None
+    content: Optional[str] = None
+    content_hash: Optional[str] = None
+    file_metadata: Optional[Any] = None
+
+
+class WorkspaceFileCreate(WorkspaceFileBase):
+    id: str
+
+
+class WorkspaceFile(WorkspaceFileBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class FileLinkBase(BaseModel):
+    workspace_id: str
+    source_file_id: str
+    target_file_id: str
+    relation: str = "references"
+    weight: float = 1.0
+
+
+class FileLinkCreate(FileLinkBase):
+    id: str
+
+
+class FileLink(FileLinkBase):
+    id: str
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AgentProfileBase(BaseModel):
+    agent_type: str
+    display_name: Optional[str] = None
+    prompt_template: Optional[str] = None
+    config: Optional[Any] = None
+    policy_tier: str = "standard"
+    active: bool = True
+
+
+class AgentProfileCreate(AgentProfileBase):
+    id: str
+
+
+class AgentProfile(AgentProfileBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoutineRegistryBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    trigger: Optional[str] = None
+    schedule: Optional[str] = None
+    policy_tier: str = "standard"
+    enabled: bool = True
+    config: Optional[Any] = None
+
+
+class RoutineRegistryCreate(RoutineRegistryBase):
+    id: str
+
+
+class RoutineRegistry(RoutineRegistryBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class KnowledgeRequestBase(BaseModel):
+    workspace_id: Optional[str] = None
+    project_id: Optional[str] = None
+    topic_id: Optional[str] = None
+    prompt: str
+    status: str = "pending"
+    response: Optional[str] = None
+    source_research_request_id: Optional[str] = None
+
+
+class KnowledgeRequestCreate(KnowledgeRequestBase):
+    id: str
+
+
+class KnowledgeRequest(KnowledgeRequestBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
