@@ -77,8 +77,10 @@ class OrchestratorEngine:
         self._scheduler_interval = 60  # Check events every 60 seconds
         self._last_inbox_check = 0.0
         self._inbox_interval = 45  # Process inbox every 45 seconds
-        self._last_routing_check = 0.0
-        self._routing_interval = 60  # Auto-route unassigned tasks every 60 seconds
+        self._last_pm_check = 0.0
+        self._pm_interval = 60  # PM routing review every 60 seconds max
+        self._pm_active = False
+        self._pm_session_id: Optional[str] = None
         self._last_reflection_check = 0.0
         self._reflection_interval = 21600  # every 6 hours
         self._last_daily_compression_date: str | None = None
@@ -432,32 +434,17 @@ class OrchestratorEngine:
                 except Exception as e:
                     logger.error("[ENGINE] Diagnostic triggers failed: %s", e, exc_info=True)
 
-            # 7. Auto-routing - assign agents for unrouted tasks (every 60 seconds)
-            if not self._paused and current_time - self._last_routing_check >= self._routing_interval:
+            # 7. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
+            if not self._paused and self._openclaw_available and current_time - self._last_pm_check >= self._pm_interval:
                 try:
                     unrouted_tasks = await scanner.get_unrouted_tasks()
-                    routed_count = 0
-                    for task_dict in unrouted_tasks:
-                        task_id = task_dict.get("id")
-                        if not task_id:
-                            continue
-                        agent_type = await capability_router.route(task_dict)
-                        db_task = await db.get(TaskModel, task_id)
-                        if db_task is None:
-                            continue
-                        db_task.agent = agent_type
-                        db_task.updated_at = datetime.now(timezone.utc)
-                        routed_count += 1
-
-                    if routed_count > 0:
-                        await db.commit()
+                    if unrouted_tasks and not self._pm_active:
+                        await self._spawn_pm_review(unrouted_tasks, worker_manager)
                         activity = True
-                        logger.info("[ENGINE] Auto-routed %s task(s)", routed_count)
-
-                    self._last_routing_check = current_time
+                    self._last_pm_check = current_time
                 except Exception as e:
-                    logger.error("[ENGINE] Auto-routing failed: %s", e, exc_info=True)
-                    await db.rollback()
+                    logger.error(f"[ENGINE] PM coordination failed: {e}", exc_info=True)
+
 
             # 4. Check active workers
             initial_active = len(worker_manager.active_workers)
@@ -486,7 +473,7 @@ class OrchestratorEngine:
             if not self._openclaw_available:
                 return activity
 
-            # 7. Scan for eligible tasks (already auto-routed)
+            # 7. Scan for eligible tasks (already routed by PM)
             eligible_tasks = await scanner.get_eligible_tasks()
             
             if not eligible_tasks:
@@ -593,6 +580,96 @@ class OrchestratorEngine:
 
         return activity
 
+    async def _spawn_pm_review(self, unrouted_tasks: list[dict[str, Any]], worker_manager: WorkerManager) -> None:
+        """Spawn project-manager to review and route unrouted tasks."""
+        # Limit to 10 tasks at a time to avoid overwhelming the PM
+        tasks_to_route = unrouted_tasks[:10]
+        
+        task_summaries = []
+        for t in tasks_to_route:
+            task_id = t.get('id', 'unknown')
+            title = t.get('title', 'untitled')
+            project_id = t.get('project_id', 'unknown')
+            notes = t.get('notes') or ''
+            
+            task_summaries.append(
+                f"- ID: {task_id}\n"
+                f"  Title: {title}\n"
+                f"  Project: {project_id}\n"
+                f"  Notes: {notes[:200]}"
+            )
+        
+        prompt = f"""## Task Routing Review
+
+You have {len(tasks_to_route)} task(s) that need agent assignment. Review each and assign the best agent.
+
+### Available Agents
+- programmer: Code implementation, bug fixes, features (codex)
+- researcher: Investigation, analysis, comparison (codex)
+- architect: System design, technical strategy (codex)
+- reviewer: Code review, quality checks (codex)
+- writer: Documentation, summaries, content (codex)
+
+### Tasks to Route
+{chr(10).join(task_summaries)}
+
+### Instructions
+For each task, assign the agent using the script:
+```bash
+./scripts/lobs-tasks set-agent FULL_TASK_ID AGENT_TYPE
+```
+
+Choose the agent based on:
+1. Task title and notes content
+2. Keywords (research → researcher, design → architect, etc.)
+3. Default to programmer if unclear
+
+Route ALL tasks. Do not skip any."""
+
+        try:
+            # Spawn PM via Gateway API (same mechanism as specialist workers)
+            spawn_result = await worker_manager._spawn_session(
+                task_prompt=prompt,
+                agent_id="project-manager",
+                model="openai-codex/gpt-5.3-codex",  # Standardized primary model
+                label="pm-task-routing"
+            )
+            
+            if not spawn_result:
+                logger.warning("[ENGINE] Failed to spawn PM review session")
+                return
+            
+            self._pm_active = True
+            self._pm_session_id = spawn_result.get("runId")
+            logger.info(
+                f"[ENGINE] Spawned PM for task routing: {spawn_result['runId']} "
+                f"({len(tasks_to_route)} task(s))"
+            )
+            
+            # Schedule PM status reset after timeout
+            run_id = spawn_result["runId"]
+            async def reset_pm_status():
+                await asyncio.sleep(150)  # 2.5 minutes
+                if self._pm_session_id == run_id:
+                    self._pm_active = False
+                    self._pm_session_id = None
+                    logger.debug(f"[ENGINE] PM session {run_id} timeout - resetting active flag")
+            
+            asyncio.create_task(reset_pm_status())
+            
+        except Exception as e:
+            logger.error(f"[ENGINE] Failed to spawn PM review: {e}", exc_info=True)
+            self._pm_active = False
+            self._pm_session_id = None
+
+    async def _spawn_pm_proactive_review(self, worker_manager: WorkerManager) -> None:
+        """Deprecated: proactive PM task creation is disabled.
+
+        All autonomous work proposals must flow through the 6-hour reflection -> initiative
+        sweep -> Lobs approval path before any task is created.
+        """
+        logger.info("[ENGINE] PM proactive review is disabled by governance policy")
+        return
 
 
     async def _refresh_runtime_settings(self, db: Any) -> None:

@@ -6,7 +6,7 @@ analyzes the response, and determines actions:
 - resolve: Mark thread as resolved (no further action needed)
 - pending: Mark as pending (acknowledged but not actionable yet)
 
-Uses deterministic regex-based analysis (no project-manager agent dependency).
+Uses LLM-based analysis via project-manager agent. Falls back to regex on failure.
 """
 
 import asyncio
@@ -221,8 +221,116 @@ class InboxProcessor:
     async def _analyze_response(
         self, user_message: str, inbox_item: InboxItem, thread_id: str
     ) -> dict[str, Any]:
-        """Analyze user response using deterministic fallback rules."""
+        """
+        Analyze user response using LLM agent.
+        Falls back to regex on failure.
+        """
+        try:
+            # Get available projects
+            valid_projects = await self._get_valid_project_ids()
+            
+            # Build payload for project-manager agent
+            payload = {
+                "inbox_item": {
+                    "title": inbox_item.title,
+                    "content": inbox_item.content or "",
+                    "summary": inbox_item.summary or "",
+                },
+                "user_response": user_message,
+                "available_projects": list(valid_projects),
+            }
+            
+            # Use isolated session per thread
+            session_id = f"inbox-{thread_id[:8]}"
+            
+            # Call OpenClaw agent in executor for async compatibility
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                self._call_inbox_agent,
+                json.dumps(payload),
+                session_id
+            )
+            
+            if result:
+                # Parse and validate response
+                try:
+                    response = json.loads(result)
+                    action_type = response.get("action")
+                    
+                    # Map LLM action to internal action type
+                    if action_type == "create_task":
+                        return {
+                            "type": "create_task",
+                            "agent_type": response.get("agent_type"),
+                            "project_id": response.get("project_id", "default"),
+                            "task_title": response.get("task_title"),
+                            "task_notes": response.get("task_notes"),
+                            "response_message": response.get("response_message"),
+                        }
+                    elif action_type == "resolve":
+                        return {
+                            "type": "resolve",
+                            "response_message": response.get("response_message"),
+                        }
+                    elif action_type == "pending":
+                        return {
+                            "type": "pending",
+                            "response_message": response.get("response_message"),
+                        }
+                    else:
+                        # no_action or invalid
+                        return {"type": "no_action"}
+                        
+                except json.JSONDecodeError as e:
+                    logger.warning(f"[INBOX] Failed to parse LLM response: {e}")
+                    # Fall through to regex fallback
+        
+        except Exception as e:
+            logger.warning(f"[INBOX] LLM analysis failed: {e}, falling back to regex")
+        
+        # Fallback to regex-based analysis
+        logger.debug("[INBOX] Using regex fallback for response analysis")
         return self._analyze_response_fallback(user_message, inbox_item)
+    
+    def _call_inbox_agent(self, payload_json: str, session_id: str) -> str | None:
+        """
+        Call project-manager agent via subprocess for inbox analysis.
+        Synchronous method meant to be called in executor.
+        """
+        try:
+            cmd = [
+                "openclaw",
+                "agent",
+                "--agent", "project-manager",
+                "--session-id", session_id,
+                "-m", payload_json,
+                "--json",
+                "--timeout", "60",
+            ]
+            
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=70,  # Slightly longer than openclaw timeout
+            )
+            
+            if result.returncode == 0:
+                return result.stdout.strip()
+            else:
+                logger.warning(
+                    f"[INBOX] project-manager agent failed with exit code {result.returncode}: "
+                    f"{result.stderr[:200]}"
+                )
+                return None
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("[INBOX] project-manager agent timed out")
+            return None
+        except Exception as e:
+            logger.error(f"[INBOX] Error calling project-manager agent: {e}")
+            return None
 
     def _analyze_response_fallback(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
         """Determine action from user's response. More permissive pattern matching."""
