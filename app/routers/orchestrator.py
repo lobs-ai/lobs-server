@@ -338,6 +338,7 @@ async def get_intelligence_summary(
 @router.get("/intelligence/initiatives")
 async def list_initiatives(
     status: str | None = None,
+    limit: int = 200,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """List initiatives proposed from reflection cycles."""
@@ -346,7 +347,7 @@ async def list_initiatives(
     if status:
         query = query.where(AgentInitiative.status == status)
 
-    result = await db.execute(query.limit(200))
+    result = await db.execute(query.limit(max(1, min(1000, int(limit)))))
     rows = result.scalars().all()
 
     return {
@@ -367,7 +368,9 @@ async def list_initiatives(
                 "rationale": row.rationale,
                 "decision_summary": row.decision_summary,
                 "learning_feedback": row.learning_feedback,
+                "approved_by": row.approved_by,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
+                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
             }
             for row in rows
         ],
