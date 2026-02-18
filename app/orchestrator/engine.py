@@ -32,7 +32,7 @@ from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.config import POLL_INTERVAL
-from app.models import Project as ProjectModel, OrchestratorSetting
+from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting
 from app.services.github_sync import GitHubSyncService
 from sqlalchemy import select
 from app.orchestrator.runtime_settings import (
@@ -452,6 +452,33 @@ class OrchestratorEngine:
                     logger.debug(
                         f"[ENGINE] Task {task_id[:8]} already routed to {agent_type} (by PM)"
                     )
+
+                # GitHub claim handshake before spawning work
+                if task_dict.get("external_source") == "github":
+                    project = await db.get(ProjectModel, project_id)
+                    db_task = await db.get(TaskModel, task_id)
+                    if not project or not db_task:
+                        logger.warning("[ENGINE] Missing project/task for GitHub claim handshake: %s", task_id[:8])
+                        continue
+                    try:
+                        claimed, claim_reason = await GitHubSyncService(db).claim_issue_for_task(project, db_task)
+                        if not claimed:
+                            logger.info(
+                                "[ENGINE] Skipping GitHub task %s; claim handshake failed (%s)",
+                                task_id[:8],
+                                claim_reason,
+                            )
+                            continue
+                        db_task.sync_state = "synced"
+                        await db.commit()
+                    except Exception as claim_err:
+                        logger.warning(
+                            "[ENGINE] GitHub claim handshake error for %s: %s",
+                            task_id[:8],
+                            claim_err,
+                        )
+                        await db.rollback()
+                        continue
 
                 # Check circuit breaker before spawning
                 allowed, reason = await circuit_breaker.should_allow_spawn(

@@ -151,6 +151,12 @@ Reflection record ID: {reflection_id}
 Context packet JSON:
 {packet}
 
+Governance constraints (mandatory):
+- You are in proposal mode only.
+- Do NOT execute work, run migrations, edit code, or create tasks/issues/inbox items.
+- If a proposal requires action, put it only in `proposed_initiatives`.
+- Lobs is final decision authority; nothing is auto-approved.
+
 Return STRICT JSON with this schema (no prose outside JSON):
 {{
   "inefficiencies_detected": ["..."],

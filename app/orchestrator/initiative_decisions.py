@@ -70,6 +70,12 @@ class InitiativeDecisionEngine:
         if decision not in {"approve", "defer", "reject"}:
             raise ValueError("decision must be approve|defer|reject")
 
+        if (decided_by or "").strip().lower() != "lobs":
+            raise PermissionError("initiative decisions must be finalized by lobs")
+
+        if decision == "approve" and initiative.status not in {"lobs_review", "proposed"}:
+            raise ValueError(f"initiative in status '{initiative.status}' is not approvable")
+
         title = (revised_title or initiative.title or "Untitled initiative").strip()
         description = (revised_description or initiative.description or "").strip()
 

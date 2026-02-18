@@ -33,12 +33,12 @@ class Scanner:
                     Task.work_state.in_(["not_started", "ready"]),
                     Task.agent != None,
                     Task.agent != "",
-                    (Task.sync_state == None) | (Task.sync_state != "conflict"),
+                    (Task.sync_state == None) | (Task.sync_state.in_(["synced", "local_changed"])),
                 )
             )
             tasks = result.scalars().all()
-            
-            return [self._task_to_dict(task) for task in tasks]
+
+            return [self._task_to_dict(task) for task in tasks if self._is_pickup_eligible(task)]
         except Exception as e:
             logger.error(f"Failed to get eligible tasks: {e}")
             return []
@@ -57,12 +57,12 @@ class Scanner:
                     Task.status == "active",
                     Task.work_state.in_(["not_started", "ready"]),
                     (Task.agent == None) | (Task.agent == ""),
-                    (Task.sync_state == None) | (Task.sync_state != "conflict"),
+                    (Task.sync_state == None) | (Task.sync_state.in_(["synced", "local_changed"])),
                 )
             )
             tasks = result.scalars().all()
-            
-            return [self._task_to_dict(task) for task in tasks]
+
+            return [self._task_to_dict(task) for task in tasks if self._is_pickup_eligible(task)]
         except Exception as e:
             logger.error(f"Failed to get unrouted tasks: {e}")
             return []
@@ -80,6 +80,15 @@ class Scanner:
             logger.error(f"Failed to get projects: {e}")
             return []
 
+    @staticmethod
+    def _is_pickup_eligible(task: Task) -> bool:
+        if task.external_source != "github":
+            return True
+        payload = task.conflict_payload if isinstance(task.conflict_payload, dict) else {}
+        github_meta = payload.get("github") if isinstance(payload.get("github"), dict) else {}
+        # strict GitHub eligibility: must be claimable (ready/open/not blocked)
+        return bool(github_meta.get("eligible_for_claim") or github_meta.get("claimed_by_lobs"))
+
     def _task_to_dict(self, task: Task) -> dict[str, Any]:
         """Convert SQLAlchemy Task model to dict."""
         return {
@@ -92,6 +101,9 @@ class Scanner:
             "notes": task.notes,
             "owner": task.owner,
             "agent": task.agent,
+            "external_source": task.external_source,
+            "sync_state": task.sync_state,
+            "github_issue_number": task.github_issue_number,
             "kind": "task",
             "created_at": task.created_at.isoformat() if task.created_at else None,
             "updated_at": task.updated_at.isoformat() if task.updated_at else None,

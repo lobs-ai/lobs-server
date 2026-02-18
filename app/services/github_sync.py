@@ -31,7 +31,7 @@ class GitHubSyncService:
                 "--repo", project.github_repo,
                 "--state", "all",
                 "--limit", "200",
-                "--json", "number,title,state,updatedAt,labels",
+                "--json", "number,title,state,updatedAt,labels,assignees,url",
             ]
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
             if proc.returncode != 0:
@@ -41,6 +41,7 @@ class GitHubSyncService:
             label_filter = self._normalize_label_filter(project.github_label_filter)
 
             imported, updated, conflicts, pushed = 0, 0, 0, 0
+            me_login = self._gh_login()
 
             existing_tasks_q = await self.db.execute(
                 select(TaskModel).where(
@@ -60,6 +61,7 @@ class GitHubSyncService:
                 key = str(issue["number"])
                 issue_updated = datetime.fromisoformat(issue["updatedAt"].replace("Z", "+00:00"))
                 issue_state = (issue.get("state") or "open").lower()
+                meta = self._issue_meta(issue, me_login=me_login)
                 mapped_status = "completed" if issue_state == "closed" else "active"
                 task = existing_tasks.get(key)
 
@@ -76,7 +78,8 @@ class GitHubSyncService:
                             external_source="github",
                             external_id=key,
                             external_updated_at=issue_updated,
-                            sync_state="synced",
+                            sync_state=("synced" if meta["eligible_for_claim"] else "ineligible"),
+                            conflict_payload={"github": meta},
                         )
                     )
                     imported += 1
@@ -93,6 +96,7 @@ class GitHubSyncService:
                         "remote_title": issue["title"],
                         "remote_state": issue_state,
                         "remote_updated_at": issue["updatedAt"],
+                        "github": meta,
                     }
                     conflicts += 1
                     continue
@@ -102,7 +106,10 @@ class GitHubSyncService:
                 if mapped_status == "active" and not task.work_state:
                     task.work_state = "not_started"
                 task.external_updated_at = issue_updated
-                task.sync_state = "synced"
+                task.sync_state = "synced" if meta["eligible_for_claim"] else "ineligible"
+                existing_payload = task.conflict_payload if isinstance(task.conflict_payload, dict) else {}
+                existing_payload["github"] = meta
+                task.conflict_payload = existing_payload
                 updated += 1
 
             if push:
@@ -182,6 +189,33 @@ class GitHubSyncService:
 
         return pushed
 
+    async def claim_issue_for_task(self, project: ProjectModel, task: TaskModel) -> tuple[bool, str]:
+        """Claim an issue via explicit label+assignee handshake before execution."""
+        if not project.github_repo or not task.github_issue_number:
+            return False, "missing_repo_or_issue"
+
+        issue = self._fetch_issue(project.github_repo, task.github_issue_number)
+        me_login = self._gh_login()
+        meta = self._issue_meta(issue, me_login=me_login)
+
+        if not meta["eligible_for_claim"] and not meta["claimed_by_lobs"]:
+            return False, f"not_eligible:{meta['eligibility_reason']}"
+
+        if meta["claimed_by_lobs"]:
+            return True, "already_claimed"
+
+        edit_cmd = [
+            "gh", "issue", "edit", str(task.github_issue_number),
+            "--repo", project.github_repo,
+            "--add-label", "lobs:claimed",
+            "--add-assignee", me_login,
+        ]
+        proc = subprocess.run(edit_cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            return False, f"claim_failed:{proc.stderr.strip()}"
+
+        return True, "claimed"
+
     @staticmethod
     def _normalize_label_filter(raw: Any) -> set[str]:
         if raw is None:
@@ -199,3 +233,72 @@ class GitHubSyncService:
         labels = issue.get("labels") or []
         names = {str((l or {}).get("name", "")).strip().lower() for l in labels}
         return bool(names & label_filter)
+
+    def _fetch_issue(self, repo: str, issue_number: int) -> dict[str, Any]:
+        cmd = [
+            "gh", "issue", "view", str(issue_number),
+            "--repo", repo,
+            "--json", "number,title,state,updatedAt,labels,assignees,url",
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if proc.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"GitHub issue view failed: {proc.stderr.strip()}")
+        return json.loads(proc.stdout)
+
+    def _gh_login(self) -> str:
+        cmd = ["gh", "api", "user", "--jq", ".login"]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        if proc.returncode != 0:
+            raise HTTPException(status_code=500, detail=f"GitHub auth not ready: {proc.stderr.strip()}")
+        login = (proc.stdout or "").strip()
+        if not login:
+            raise HTTPException(status_code=500, detail="GitHub login unavailable")
+        return login
+
+    @staticmethod
+    def _issue_meta(issue: dict[str, Any], *, me_login: str) -> dict[str, Any]:
+        state = str(issue.get("state") or "open").lower()
+        labels = {
+            str((label or {}).get("name", "")).strip().lower()
+            for label in (issue.get("labels") or [])
+            if str((label or {}).get("name", "")).strip()
+        }
+        assignees = {
+            str((a or {}).get("login", "")).strip().lower()
+            for a in (issue.get("assignees") or [])
+            if str((a or {}).get("login", "")).strip()
+        }
+
+        ready_label = "lobs:ready"
+        claim_label = "lobs:claimed"
+        blocked_labels = {"blocked", "wip", "on-hold"}
+
+        is_open = state == "open"
+        has_ready = ready_label in labels
+        has_blocker = bool(labels & blocked_labels)
+        assigned_elsewhere = bool(assignees) and me_login.lower() not in assignees
+        claimed_by_lobs = (claim_label in labels) and (me_login.lower() in assignees)
+
+        eligible_for_claim = is_open and has_ready and (not has_blocker) and (not assigned_elsewhere)
+        if not is_open:
+            reason = "closed"
+        elif not has_ready:
+            reason = "missing_ready_label"
+        elif has_blocker:
+            reason = "blocked"
+        elif assigned_elsewhere:
+            reason = "assigned_elsewhere"
+        else:
+            reason = "eligible"
+
+        return {
+            "url": issue.get("url"),
+            "state": state,
+            "labels": sorted(labels),
+            "assignees": sorted(assignees),
+            "ready_label": ready_label,
+            "claim_label": claim_label,
+            "eligible_for_claim": bool(eligible_for_claim),
+            "claimed_by_lobs": bool(claimed_by_lobs),
+            "eligibility_reason": reason,
+        }
