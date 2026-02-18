@@ -234,6 +234,11 @@ class WorkerManager:
                     break
 
             if not spawn_result or not chosen_model:
+                if agent_type == "programmer" and strict_coding_tier:
+                    logger.error(
+                        "[MODEL_ROUTER] strict coding tier prevented model downgrade after spawn failure",
+                        extra={"model_router": {**decision.audit, "attempts": attempts}},
+                    )
                 logger.error(
                     f"[WORKER] Failed to spawn session for {task_id_short}",
                     extra={"model_router": {**decision.audit, "attempts": attempts}},
