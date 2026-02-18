@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Any
 
 from app.database import get_db
-from app.models import OrchestratorSetting
+from app.models import OrchestratorSetting, AgentInitiative, AgentReflection, SystemSweep
 from app.orchestrator import OrchestratorEngine
 from app.orchestrator.model_router import (
     MODEL_ROUTER_TIER_CHEAP_KEY,
@@ -182,3 +182,77 @@ async def update_model_router_config(
     await db.commit()
 
     return await get_model_router_config(db)
+
+
+@router.get("/intelligence/summary")
+async def get_intelligence_summary(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Summarize reflection/initiative/sweep pipeline state."""
+
+    reflections = await db.execute(select(AgentReflection))
+    initiatives = await db.execute(select(AgentInitiative))
+    sweeps = await db.execute(select(SystemSweep).order_by(SystemSweep.created_at.desc()).limit(10))
+
+    reflection_rows = reflections.scalars().all()
+    initiative_rows = initiatives.scalars().all()
+    sweep_rows = sweeps.scalars().all()
+
+    return {
+        "reflections": {
+            "total": len(reflection_rows),
+            "pending": sum(1 for r in reflection_rows if r.status == "pending"),
+            "completed": sum(1 for r in reflection_rows if r.status == "completed"),
+            "failed": sum(1 for r in reflection_rows if r.status == "failed"),
+        },
+        "initiatives": {
+            "total": len(initiative_rows),
+            "approved": sum(1 for i in initiative_rows if i.status == "approved"),
+            "proposed": sum(1 for i in initiative_rows if i.status == "proposed"),
+            "active": sum(1 for i in initiative_rows if i.status == "active"),
+        },
+        "recent_sweeps": [
+            {
+                "id": s.id,
+                "type": s.sweep_type,
+                "status": s.status,
+                "created_at": s.created_at.isoformat() if s.created_at else None,
+                "summary": s.summary,
+            }
+            for s in sweep_rows
+        ],
+    }
+
+
+@router.get("/intelligence/initiatives")
+async def list_initiatives(
+    status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """List initiatives proposed from reflection cycles."""
+
+    query = select(AgentInitiative).order_by(AgentInitiative.created_at.desc())
+    if status:
+        query = query.where(AgentInitiative.status == status)
+
+    result = await db.execute(query.limit(200))
+    rows = result.scalars().all()
+
+    return {
+        "count": len(rows),
+        "items": [
+            {
+                "id": row.id,
+                "proposed_by_agent": row.proposed_by_agent,
+                "owner_agent": row.owner_agent,
+                "title": row.title,
+                "description": row.description,
+                "category": row.category,
+                "risk_tier": row.risk_tier,
+                "status": row.status,
+                "rationale": row.rationale,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in rows
+        ],
+    }

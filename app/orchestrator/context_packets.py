@@ -1,0 +1,147 @@
+"""Server-side context packet builder for reflection and diagnostics."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Task, WorkerRun
+
+
+@dataclass
+class AgentContextPacket:
+    agent_type: str
+    generated_at: str
+    recent_tasks_summary: list[dict[str, Any]]
+    active_initiatives: list[dict[str, Any]]
+    backlog_summary: list[dict[str, Any]]
+    performance_metrics: dict[str, Any]
+    other_agent_activity_summary: list[dict[str, Any]]
+    repo_change_summary: list[dict[str, Any]]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class ContextPacketBuilder:
+    """Build bounded, deterministic packets to avoid context bloat."""
+
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def build_for_agent(self, agent_type: str, *, hours: int = 6) -> AgentContextPacket:
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(hours=hours)
+
+        recent_tasks = await self._recent_tasks(agent_type, since)
+        backlog = await self._backlog(agent_type)
+        metrics = await self._performance_metrics(agent_type, since)
+        other_activity = await self._other_agent_activity(agent_type, since)
+
+        return AgentContextPacket(
+            agent_type=agent_type,
+            generated_at=now.isoformat(),
+            recent_tasks_summary=recent_tasks,
+            active_initiatives=[],
+            backlog_summary=backlog,
+            performance_metrics=metrics,
+            other_agent_activity_summary=other_activity,
+            repo_change_summary=[],
+        )
+
+    async def _recent_tasks(self, agent_type: str, since: datetime) -> list[dict[str, Any]]:
+        result = await self.db.execute(
+            select(Task)
+            .where(Task.agent == agent_type, Task.updated_at >= since)
+            .order_by(Task.updated_at.desc())
+            .limit(20)
+        )
+        tasks = result.scalars().all()
+        return [
+            {
+                "id": t.id,
+                "title": t.title,
+                "status": t.status,
+                "work_state": t.work_state,
+                "updated_at": t.updated_at.isoformat() if t.updated_at else None,
+            }
+            for t in tasks
+        ]
+
+    async def _backlog(self, agent_type: str) -> list[dict[str, Any]]:
+        result = await self.db.execute(
+            select(Task)
+            .where(
+                Task.agent == agent_type,
+                Task.status == "active",
+                Task.work_state.in_(["not_started", "ready", "in_progress"]),
+            )
+            .order_by(Task.updated_at.desc())
+            .limit(20)
+        )
+        tasks = result.scalars().all()
+        return [
+            {
+                "id": t.id,
+                "title": t.title,
+                "work_state": t.work_state,
+                "project_id": t.project_id,
+            }
+            for t in tasks
+        ]
+
+    async def _performance_metrics(self, agent_type: str, since: datetime) -> dict[str, Any]:
+        result = await self.db.execute(
+            select(WorkerRun)
+            .where(WorkerRun.started_at >= since)
+            .order_by(WorkerRun.started_at.desc())
+            .limit(50)
+        )
+        runs = [r for r in result.scalars().all() if self._run_matches_agent(r, agent_type)]
+
+        if not runs:
+            return {
+                "runs": 0,
+                "success_rate": None,
+                "avg_duration_seconds": None,
+            }
+
+        success_count = sum(1 for r in runs if r.succeeded)
+        durations = [
+            (r.ended_at - r.started_at).total_seconds()
+            for r in runs
+            if r.started_at and r.ended_at
+        ]
+
+        return {
+            "runs": len(runs),
+            "success_rate": success_count / len(runs),
+            "avg_duration_seconds": (sum(durations) / len(durations)) if durations else None,
+        }
+
+    async def _other_agent_activity(self, agent_type: str, since: datetime) -> list[dict[str, Any]]:
+        result = await self.db.execute(
+            select(Task)
+            .where(Task.updated_at >= since, Task.agent.is_not(None), Task.agent != agent_type)
+            .order_by(Task.updated_at.desc())
+            .limit(20)
+        )
+        tasks = result.scalars().all()
+        return [
+            {
+                "agent": t.agent,
+                "task_id": t.id,
+                "title": t.title,
+                "status": t.status,
+            }
+            for t in tasks
+        ]
+
+    @staticmethod
+    def _run_matches_agent(run: WorkerRun, agent_type: str) -> bool:
+        worker_id = (run.worker_id or "").lower()
+        return agent_type.lower() in worker_id

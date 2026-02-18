@@ -13,8 +13,10 @@ Key changes from subprocess version:
 """
 
 import asyncio
+import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,7 +25,15 @@ import aiohttp
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Task, WorkerStatus, WorkerRun, Project, OrchestratorSetting
+from app.models import (
+    Task,
+    WorkerStatus,
+    WorkerRun,
+    Project,
+    OrchestratorSetting,
+    AgentReflection,
+    AgentInitiative,
+)
 from app.orchestrator.config import (
     BASE_DIR,
     WORKER_RESULTS_DIR,
@@ -44,6 +54,7 @@ from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
+from app.orchestrator.policy_engine import PolicyEngine
 
 logger = logging.getLogger(__name__)
 
@@ -685,6 +696,15 @@ class WorkerManager:
         summary = result_summary
         if not summary and succeeded:
             summary = await self._read_work_summary(project_id)
+
+        # Reflection runs return structured JSON; persist into reflection/initiative tables
+        if worker_info.label.startswith("reflection-") and summary:
+            await self._persist_reflection_output(
+                agent_type=agent_type,
+                reflection_label=worker_info.label,
+                summary=summary,
+                succeeded=succeeded,
+            )
         
         # Record worker run
         await self._record_worker_run(
@@ -803,6 +823,89 @@ class WorkerManager:
             logger.error(f"Failed to record worker run: {e}", exc_info=True)
             await self.db.rollback()
     
+    async def _persist_reflection_output(
+        self,
+        *,
+        agent_type: str,
+        reflection_label: str,
+        summary: str,
+        succeeded: bool,
+    ) -> None:
+        """Persist strategic reflection outputs and derive initiatives."""
+        try:
+            reflection_result = await self.db.execute(
+                select(AgentReflection)
+                .where(
+                    AgentReflection.agent_type == agent_type,
+                    AgentReflection.status == "pending",
+                    AgentReflection.reflection_type == "strategic",
+                )
+                .order_by(AgentReflection.created_at.desc())
+                .limit(1)
+            )
+            reflection = reflection_result.scalar_one_or_none()
+            if reflection is None:
+                return
+
+            payload = self._extract_json(summary)
+            reflection.status = "completed" if succeeded else "failed"
+            reflection.result = payload
+            reflection.completed_at = datetime.now(timezone.utc)
+
+            if succeeded and isinstance(payload, dict):
+                initiatives = payload.get("proposed_initiatives") or []
+                policy = PolicyEngine()
+                for raw in initiatives:
+                    if not isinstance(raw, dict):
+                        continue
+                    category = str(raw.get("category", "")).strip().lower()
+                    effort = raw.get("estimated_effort")
+                    effort_int = int(effort) if isinstance(effort, (int, float)) else None
+                    decision = policy.decide(category, estimated_effort=effort_int)
+
+                    self.db.add(
+                        AgentInitiative(
+                            id=str(uuid.uuid4()),
+                            proposed_by_agent=agent_type,
+                            source_reflection_id=reflection.id,
+                            owner_agent=agent_type,
+                            title=str(raw.get("title") or "Untitled initiative"),
+                            description=str(raw.get("description") or ""),
+                            category=category or "unknown",
+                            risk_tier=decision.risk_tier,
+                            status=("approved" if decision.approval_mode == "auto" else "proposed"),
+                            rationale=decision.reason,
+                        )
+                    )
+
+            await self.db.commit()
+
+        except Exception as e:
+            logger.warning("[WORKER] Failed to persist reflection output: %s", e, exc_info=True)
+            await self.db.rollback()
+
+    @staticmethod
+    def _extract_json(text: str) -> dict[str, Any]:
+        """Best-effort extraction of JSON object from assistant summary text."""
+        candidate = text.strip()
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else {"raw": candidate}
+        except json.JSONDecodeError:
+            pass
+
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            snippet = candidate[start : end + 1]
+            try:
+                parsed = json.loads(snippet)
+                return parsed if isinstance(parsed, dict) else {"raw": candidate}
+            except json.JSONDecodeError:
+                return {"raw": candidate}
+
+        return {"raw": candidate}
+
     async def _read_work_summary(self, project_id: str) -> str | None:
         """Read .work-summary file from project directory."""
         try:

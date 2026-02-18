@@ -26,6 +26,7 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.scheduler import EventScheduler
 from app.orchestrator.inbox_processor import InboxProcessor
+from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.config import POLL_INTERVAL
 
 logger = logging.getLogger(__name__)
@@ -62,6 +63,9 @@ class OrchestratorEngine:
         self._pm_session_id: Optional[str] = None
         self._last_pm_proactive = 0.0
         self._pm_proactive_interval = 1800  # PM proactive review every 30 minutes
+        self._last_reflection_check = 0.0
+        self._reflection_interval = 21600  # every 6 hours
+        self._last_daily_compression_date: str | None = None
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -182,6 +186,7 @@ class OrchestratorEngine:
             escalation = EscalationManagerEnhanced(db)
             agent_tracker = AgentTracker(db)
             scheduler = EventScheduler(db)
+            reflection_manager = ReflectionCycleManager(db, worker_manager)
 
             # 1. Check scheduled events (every 60 seconds)
             import time
@@ -213,7 +218,45 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
                     await db.rollback()
 
-            # 3. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
+            # 3. Strategic reflection cycle (every 6 hours)
+            if (
+                not self._paused
+                and self._openclaw_available
+                and current_time - self._last_reflection_check >= self._reflection_interval
+            ):
+                try:
+                    reflection_result = await reflection_manager.run_strategic_reflection_cycle()
+                    if reflection_result.get("spawned", 0) > 0:
+                        activity = True
+                    self._last_reflection_check = current_time
+                    logger.info(
+                        "[ENGINE] Strategic reflection cycle: agents=%s spawned=%s",
+                        reflection_result.get("agents", 0),
+                        reflection_result.get("spawned", 0),
+                    )
+                except Exception as e:
+                    logger.error("[ENGINE] Reflection cycle failed: %s", e, exc_info=True)
+
+            # 3a. Daily compression sweep (~03:00 UTC-triggered daily guard)
+            try:
+                now_utc = datetime.now(timezone.utc)
+                today_key = now_utc.date().isoformat()
+                if (
+                    self._last_daily_compression_date != today_key
+                    and now_utc.hour >= 8  # 03:00 America/New_York ~= 08:00 UTC (standard)
+                ):
+                    daily_result = await reflection_manager.run_daily_compression()
+                    self._last_daily_compression_date = today_key
+                    if daily_result.get("rewritten", 0) > 0:
+                        activity = True
+                    logger.info(
+                        "[ENGINE] Daily compression sweep: rewritten=%s",
+                        daily_result.get("rewritten", 0),
+                    )
+            except Exception as e:
+                logger.error("[ENGINE] Daily compression failed: %s", e, exc_info=True)
+
+            # 4. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
             if not self._paused and self._openclaw_available and current_time - self._last_pm_check >= self._pm_interval:
                 try:
                     unrouted_tasks = await scanner.get_unrouted_tasks()

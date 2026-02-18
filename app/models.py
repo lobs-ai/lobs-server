@@ -249,7 +249,7 @@ class OrchestratorSetting(Base):
 class AgentStatus(Base):
     """Agent status model."""
     __tablename__ = "agent_status"
-    
+
     agent_type = Column(String, primary_key=True)
     status = Column(String)
     activity = Column(String)
@@ -260,6 +260,92 @@ class AgentStatus(Base):
     last_completed_task_id = Column(String, ForeignKey("tasks.id"))
     last_completed_at = Column(DateTime)
     stats = Column(JSON)
+
+
+class AgentCapability(Base):
+    """Capabilities an agent can execute, used for dynamic routing."""
+    __tablename__ = "agent_capabilities"
+    __table_args__ = (
+        UniqueConstraint("agent_type", "capability", name="ix_agent_capability_unique"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    agent_type = Column(String, nullable=False, index=True)
+    capability = Column(String, nullable=False, index=True)
+    confidence = Column(Float, default=0.5, nullable=False)
+    capability_metadata = Column(JSON)
+    source = Column(String, default="identity", nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class AgentReflection(Base):
+    """Structured outputs from scheduled strategic reflection/diagnostics."""
+    __tablename__ = "agent_reflections"
+
+    id = Column(String, primary_key=True)
+    agent_type = Column(String, nullable=False, index=True)
+    reflection_type = Column(String, nullable=False, index=True)  # strategic/diagnostic/daily_compression
+    status = Column(String, nullable=False, default="pending", index=True)  # pending/completed/failed
+    window_start = Column(DateTime)
+    window_end = Column(DateTime)
+    context_packet = Column(JSON)
+    result = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    completed_at = Column(DateTime)
+
+
+class AgentInitiative(Base):
+    """Initiatives proposed by agents and governed by Lobs sweep logic."""
+    __tablename__ = "agent_initiatives"
+
+    id = Column(String, primary_key=True)
+    proposed_by_agent = Column(String, nullable=False, index=True)
+    source_reflection_id = Column(String, ForeignKey("agent_reflections.id"))
+    owner_agent = Column(String, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text)
+    category = Column(String, nullable=False, index=True)
+    risk_tier = Column(String, nullable=False, default="A", index=True)
+    status = Column(String, nullable=False, default="proposed", index=True)
+    score = Column(Float)
+    rationale = Column(Text)
+    approved_by = Column(String)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class AgentIdentityVersion(Base):
+    """Versioned compressed identity/memory snapshots per agent."""
+    __tablename__ = "agent_identity_versions"
+    __table_args__ = (
+        UniqueConstraint("agent_type", "version", name="ix_agent_identity_version_unique"),
+    )
+
+    id = Column(String, primary_key=True)
+    agent_type = Column(String, nullable=False, index=True)
+    version = Column(Integer, nullable=False)
+    identity_text = Column(Text, nullable=False)
+    summary = Column(Text)
+    active = Column(Boolean, default=True, nullable=False, index=True)
+    window_start = Column(DateTime)
+    window_end = Column(DateTime)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class SystemSweep(Base):
+    """Global Lobs sweep output after reflection/compression batches."""
+    __tablename__ = "system_sweeps"
+
+    id = Column(String, primary_key=True)
+    sweep_type = Column(String, nullable=False, index=True)  # reflection_batch/daily_cleanup
+    status = Column(String, nullable=False, default="pending", index=True)
+    window_start = Column(DateTime)
+    window_end = Column(DateTime)
+    summary = Column(JSON)
+    decisions = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    completed_at = Column(DateTime)
 
 
 class TaskTemplate(Base):
