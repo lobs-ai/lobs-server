@@ -135,4 +135,4 @@ Built server-side in `app/orchestrator/context_packets.py`.
 
 - Deterministic server logic decides *when* and *what context*.
 - LLM calls decide *how to reason* within that bounded packet.
-- Lobs retains final global governance authority.
+- **All initiatives now route through Lobs decision authority** (`status=lobs_review`) with a recommendation, instead of auto-executing directly.

@@ -4,23 +4,16 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import select
 
-from app.models import AgentInitiative, Project, OrchestratorSetting, Task
+from app.models import AgentInitiative, InboxItem, OrchestratorSetting
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 
 
 @pytest.mark.asyncio
-async def test_sweep_arbitrator_auto_approve_creates_task(db_session):
-    db_session.add(
-        Project(
-            id="lobs-server",
-            title="Lobs Server",
-            type="kanban",
-            archived=False,
-        )
-    )
+async def test_sweep_arbitrator_routes_initiative_to_lobs_review(db_session):
+    initiative_id = str(uuid.uuid4())
     db_session.add(
         AgentInitiative(
-            id=str(uuid.uuid4()),
+            id=initiative_id,
             proposed_by_agent="writer",
             owner_agent="writer",
             title="Sync API docs for orchestrator endpoints",
@@ -34,22 +27,20 @@ async def test_sweep_arbitrator_auto_approve_creates_task(db_session):
     await db_session.commit()
 
     result = await SweepArbitrator(db_session).run_once()
-    assert result["approved"] == 1
+    assert result["lobs_review"] == 1
 
-    tasks = (await db_session.execute(select(Task))).scalars().all()
-    assert len(tasks) == 1
+    row = await db_session.get(AgentInitiative, initiative_id)
+    assert row is not None
+    assert row.status == "lobs_review"
+    assert "Recommendation=" in (row.rationale or "")
+
+    inbox_rows = (await db_session.execute(select(InboxItem))).scalars().all()
+    assert len(inbox_rows) == 1
+    assert "Lobs decision" in inbox_rows[0].title
 
 
 @pytest.mark.asyncio
-async def test_sweep_arbitrator_respects_daily_budget(db_session):
-    db_session.add(
-        Project(
-            id="lobs-server",
-            title="Lobs Server",
-            type="kanban",
-            archived=False,
-        )
-    )
+async def test_sweep_arbitrator_marks_budget_pressure_in_recommendation(db_session):
     db_session.add(
         OrchestratorSetting(
             key="autonomy_budget.daily",
@@ -91,8 +82,9 @@ async def test_sweep_arbitrator_respects_daily_budget(db_session):
     await db_session.commit()
 
     result = await SweepArbitrator(db_session).run_once()
-    assert result["deferred"] == 1
+    assert result["lobs_review"] == 1
 
     row = await db_session.get(AgentInitiative, candidate_id)
     assert row is not None
-    assert row.status == "deferred"
+    assert row.status == "lobs_review"
+    assert "Recommendation=defer" in (row.rationale or "")

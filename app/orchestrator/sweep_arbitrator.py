@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -15,13 +14,9 @@ from app.models import (
     AgentInitiative,
     InboxItem,
     OrchestratorSetting,
-    Project,
     SystemSweep,
-    Task,
 )
 from app.orchestrator.policy_engine import PolicyEngine
-
-logger = logging.getLogger(__name__)
 
 DEFAULT_DAILY_BUDGET = {
     "writer": 4,
@@ -33,7 +28,7 @@ DEFAULT_DAILY_BUDGET = {
 
 
 class SweepArbitrator:
-    """Global initiative arbitration and bounded autonomy enforcement."""
+    """Global initiative arbitration with Lobs as final decision authority."""
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -42,16 +37,14 @@ class SweepArbitrator:
     async def run_once(self) -> dict[str, Any]:
         initiatives = await self._load_proposed_initiatives()
         if not initiatives:
-            return {"proposed": 0, "approved": 0, "deferred": 0, "rejected": 0}
+            return {"proposed": 0, "lobs_review": 0, "rejected": 0}
 
         start = datetime.now(timezone.utc)
         budgets = await self._load_daily_budgets()
         usage = await self._daily_budget_usage()
 
-        approved = 0
-        deferred = 0
+        lobs_review = 0
         rejected = 0
-        soft_gated = 0
 
         dedupe_map: dict[tuple[str, str], list[AgentInitiative]] = defaultdict(list)
         for i in initiatives:
@@ -61,53 +54,44 @@ class SweepArbitrator:
         for _k, bucket in dedupe_map.items():
             if len(bucket) <= 1:
                 continue
-            bucket_sorted = sorted(bucket, key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
-            winner = bucket_sorted[0]
+            bucket_sorted = sorted(
+                bucket,
+                key=lambda x: x.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
             for dup in bucket_sorted[1:]:
                 dup.status = "rejected"
                 dup.rationale = (dup.rationale or "") + " | Rejected as duplicate initiative"
                 rejected += 1
-            # keep winner for normal processing
 
         for initiative in initiatives:
             if initiative.status != "proposed":
                 continue
 
+            owner = (initiative.owner_agent or initiative.proposed_by_agent or "programmer").lower()
             decision = self.policy.decide(initiative.category)
             initiative.risk_tier = decision.risk_tier
 
-            if decision.approval_mode == "auto":
-                owner = (initiative.owner_agent or initiative.proposed_by_agent or "programmer").lower()
-                daily_limit = budgets.get(owner, 2)
-                used = usage.get(owner, 0)
+            daily_limit = budgets.get(owner, 2)
+            used = usage.get(owner, 0)
+            budget_remaining = max(0, daily_limit - used)
 
-                if used >= daily_limit:
-                    initiative.status = "deferred"
-                    initiative.rationale = f"Autonomy budget reached ({used}/{daily_limit})"
-                    deferred += 1
-                    continue
+            recommendation = self._recommendation_for(decision.approval_mode, budget_remaining)
+            initiative.status = "lobs_review"
+            initiative.rationale = (
+                f"Lobs decision required. Recommendation={recommendation}. "
+                f"Policy={decision.approval_mode}. Budget={used}/{daily_limit}. "
+                f"Reason={decision.reason}"
+            )
 
-                created = await self._maybe_create_task_for_initiative(initiative)
-                usage[owner] = used + 1
-                initiative.status = "approved" if created else "deferred"
-                initiative.rationale = decision.reason
-                if created:
-                    approved += 1
-                else:
-                    deferred += 1
-                continue
-
-            if decision.approval_mode == "soft_gate":
-                await self._create_inbox_gate_item(initiative, hard=False)
-                initiative.status = "needs_review"
-                initiative.rationale = decision.reason
-                soft_gated += 1
-                continue
-
-            await self._create_inbox_gate_item(initiative, hard=True)
-            initiative.status = "needs_review"
-            initiative.rationale = decision.reason
-            soft_gated += 1
+            await self._create_lobs_decision_item(
+                initiative,
+                recommendation=recommendation,
+                budget=f"{used}/{daily_limit}",
+                decision_reason=decision.reason,
+                approval_mode=decision.approval_mode,
+            )
+            lobs_review += 1
 
         sweep = SystemSweep(
             id=str(uuid.uuid4()),
@@ -117,12 +101,10 @@ class SweepArbitrator:
             window_end=datetime.now(timezone.utc),
             summary={
                 "proposed": len(initiatives),
-                "approved": approved,
-                "deferred": deferred,
+                "lobs_review": lobs_review,
                 "rejected": rejected,
-                "needs_review": soft_gated,
             },
-            decisions={"budgets": budgets, "usage": usage},
+            decisions={"budgets": budgets, "usage": usage, "mode": "lobs_governed"},
             completed_at=datetime.now(timezone.utc),
         )
         self.db.add(sweep)
@@ -173,81 +155,54 @@ class SweepArbitrator:
             usage[owner] += 1
         return dict(usage)
 
-    async def _maybe_create_task_for_initiative(self, initiative: AgentInitiative) -> bool:
-        title = initiative.title.strip() if initiative.title else "Untitled initiative"
-        if not title:
-            return False
-
-        # Avoid duplicate active tasks with same title.
-        dup_result = await self.db.execute(
-            select(Task).where(Task.title == title, Task.status == "active")
-        )
-        if dup_result.scalar_one_or_none() is not None:
-            return False
-
-        project_id = await self._default_project_id()
-        if not project_id:
-            logger.warning("[SWEEP] No project found to create initiative task")
-            return False
-
-        notes = (
-            f"Auto-created from initiative {initiative.id}.\n\n"
-            f"Category: {initiative.category}\n"
-            f"Risk tier: {initiative.risk_tier}\n"
-            f"Proposed by: {initiative.proposed_by_agent}\n\n"
-            f"{initiative.description or ''}"
-        )
-
-        task = Task(
-            id=str(uuid.uuid4()),
-            title=title,
-            status="active",
-            work_state="not_started",
-            project_id=project_id,
-            notes=notes,
-            agent=initiative.owner_agent or initiative.proposed_by_agent,
-            owner="lobs",
-        )
-        self.db.add(task)
-        return True
-
-    async def _create_inbox_gate_item(self, initiative: AgentInitiative, *, hard: bool) -> None:
+    async def _create_lobs_decision_item(
+        self,
+        initiative: AgentInitiative,
+        *,
+        recommendation: str,
+        budget: str,
+        decision_reason: str,
+        approval_mode: str,
+    ) -> None:
         title = initiative.title or "Untitled initiative"
-        severity = "HIGH" if hard else "MEDIUM"
+        severity = "HIGH" if initiative.risk_tier == "C" else "MEDIUM"
 
         content = (
-            f"Initiative requires {'hard' if hard else 'soft'} review.\n\n"
+            "Lobs initiative decision required.\n\n"
+            f"Recommendation: {recommendation}\n"
+            f"Policy mode: {approval_mode}\n"
+            f"Budget usage: {budget}\n"
+            f"Reason: {decision_reason}\n\n"
+            f"Initiative ID: {initiative.id}\n"
             f"Title: {title}\n"
             f"Category: {initiative.category}\n"
             f"Risk tier: {initiative.risk_tier}\n"
             f"Proposed by: {initiative.proposed_by_agent}\n"
             f"Owner agent: {initiative.owner_agent}\n\n"
-            f"Description:\n{initiative.description or '(none)'}\n"
+            f"Description:\n{initiative.description or '(none)'}\n\n"
+            "Expected decision by Lobs: approve / defer / reject"
         )
 
         self.db.add(
             InboxItem(
                 id=str(uuid.uuid4()),
-                title=f"[{severity}] Initiative review: {title[:80]}",
+                title=f"[{severity}] Lobs decision: {title[:80]}",
                 content=content,
                 is_read=False,
-                summary=f"{initiative.category} initiative needs review",
+                summary=f"Recommendation={recommendation} | {initiative.category}",
                 modified_at=datetime.now(timezone.utc),
             )
         )
 
-    async def _default_project_id(self) -> str | None:
-        row = await self.db.get(OrchestratorSetting, "initiative.default_project")
-        if row and isinstance(row.value, str) and row.value.strip():
-            return row.value.strip()
-
-        preferred = await self.db.get(Project, "lobs-server")
-        if preferred:
-            return preferred.id
-
-        result = await self.db.execute(select(Project).order_by(Project.created_at.asc()).limit(1))
-        first = result.scalar_one_or_none()
-        return first.id if first else None
+    @staticmethod
+    def _recommendation_for(approval_mode: str, budget_remaining: int) -> str:
+        if approval_mode == "hard_gate":
+            return "review"
+        if budget_remaining <= 0:
+            return "defer"
+        if approval_mode == "auto":
+            return "approve"
+        return "review"
 
     @staticmethod
     def _norm(value: str | None) -> str:

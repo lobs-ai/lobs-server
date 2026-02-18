@@ -289,7 +289,7 @@ class OrchestratorEngine:
                 try:
                     sweep_result = await sweep_arbitrator.run_once()
                     self._last_sweep_check = current_time
-                    if sweep_result.get("approved", 0) > 0 or sweep_result.get("needs_review", 0) > 0:
+                    if sweep_result.get("lobs_review", 0) > 0:
                         activity = True
                     logger.debug("[ENGINE] Initiative sweep: %s", sweep_result)
                 except Exception as e:
