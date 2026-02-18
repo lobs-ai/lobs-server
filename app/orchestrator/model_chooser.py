@@ -362,6 +362,14 @@ class ModelChooser:
                 provider_err_cache[provider] = await self._provider_recent_error_rate(provider, minutes=30)
             return provider_err_cache[provider]
 
+        # Priority model:
+        # 1) Reliability guard (high provider error rates demoted)
+        # 2) Explicit provider preference (routing_policy.quality_preference)
+        # 3) Candidate order from tier routing (user-controlled via tier lists)
+        # 4) Cost/spend as tie-breakers only
+        quality_pref = routing_policy.get("quality_preference") if isinstance(routing_policy.get("quality_preference"), list) else []
+        quality_rank = {str(p).lower(): i for i, p in enumerate(quality_pref)}
+
         scored: list[tuple[tuple[float, ...], str]] = []
         for idx, model_name in enumerate(candidates):
             provider = infer_provider(model_name)
@@ -377,13 +385,15 @@ class ModelChooser:
             high_error_penalty = 1.0 if err_rate >= 0.5 else 0.0
             # Keep reflection/diagnostic cheaper by default when safe.
             cost_weight = 0.2 if purpose in {"reflection", "diagnostic"} else (0.15 if complexity == "light" else 0.05)
+            provider_pref = quality_rank.get(str(provider).lower(), 999)
 
             score = (
                 high_error_penalty,
                 round(err_rate, 4),
+                float(provider_pref),
+                float(idx),
                 round(spend, 4),
                 round(unit_price * cost_weight, 4),
-                float(idx),
             )
             scored.append((score, model_name))
 
