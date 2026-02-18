@@ -9,6 +9,7 @@ from typing import Any
 from app.database import get_db
 from app.models import OrchestratorSetting, AgentInitiative, AgentReflection, SystemSweep
 from app.orchestrator.sweep_arbitrator import DEFAULT_DAILY_BUDGET
+from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator import OrchestratorEngine
 from app.orchestrator.model_router import (
     MODEL_ROUTER_TIER_CHEAP_KEY,
@@ -33,6 +34,16 @@ class ModelRouterConfigUpdate(BaseModel):
 
 class AutonomyBudgetUpdate(BaseModel):
     daily: dict[str, int]
+
+
+class InitiativeDecisionRequest(BaseModel):
+    decision: str  # approve|defer|reject
+    revised_title: str | None = None
+    revised_description: str | None = None
+    selected_agent: str | None = None
+    selected_project_id: str | None = None
+    decision_summary: str | None = None
+    learning_feedback: str | None = None
 
 
 def get_orchestrator(request: Request) -> OrchestratorEngine:
@@ -214,6 +225,9 @@ async def get_intelligence_summary(
             "total": len(initiative_rows),
             "approved": sum(1 for i in initiative_rows if i.status == "approved"),
             "proposed": sum(1 for i in initiative_rows if i.status == "proposed"),
+            "lobs_review": sum(1 for i in initiative_rows if i.status == "lobs_review"),
+            "deferred": sum(1 for i in initiative_rows if i.status == "deferred"),
+            "rejected": sum(1 for i in initiative_rows if i.status == "rejected"),
             "active": sum(1 for i in initiative_rows if i.status == "active"),
         },
         "recent_sweeps": [
@@ -250,17 +264,52 @@ async def list_initiatives(
                 "id": row.id,
                 "proposed_by_agent": row.proposed_by_agent,
                 "owner_agent": row.owner_agent,
+                "selected_agent": row.selected_agent,
+                "selected_project_id": row.selected_project_id,
+                "task_id": row.task_id,
                 "title": row.title,
                 "description": row.description,
                 "category": row.category,
                 "risk_tier": row.risk_tier,
                 "status": row.status,
                 "rationale": row.rationale,
+                "decision_summary": row.decision_summary,
+                "learning_feedback": row.learning_feedback,
                 "created_at": row.created_at.isoformat() if row.created_at else None,
             }
             for row in rows
         ],
     }
+
+
+@router.post("/intelligence/initiatives/{initiative_id}/decide")
+async def decide_initiative(
+    initiative_id: str,
+    payload: InitiativeDecisionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Apply a Lobs decision to an initiative and convert approved ideas into tasks."""
+
+    initiative = await db.get(AgentInitiative, initiative_id)
+    if initiative is None:
+        raise HTTPException(status_code=404, detail="Initiative not found")
+
+    engine = InitiativeDecisionEngine(db)
+    try:
+        result = await engine.decide(
+            initiative,
+            decision=payload.decision,
+            revised_title=payload.revised_title,
+            revised_description=payload.revised_description,
+            selected_agent=payload.selected_agent,
+            selected_project_id=payload.selected_project_id,
+            decision_summary=payload.decision_summary,
+            learning_feedback=payload.learning_feedback,
+            decided_by="lobs",
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @router.get("/intelligence/budgets")

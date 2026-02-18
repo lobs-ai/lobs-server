@@ -106,6 +106,7 @@ Built server-side in `app/orchestrator/context_packets.py`.
 ### API visibility
 - `GET /api/orchestrator/intelligence/summary`
 - `GET /api/orchestrator/intelligence/initiatives`
+- `POST /api/orchestrator/intelligence/initiatives/{id}/decide` (Lobs approves/defers/rejects and can revise idea before conversion)
 
 ---
 

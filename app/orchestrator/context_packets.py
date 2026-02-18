@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Task, WorkerRun
+from app.models import AgentInitiative, AgentReflection, Task, WorkerRun
 
 
 @dataclass
@@ -41,12 +41,13 @@ class ContextPacketBuilder:
         backlog = await self._backlog(agent_type)
         metrics = await self._performance_metrics(agent_type, since)
         other_activity = await self._other_agent_activity(agent_type, since)
+        initiative_feedback = await self._initiative_feedback(agent_type, since)
 
         return AgentContextPacket(
             agent_type=agent_type,
             generated_at=now.isoformat(),
             recent_tasks_summary=recent_tasks,
-            active_initiatives=[],
+            active_initiatives=initiative_feedback,
             backlog_summary=backlog,
             performance_metrics=metrics,
             other_agent_activity_summary=other_activity,
@@ -140,6 +141,58 @@ class ContextPacketBuilder:
             }
             for t in tasks
         ]
+
+    async def _initiative_feedback(self, agent_type: str, since: datetime) -> list[dict[str, Any]]:
+        reflections_result = await self.db.execute(
+            select(AgentReflection)
+            .where(
+                AgentReflection.agent_type == agent_type,
+                AgentReflection.reflection_type == "initiative_feedback",
+                AgentReflection.created_at >= since,
+            )
+            .order_by(AgentReflection.created_at.desc())
+            .limit(20)
+        )
+        reflections = reflections_result.scalars().all()
+
+        initiatives_result = await self.db.execute(
+            select(AgentInitiative)
+            .where(
+                AgentInitiative.proposed_by_agent == agent_type,
+                AgentInitiative.updated_at >= since,
+            )
+            .order_by(AgentInitiative.updated_at.desc())
+            .limit(20)
+        )
+        initiatives = initiatives_result.scalars().all()
+
+        items: list[dict[str, Any]] = []
+        for r in reflections:
+            payload = r.result if isinstance(r.result, dict) else {}
+            items.append(
+                {
+                    "type": "feedback",
+                    "initiative_id": payload.get("initiative_id"),
+                    "decision": payload.get("decision"),
+                    "selected_agent": payload.get("selected_agent"),
+                    "task_id": payload.get("task_id"),
+                    "learning_feedback": payload.get("learning_feedback"),
+                }
+            )
+
+        for i in initiatives:
+            items.append(
+                {
+                    "type": "initiative_status",
+                    "initiative_id": i.id,
+                    "title": i.title,
+                    "status": i.status,
+                    "selected_agent": i.selected_agent,
+                    "task_id": i.task_id,
+                }
+            )
+
+        return items[:30]
 
     @staticmethod
     def _run_matches_agent(run: WorkerRun, agent_type: str) -> bool:

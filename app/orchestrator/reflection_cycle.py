@@ -161,7 +161,8 @@ Return STRICT JSON with this schema (no prose outside JSON):
       "title": "...",
       "description": "...",
       "category": "docs_sync|test_hygiene|stale_triage|light_research|backlog_reprioritization|automation_proposal|moderate_refactor|architecture_change|destructive_operation|cross_project_migration|agent_recruitment",
-      "estimated_effort": 1
+      "estimated_effort": 1,
+      "suggested_owner_agent": "optional-agent-type"
     }}
   ],
   "identity_adjustments": ["..."]

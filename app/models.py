@@ -311,6 +311,11 @@ class AgentInitiative(Base):
     score = Column(Float)
     rationale = Column(Text)
     approved_by = Column(String)
+    selected_agent = Column(String, index=True)
+    selected_project_id = Column(String, ForeignKey("projects.id"))
+    task_id = Column(String, ForeignKey("tasks.id"))
+    decision_summary = Column(Text)
+    learning_feedback = Column(Text)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 

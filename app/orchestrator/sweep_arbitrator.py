@@ -17,6 +17,7 @@ from app.models import (
     SystemSweep,
 )
 from app.orchestrator.policy_engine import PolicyEngine
+from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 
 DEFAULT_DAILY_BUDGET = {
     "writer": 4,
@@ -33,6 +34,7 @@ class SweepArbitrator:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.policy = PolicyEngine()
+        self.decision_engine = InitiativeDecisionEngine(db)
 
     async def run_once(self) -> dict[str, Any]:
         initiatives = await self._load_proposed_initiatives()
@@ -68,7 +70,9 @@ class SweepArbitrator:
             if initiative.status != "proposed":
                 continue
 
-            owner = (initiative.owner_agent or initiative.proposed_by_agent or "programmer").lower()
+            suggested_agent = await self.decision_engine.suggest_agent(initiative)
+            initiative.owner_agent = suggested_agent
+            owner = (suggested_agent or initiative.proposed_by_agent or "programmer").lower()
             decision = self.policy.decide(initiative.category)
             initiative.risk_tier = decision.risk_tier
 
@@ -90,6 +94,7 @@ class SweepArbitrator:
                 budget=f"{used}/{daily_limit}",
                 decision_reason=decision.reason,
                 approval_mode=decision.approval_mode,
+                suggested_agent=suggested_agent,
             )
             lobs_review += 1
 
@@ -163,6 +168,7 @@ class SweepArbitrator:
         budget: str,
         decision_reason: str,
         approval_mode: str,
+        suggested_agent: str,
     ) -> None:
         title = initiative.title or "Untitled initiative"
         severity = "HIGH" if initiative.risk_tier == "C" else "MEDIUM"
@@ -172,7 +178,8 @@ class SweepArbitrator:
             f"Recommendation: {recommendation}\n"
             f"Policy mode: {approval_mode}\n"
             f"Budget usage: {budget}\n"
-            f"Reason: {decision_reason}\n\n"
+            f"Reason: {decision_reason}\n"
+            f"Suggested execution agent: {suggested_agent}\n\n"
             f"Initiative ID: {initiative.id}\n"
             f"Title: {title}\n"
             f"Category: {initiative.category}\n"

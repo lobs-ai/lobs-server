@@ -866,18 +866,22 @@ class WorkerManager:
                     effort_int = int(effort) if isinstance(effort, (int, float)) else None
                     decision = policy.decide(category, estimated_effort=effort_int)
 
+                    proposed_owner = raw.get("owner_agent") or raw.get("suggested_owner_agent")
                     self.db.add(
                         AgentInitiative(
                             id=str(uuid.uuid4()),
                             proposed_by_agent=agent_type,
                             source_reflection_id=reflection.id,
-                            owner_agent=agent_type,
+                            owner_agent=(str(proposed_owner).strip().lower() if proposed_owner else None),
                             title=str(raw.get("title") or "Untitled initiative"),
                             description=str(raw.get("description") or ""),
                             category=category or "unknown",
                             risk_tier=decision.risk_tier,
-                            status=("approved" if decision.approval_mode == "auto" else "proposed"),
-                            rationale=decision.reason,
+                            status="proposed",
+                            rationale=(
+                                f"Proposed by {agent_type}. Initial policy signal={decision.approval_mode}. "
+                                f"Reason={decision.reason}"
+                            ),
                         )
                     )
 
