@@ -34,6 +34,7 @@ from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.config import POLL_INTERVAL
 from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting
 from app.services.github_sync import GitHubSyncService
+from app.services.openclaw_models import fetch_openclaw_model_catalog
 from sqlalchemy import select
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
@@ -41,9 +42,13 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
     SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
     SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
+    SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
 )
 
 logger = logging.getLogger(__name__)
+
+USAGE_ROUTING_POLICY_KEY = "usage.routing_policy"
+OPENCLAW_MODEL_CATALOG_KEY = "usage.openclaw_model_catalog"
 
 
 class OrchestratorEngine:
@@ -90,6 +95,8 @@ class OrchestratorEngine:
         self._github_sync_interval = 120  # every 2 minutes
         self._last_runtime_settings_refresh = 0.0
         self._runtime_settings_refresh_interval = 60  # refresh from DB every minute
+        self._last_openclaw_model_sync = 0.0
+        self._openclaw_model_sync_interval = 900  # every 15 minutes
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -268,6 +275,64 @@ class OrchestratorEngine:
                     self._last_github_sync_check = current_time
                 except Exception as e:
                     logger.error("[ENGINE] GitHub sync check failed: %s", e, exc_info=True)
+                    await db.rollback()
+
+            # 1c. Sync OpenClaw model/auth/billing catalog (every 15 minutes)
+            if current_time - self._last_openclaw_model_sync >= self._openclaw_model_sync_interval:
+                try:
+                    catalog = await fetch_openclaw_model_catalog()
+                    setting = await db.get(OrchestratorSetting, OPENCLAW_MODEL_CATALOG_KEY)
+                    if setting is None:
+                        setting = OrchestratorSetting(key=OPENCLAW_MODEL_CATALOG_KEY, value=catalog)
+                        db.add(setting)
+                    else:
+                        setting.value = catalog
+
+                    models = catalog.get("models") if isinstance(catalog, dict) else []
+                    subscription_models: list[str] = []
+                    subscription_providers: list[str] = []
+                    if isinstance(models, list):
+                        for item in models:
+                            if not isinstance(item, dict):
+                                continue
+                            if str(item.get("billing_type", "")).lower() != "subscription":
+                                continue
+                            model = item.get("model")
+                            provider = item.get("provider")
+                            if isinstance(model, str) and model not in subscription_models:
+                                subscription_models.append(model)
+                            if isinstance(provider, str) and provider not in subscription_providers:
+                                subscription_providers.append(provider)
+
+                    policy_setting = await db.get(OrchestratorSetting, USAGE_ROUTING_POLICY_KEY)
+                    policy = policy_setting.value if (policy_setting and isinstance(policy_setting.value, dict)) else {}
+                    policy.setdefault("subscription_first_task_types", ["inbox", "quick_summary", "triage", "inbox_item"])
+                    policy.setdefault("fallback_chains", {
+                        "inbox": ["subscription", "kimi", "minimax", "openai", "claude"],
+                        "quick_summary": ["subscription", "kimi", "minimax", "openai", "claude"],
+                        "triage": ["subscription", "kimi", "minimax", "openai", "claude"],
+                        "default": ["openai", "claude", "kimi", "minimax", "subscription"],
+                    })
+                    policy["subscription_models"] = subscription_models
+                    policy["subscription_providers"] = subscription_providers
+
+                    if policy_setting is None:
+                        policy_setting = OrchestratorSetting(key=USAGE_ROUTING_POLICY_KEY, value=policy)
+                        db.add(policy_setting)
+                    else:
+                        policy_setting.value = policy
+
+                    await db.commit()
+                    self._last_openclaw_model_sync = current_time
+                    if subscription_models or subscription_providers:
+                        activity = True
+                        logger.info(
+                            "[ENGINE] OpenClaw model catalog sync complete: models=%s subscriptions=%s",
+                            catalog.get("count", 0) if isinstance(catalog, dict) else 0,
+                            len(subscription_models),
+                        )
+                except Exception as e:
+                    logger.error("[ENGINE] OpenClaw model sync failed: %s", e, exc_info=True)
                     await db.rollback()
 
             # 2. Process inbox threads (every 45 seconds, only if not paused)
@@ -751,6 +816,7 @@ For **🔴 LARGE** tasks:
             SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
             SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
             SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
+            SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
         )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
@@ -767,6 +833,7 @@ For **🔴 LARGE** tasks:
         self._sweep_interval = _as_int(SETTINGS_KEY_SWEEP_INTERVAL_SECONDS)
         self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
         self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
+        self._openclaw_model_sync_interval = _as_int(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS)
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
