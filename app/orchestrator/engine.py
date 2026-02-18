@@ -365,11 +365,11 @@ class OrchestratorEngine:
 You have {len(tasks_to_route)} task(s) that need agent assignment. Review each and assign the best agent.
 
 ### Available Agents
-- programmer: Code implementation, bug fixes, features (sonnet)
-- researcher: Investigation, analysis, comparison (sonnet)
-- architect: System design, technical strategy (opus)
-- reviewer: Code review, quality checks (sonnet)
-- writer: Documentation, summaries, content (sonnet)
+- programmer: Code implementation, bug fixes, features (codex)
+- researcher: Investigation, analysis, comparison (codex)
+- architect: System design, technical strategy (codex)
+- reviewer: Code review, quality checks (codex)
+- writer: Documentation, summaries, content (codex)
 
 ### Tasks to Route
 {chr(10).join(task_summaries)}
@@ -392,7 +392,7 @@ Route ALL tasks. Do not skip any."""
             spawn_result = await worker_manager._spawn_session(
                 task_prompt=prompt,
                 agent_id="project-manager",
-                model="anthropic/claude-haiku-4-5",  # Routing is lightweight
+                model="openai-codex/gpt-5.3-codex",  # Standardized primary model
                 label="pm-task-routing"
             )
             
@@ -547,7 +547,7 @@ For **🔴 LARGE** tasks:
             spawn_result = await worker_manager._spawn_session(
                 task_prompt=prompt,
                 agent_id="project-manager",
-                model="anthropic/claude-haiku-4-5",
+                model="openai-codex/gpt-5.3-codex",
                 label="pm-proactive-review"
             )
 

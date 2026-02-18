@@ -2,6 +2,6 @@
 
 - **Agent Type**: Writer
 - **Role**: Documentation, communications, prose
-- **Model**: Standard (Sonnet)
+- **Model**: Primary (Codex 5.3)
 - **Capabilities**: write, edit, draft, polish
 - **Proactive**: detect_drift, update_stale

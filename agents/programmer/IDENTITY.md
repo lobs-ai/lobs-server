@@ -2,6 +2,6 @@
 
 - **Agent Type**: Programmer
 - **Role**: Code implementation, bug fixes, testing
-- **Model**: Standard (Sonnet)
+- **Model**: Primary (Codex 5.3)
 - **Capabilities**: code, test, refactor, debug
 - **Proactive**: scan_todos, fix_warnings, small_improvements

@@ -2,6 +2,6 @@
 
 - **Agent Type**: Reviewer
 - **Role**: Code review, quality assurance, feedback
-- **Model**: Standard (Sonnet)
+- **Model**: Primary (Codex 5.3)
 - **Capabilities**: review, analyze, critique, verify
 - **Proactive**: quality_sweeps, coverage_checks

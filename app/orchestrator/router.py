@@ -11,19 +11,19 @@ VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "
 
 # Model tiers for different agent types
 AGENT_MODEL_MAP = {
-    "programmer": "anthropic/claude-sonnet-4-5",
-    "researcher": "anthropic/claude-sonnet-4-5",
-    "architect": "anthropic/claude-opus-4-6",
-    "reviewer": "anthropic/claude-sonnet-4-5",
-    "writer": "anthropic/claude-sonnet-4-5",
-    "suggester": "anthropic/claude-haiku-4-5",
-    "project-manager": "anthropic/claude-sonnet-4-5",
+    "programmer": "openai-codex/gpt-5.3-codex",
+    "researcher": "openai-codex/gpt-5.3-codex",
+    "architect": "openai-codex/gpt-5.3-codex",
+    "reviewer": "openai-codex/gpt-5.3-codex",
+    "writer": "openai-codex/gpt-5.3-codex",
+    "suggester": "openai-codex/gpt-5.3-codex",
+    "project-manager": "openai-codex/gpt-5.3-codex",
 }
 
 
 def get_model_for_task(agent_type: str, task: dict[str, Any]) -> str:
     """Select model based on agent type and task complexity."""
-    return AGENT_MODEL_MAP.get(agent_type, "anthropic/claude-sonnet-4-5")
+    return AGENT_MODEL_MAP.get(agent_type, "openai-codex/gpt-5.3-codex")
 
 
 @dataclass(frozen=True, slots=True)

@@ -29,19 +29,19 @@ AGENT_TYPES = ["programmer", "researcher", "architect", "reviewer", "writer", "i
 
 # Agent model configurations
 AGENT_MODELS = {
-    "programmer": "anthropic/claude-sonnet-4-5",
-    "researcher": "anthropic/claude-sonnet-4-5",
-    "architect": "anthropic/claude-sonnet-4-5",
-    "reviewer": "anthropic/claude-sonnet-4-5",
-    "writer": "anthropic/claude-sonnet-4-5",
-    "inbox-responder": "anthropic/claude-haiku-4-5",
+    "programmer": "openai-codex/gpt-5.3-codex",
+    "researcher": "openai-codex/gpt-5.3-codex",
+    "architect": "openai-codex/gpt-5.3-codex",
+    "reviewer": "openai-codex/gpt-5.3-codex",
+    "writer": "openai-codex/gpt-5.3-codex",
+    "inbox-responder": "openai-codex/gpt-5.3-codex",
 }
 
 
 def register_agent(agent_type: str) -> bool:
     """Register agent with OpenClaw if it doesn't exist."""
     workspace = OPENCLAW_DIR / f"workspace-{agent_type}"
-    model = AGENT_MODELS.get(agent_type, "anthropic/claude-sonnet-4-5")
+    model = AGENT_MODELS.get(agent_type, "openai-codex/gpt-5.3-codex")
     
     # Check if agent already exists
     result = subprocess.run(
