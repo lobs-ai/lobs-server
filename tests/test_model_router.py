@@ -1,42 +1,45 @@
 import pytest
 
-from app.orchestrator.model_router import (
-    decide_models,
-    MODEL_HAIKU,
-    MODEL_GEMINI_FLASH,
-    MODEL_SONNET,
-    MODEL_OPUS,
-)
+from app.orchestrator.model_router import decide_models
 
 
-def test_programmer_routes_to_sonnet_default():
+def test_programmer_routes_to_standard_then_strong_tiers(monkeypatch):
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a,model/std-b")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
+
     task = {"id": "t1", "title": "Implement feature", "notes": "", "status": "active"}
     d = decide_models("programmer", task)
-    assert d.models[0] == MODEL_SONNET
-    assert MODEL_OPUS in d.models  # fallback always available for programmer
+
+    assert d.models[:3] == ["model/std-a", "model/std-b", "model/strong-a"]
 
 
-def test_light_inbox_routes_to_haiku_then_gemini_tier():
+def test_light_inbox_routes_to_cheap_then_standard_then_strong(monkeypatch):
+    monkeypatch.setenv("LOBS_MODEL_TIER_CHEAP", "model/cheap-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
+
     task = {"id": "t2", "title": "reply", "notes": "quick response", "status": "inbox"}
     d = decide_models("writer", task)
-    assert d.models[0] == MODEL_HAIKU
-    assert d.models[1] == MODEL_GEMINI_FLASH
-    assert d.models[2] == MODEL_SONNET
+
+    assert d.models == ["model/cheap-a", "model/std-a", "model/strong-a"]
 
 
-def test_very_complex_includes_opus_fallback():
-    task = {
-        "id": "t3",
-        "title": "Orchestrator model router policy engine",
-        "notes": "Implement fallback chain and audit logging. Refactor spawn.",
-        "status": "active",
-    }
+def test_available_models_allowlist_filters_candidates(monkeypatch):
+    monkeypatch.setenv("LOBS_MODEL_TIER_CHEAP", "model/cheap-a,model/cheap-b")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
+    monkeypatch.setenv("LOBS_AVAILABLE_MODELS", "model/cheap-b,model/strong-a")
+
+    task = {"id": "t3", "title": "reply", "notes": "quick response", "status": "inbox"}
     d = decide_models("writer", task)
-    assert d.models[0] == MODEL_SONNET
-    assert MODEL_OPUS in d.models
+
+    assert d.models == ["model/cheap-b", "model/strong-a"]
 
 
-def test_high_criticality_appends_opus_fallback():
+def test_high_criticality_always_includes_strong_tier(monkeypatch):
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
+
     task = {
         "id": "t5",
         "title": "Urgent production auth outage",
@@ -44,8 +47,9 @@ def test_high_criticality_appends_opus_fallback():
         "status": "active",
     }
     d = decide_models("researcher", task)
+
     assert d.criticality == "high"
-    assert d.models[-1] == MODEL_OPUS
+    assert "model/strong-a" in d.models
 
 
 @pytest.mark.asyncio
@@ -54,6 +58,10 @@ async def test_worker_spawn_uses_fallback_chain(db_session, monkeypatch, tmp_pat
 
     from app.models import Project
     from app.orchestrator.worker import WorkerManager
+
+    monkeypatch.setenv("LOBS_MODEL_TIER_CHEAP", "model/cheap-a,model/cheap-b")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
 
     # Ensure project exists
     project_id = "p1"
@@ -66,7 +74,7 @@ async def test_worker_spawn_uses_fallback_chain(db_session, monkeypatch, tmp_pat
 
     async def fake_spawn_session(*, task_prompt: str, agent_id: str, model: str, label: str):
         calls["n"] += 1
-        # fail first (haiku), succeed second (gemini)
+        # fail first (cheap-a), succeed second (cheap-b)
         if calls["n"] == 1:
             return None, "provider error"
         return {"runId": "r1", "childSessionKey": "s1"}, None
@@ -80,6 +88,6 @@ async def test_worker_spawn_uses_fallback_chain(db_session, monkeypatch, tmp_pat
     # Verify chosen model is second candidate (fallback)
     assert len(mgr.active_workers) == 1
     wi = next(iter(mgr.active_workers.values()))
-    assert wi.model == MODEL_GEMINI_FLASH
+    assert wi.model == "model/cheap-b"
     assert wi.model_audit and wi.model_audit["fallback_used"] is True
     assert wi.model_audit["fallback_reason"] == "provider_failure"
