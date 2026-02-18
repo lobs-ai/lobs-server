@@ -32,6 +32,9 @@ from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.config import POLL_INTERVAL
+from app.models import Project as ProjectModel
+from app.services.github_sync import GitHubSyncService
+from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +79,8 @@ class OrchestratorEngine:
         self._sweep_interval = 900  # every 15 minutes
         self._last_diagnostic_check = 0.0
         self._diagnostic_interval = 600  # every 10 minutes
+        self._last_github_sync_check = 0.0
+        self._github_sync_interval = 120  # every 2 minutes
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -216,6 +221,36 @@ class OrchestratorEngine:
                     await db.commit()  # Commit scheduler changes
                 except Exception as e:
                     logger.error(f"[ENGINE] Scheduler check failed: {e}", exc_info=True)
+                    await db.rollback()
+
+            # 1b. Sync GitHub-backed projects (every 2 minutes)
+            if current_time - self._last_github_sync_check >= self._github_sync_interval:
+                try:
+                    github_projects_q = await db.execute(
+                        select(ProjectModel).where(
+                            ProjectModel.archived == False,
+                            ProjectModel.tracking == "github",
+                            ProjectModel.github_repo.is_not(None),
+                        )
+                    )
+                    github_projects = github_projects_q.scalars().all()
+                    if github_projects:
+                        sync_service = GitHubSyncService(db)
+                        for project in github_projects:
+                            try:
+                                result = await sync_service.sync_project(project, push=False)
+                                if result.get("imported", 0) > 0 or result.get("updated", 0) > 0:
+                                    activity = True
+                            except Exception as project_err:
+                                logger.warning(
+                                    "[ENGINE] GitHub sync failed for project %s: %s",
+                                    project.id,
+                                    project_err,
+                                )
+                        await db.commit()
+                    self._last_github_sync_check = current_time
+                except Exception as e:
+                    logger.error("[ENGINE] GitHub sync check failed: %s", e, exc_info=True)
                     await db.rollback()
 
             # 2. Process inbox threads (every 45 seconds, only if not paused)

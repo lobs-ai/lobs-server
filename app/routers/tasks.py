@@ -13,6 +13,7 @@ from app.database import get_db
 from app.models import Task as TaskModel, Project as ProjectModel
 from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate
 from app.config import settings
+from app.services.github_sync import GitHubSyncService
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -58,19 +59,65 @@ async def create_task(
         raise HTTPException(status_code=409, detail=f"Task with id '{task.id}' already exists")
 
     payload = task.model_dump()
+
+    project: ProjectModel | None = None
     if not payload.get("project_id"):
         inbox_id = settings.DEFAULT_INBOX_PROJECT_ID
         inbox_project = await db.execute(select(ProjectModel).where(ProjectModel.id == inbox_id))
-        if not inbox_project.scalar_one_or_none():
-            db.add(ProjectModel(
+        project = inbox_project.scalar_one_or_none()
+        if not project:
+            project = ProjectModel(
                 id=inbox_id,
                 title="Inbox",
                 notes="Default inbox project for unscoped tasks",
                 archived=False,
                 type="kanban",
                 sort_order=0,
-            ))
+                tracking="inbox",
+            )
+            db.add(project)
         payload["project_id"] = inbox_id
+    else:
+        project_result = await db.execute(select(ProjectModel).where(ProjectModel.id == payload["project_id"]))
+        project = project_result.scalar_one_or_none()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    # Enforce tracking source by project settings.
+    # - GitHub projects always create/link GitHub issue-backed tasks.
+    # - Non-GitHub projects clear GitHub-specific fields.
+    project_tracking = (project.tracking or "inbox").lower() if project else "inbox"
+    if project_tracking == "github":
+        if not project.github_repo:
+            raise HTTPException(status_code=400, detail="Project is set to GitHub tracking but github_repo is missing")
+
+        payload["external_source"] = "github"
+        payload["sync_state"] = payload.get("sync_state") or "synced"
+
+        if not payload.get("external_id"):
+            issue_number = payload.get("github_issue_number")
+            if issue_number:
+                payload["external_id"] = str(issue_number)
+            else:
+                issue = await GitHubSyncService(db).ensure_issue_for_task(
+                    project,
+                    title=payload["title"],
+                    body=payload.get("notes"),
+                )
+                payload["github_issue_number"] = issue.get("number")
+                payload["external_id"] = str(issue.get("number"))
+                payload["external_updated_at"] = issue.get("updatedAt")
+
+        payload["owner"] = payload.get("owner") or "lobs"
+        if payload.get("status") == "inbox":
+            payload["status"] = "active"
+        payload["work_state"] = payload.get("work_state") or "not_started"
+    else:
+        payload["external_source"] = None
+        payload["external_id"] = None
+        payload["external_updated_at"] = None
+        payload["sync_state"] = None
+        payload["conflict_payload"] = None
 
     db_task = TaskModel(**payload)
     db.add(db_task)

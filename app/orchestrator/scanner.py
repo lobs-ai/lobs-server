@@ -32,7 +32,8 @@ class Scanner:
                     Task.status == "active",
                     Task.work_state.in_(["not_started", "ready"]),
                     Task.agent != None,
-                    Task.agent != ""
+                    Task.agent != "",
+                    (Task.sync_state == None) | (Task.sync_state != "conflict"),
                 )
             )
             tasks = result.scalars().all()
@@ -55,7 +56,8 @@ class Scanner:
                 select(Task).where(
                     Task.status == "active",
                     Task.work_state.in_(["not_started", "ready"]),
-                    (Task.agent == None) | (Task.agent == "")
+                    (Task.agent == None) | (Task.agent == ""),
+                    (Task.sync_state == None) | (Task.sync_state != "conflict"),
                 )
             )
             tasks = result.scalars().all()
