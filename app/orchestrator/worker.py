@@ -18,7 +18,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 import aiohttp
@@ -222,6 +222,7 @@ class WorkerManager:
                 candidate_models=candidate_models,
                 budgets=router_cfg.get("budgets") or {},
             )
+            candidate_models = await self._apply_health_penalty(candidate_models)
 
             strict_coding_tier = bool(router_cfg.get("strict_coding_tier", True))
             if agent_type == "programmer" and strict_coding_tier and candidate_models:
@@ -429,6 +430,43 @@ class WorkerManager:
             )
         )
         return float(result.scalar() or 0.0)
+
+    async def _provider_recent_error_rate(self, provider: str, minutes: int = 30) -> float:
+        since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        total_q = await self.db.execute(
+            select(func.coalesce(func.sum(ModelUsageEvent.requests), 0)).where(
+                ModelUsageEvent.provider == provider,
+                ModelUsageEvent.timestamp >= since,
+            )
+        )
+        err_q = await self.db.execute(
+            select(func.coalesce(func.sum(ModelUsageEvent.requests), 0)).where(
+                ModelUsageEvent.provider == provider,
+                ModelUsageEvent.timestamp >= since,
+                ModelUsageEvent.status != "success",
+            )
+        )
+        total = int(total_q.scalar() or 0)
+        errs = int(err_q.scalar() or 0)
+        return (errs / total) if total > 0 else 0.0
+
+    async def _apply_health_penalty(self, candidate_models: list[str]) -> list[str]:
+        if not candidate_models:
+            return candidate_models
+
+        async def score(model_name: str) -> tuple[int, float]:
+            provider = infer_provider(model_name)
+            err_rate = await self._provider_recent_error_rate(provider, minutes=30)
+            penalty = 1 if err_rate >= 0.5 else 0
+            return penalty, err_rate
+
+        scored = []
+        for model_name in candidate_models:
+            penalty, err_rate = await score(model_name)
+            scored.append((penalty, err_rate, model_name))
+
+        scored.sort(key=lambda x: (x[0], x[1]))
+        return [m for _, _, m in scored]
 
     async def _apply_budget_guards(
         self,

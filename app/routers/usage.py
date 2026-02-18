@@ -23,6 +23,7 @@ from app.schemas import (
     UsageProviderSummary,
     UsageSummaryResponse,
 )
+from app.services.openclaw_models import fetch_openclaw_model_catalog
 from app.services.usage import log_usage_event
 
 router = APIRouter(prefix="/usage", tags=["usage"])
@@ -30,6 +31,7 @@ routing_router = APIRouter(prefix="/routing", tags=["usage"])
 
 BUDGETS_KEY = "usage.budgets"
 ROUTING_POLICY_KEY = "usage.routing_policy"
+OPENCLAW_MODEL_CATALOG_KEY = "usage.openclaw_model_catalog"
 
 DEFAULT_BUDGETS = BudgetLimits(
     monthly_total_usd=150.0,
@@ -322,3 +324,53 @@ async def get_routing_policy(db: AsyncSession = Depends(get_db)) -> RoutingPolic
 async def patch_routing_policy(payload: RoutingPolicy, db: AsyncSession = Depends(get_db)) -> RoutingPolicy:
     await _put_setting_json(db, ROUTING_POLICY_KEY, payload.model_dump())
     return payload
+
+
+@router.get("/openclaw/models")
+async def get_openclaw_model_catalog(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    raw = await _get_setting_json(db, OPENCLAW_MODEL_CATALOG_KEY)
+    if isinstance(raw, dict):
+        return raw
+    return {"synced_at": None, "count": 0, "models": []}
+
+
+@router.post("/openclaw/sync")
+async def sync_openclaw_model_catalog(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    catalog = await fetch_openclaw_model_catalog()
+    await _put_setting_json(db, OPENCLAW_MODEL_CATALOG_KEY, catalog)
+
+    # Smart default: feed subscription-capable providers/models into routing policy.
+    models = catalog.get("models") if isinstance(catalog, dict) else []
+    subscription_models = []
+    subscription_providers = []
+    if isinstance(models, list):
+        for item in models:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("billing_type", "")).lower() != "subscription":
+                continue
+            model = item.get("model")
+            provider = item.get("provider")
+            if isinstance(model, str) and model not in subscription_models:
+                subscription_models.append(model)
+            if isinstance(provider, str) and provider not in subscription_providers:
+                subscription_providers.append(provider)
+
+    current_policy_raw = await _get_setting_json(db, ROUTING_POLICY_KEY)
+    current_policy = _normalize_routing_policy_dict(current_policy_raw if isinstance(current_policy_raw, dict) else DEFAULT_ROUTING_POLICY.model_dump())
+    current_policy["subscription_models"] = subscription_models
+    current_policy["subscription_providers"] = subscription_providers
+    if subscription_models and "subscription" not in current_policy.get("fallback_chains", {}).get("default", []):
+        chains = current_policy.get("fallback_chains") or {}
+        default_chain = chains.get("default") or ["openai", "claude", "kimi", "minimax"]
+        chains["default"] = ["subscription", *[x for x in default_chain if x != "subscription"]]
+        current_policy["fallback_chains"] = chains
+
+    await _put_setting_json(db, ROUTING_POLICY_KEY, current_policy)
+
+    return {
+        "catalog": catalog,
+        "routing_policy": current_policy,
+        "synced_subscription_models": subscription_models,
+        "synced_subscription_providers": subscription_providers,
+    }
