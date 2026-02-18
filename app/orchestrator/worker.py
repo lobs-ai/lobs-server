@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 import aiohttp
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -33,6 +33,7 @@ from app.models import (
     OrchestratorSetting,
     AgentReflection,
     AgentInitiative,
+    ModelUsageEvent,
 )
 from app.orchestrator.config import (
     BASE_DIR,
@@ -59,9 +60,12 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 from app.orchestrator.policy_engine import PolicyEngine
-from app.services.usage import log_usage_event
+from app.services.usage import infer_provider, log_usage_event
 
 logger = logging.getLogger(__name__)
+
+USAGE_BUDGETS_KEY = "usage.budgets"
+USAGE_ROUTING_POLICY_KEY = "usage.routing_policy"
 
 
 @dataclass
@@ -209,6 +213,16 @@ class WorkerManager:
             attempts: list[dict[str, Any]] = []
 
             candidate_models = list(decision.models)
+            candidate_models = self._apply_routing_policy(
+                candidate_models=candidate_models,
+                task=task,
+                policy=router_cfg.get("routing_policy") or {},
+            )
+            candidate_models = await self._apply_budget_guards(
+                candidate_models=candidate_models,
+                budgets=router_cfg.get("budgets") or {},
+            )
+
             strict_coding_tier = bool(router_cfg.get("strict_coding_tier", True))
             if agent_type == "programmer" and strict_coding_tier and candidate_models:
                 # Do not silently downgrade coding runs.
@@ -329,6 +343,8 @@ class WorkerManager:
             MODEL_ROUTER_AVAILABLE_MODELS_KEY,
             SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
             SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
+            USAGE_BUDGETS_KEY,
+            USAGE_ROUTING_POLICY_KEY,
         )
 
         result = await self.db.execute(
@@ -351,7 +367,90 @@ class WorkerManager:
             "available_models": _list_value(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
             "strict_coding_tier": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER, True)),
             "degrade_on_quota": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA, False)),
+            "routing_policy": rows.get(USAGE_ROUTING_POLICY_KEY) if isinstance(rows.get(USAGE_ROUTING_POLICY_KEY), dict) else {},
+            "budgets": rows.get(USAGE_BUDGETS_KEY) if isinstance(rows.get(USAGE_BUDGETS_KEY), dict) else {},
         }
+
+    @staticmethod
+    def _task_type(task: dict[str, Any]) -> str:
+        status = str(task.get("status") or "").lower()
+        title = str(task.get("title") or "").lower()
+        notes = str(task.get("notes") or "").lower()
+        if status == "inbox":
+            return "inbox"
+        if "summary" in title or "summary" in notes:
+            return "quick_summary"
+        if "triage" in title or "triage" in notes:
+            return "triage"
+        return "default"
+
+    def _apply_routing_policy(
+        self,
+        *,
+        candidate_models: list[str],
+        task: dict[str, Any],
+        policy: dict[str, Any],
+    ) -> list[str]:
+        if not candidate_models or not policy:
+            return candidate_models
+
+        task_type = self._task_type(task)
+        chains = policy.get("fallback_chains") if isinstance(policy.get("fallback_chains"), dict) else {}
+        chain = chains.get(task_type) or chains.get("default")
+        if not isinstance(chain, list) or not chain:
+            return candidate_models
+
+        order = {str(p).lower(): i for i, p in enumerate(chain)}
+
+        def provider_rank(model_name: str) -> int:
+            provider = infer_provider(model_name)
+            return order.get(provider, len(order) + 10)
+
+        return sorted(candidate_models, key=provider_rank)
+
+    async def _provider_month_cost(self, provider: str, now: datetime) -> float:
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        result = await self.db.execute(
+            select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
+                ModelUsageEvent.provider == provider,
+                ModelUsageEvent.timestamp >= month_start,
+            )
+        )
+        return float(result.scalar() or 0.0)
+
+    async def _apply_budget_guards(
+        self,
+        *,
+        candidate_models: list[str],
+        budgets: dict[str, Any],
+    ) -> list[str]:
+        per_provider = budgets.get("per_provider_monthly_usd") if isinstance(budgets.get("per_provider_monthly_usd"), dict) else {}
+        if not per_provider:
+            return candidate_models
+
+        now = datetime.now(timezone.utc)
+        allowed: list[str] = []
+        blocked: list[str] = []
+
+        for model_name in candidate_models:
+            provider = infer_provider(model_name)
+            cap = per_provider.get(provider)
+            if cap is None:
+                allowed.append(model_name)
+                continue
+            spent = await self._provider_month_cost(provider, now)
+            if float(spent) >= float(cap):
+                blocked.append(model_name)
+            else:
+                allowed.append(model_name)
+
+        if allowed:
+            return allowed
+
+        # If all blocked, preserve original list to avoid hard outage.
+        if blocked:
+            logger.warning("[MODEL_ROUTER] all candidate models exceeded provider caps; preserving fallback list")
+        return candidate_models
 
     async def _spawn_session(
         self,
@@ -393,6 +492,16 @@ class WorkerManager:
                 data = await resp.json()
                 
                 if not data.get("ok"):
+                    await log_usage_event(
+                        self.db,
+                        source="orchestrator-spawn",
+                        model=model,
+                        route_type="subscription" if "gemini-cli" in model.lower() else "api",
+                        task_type="inbox" if "inbox" in label else "task_execution",
+                        status="error",
+                        error_code="sessions_spawn_failed",
+                        metadata={"label": label, "agent_id": agent_id},
+                    )
                     logger.error(
                         "[GATEWAY] sessions_spawn failed",
                         extra={"gateway": {"model": model, "response": data}},
@@ -403,11 +512,31 @@ class WorkerManager:
                 # Gateway wraps tool results in {content, details}
                 details = result.get("details", result)
                 if details.get("status") != "accepted":
+                    await log_usage_event(
+                        self.db,
+                        source="orchestrator-spawn",
+                        model=model,
+                        route_type="subscription" if "gemini-cli" in model.lower() else "api",
+                        task_type="inbox" if "inbox" in label else "task_execution",
+                        status="error",
+                        error_code="sessions_spawn_not_accepted",
+                        metadata={"label": label, "agent_id": agent_id, "details": details},
+                    )
                     logger.error(
                         "[GATEWAY] sessions_spawn not accepted",
                         extra={"gateway": {"model": model, "result": result}},
                     )
                     return None, f"sessions_spawn_not_accepted: {result}"
+
+                await log_usage_event(
+                    self.db,
+                    source="orchestrator-spawn",
+                    model=model,
+                    route_type="subscription" if "gemini-cli" in model.lower() else "api",
+                    task_type="inbox" if "inbox" in label else "task_execution",
+                    status="success",
+                    metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
+                )
 
                 return (
                     {
