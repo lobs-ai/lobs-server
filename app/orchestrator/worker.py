@@ -59,6 +59,7 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 from app.orchestrator.policy_engine import PolicyEngine
+from app.services.usage import log_usage_event
 
 logger = logging.getLogger(__name__)
 
@@ -840,6 +841,27 @@ class WorkerManager:
             )
 
             self.db.add(run)
+
+            if model:
+                lowered_model = model.lower()
+                route_type = "subscription" if "gemini-cli" in lowered_model else "api"
+                await log_usage_event(
+                    self.db,
+                    source="orchestrator-worker",
+                    model=model,
+                    route_type=route_type,
+                    task_type="task_execution",
+                    requests=1,
+                    status="success" if succeeded else "error",
+                    error_code=None if succeeded else f"exit_code_{exit_code}",
+                    metadata={
+                        "task_id": task_id,
+                        "worker_id": worker_id,
+                        "model_router": model_audit,
+                        "duration_seconds": duration,
+                    },
+                )
+
             await self.db.commit()
 
         except Exception as e:

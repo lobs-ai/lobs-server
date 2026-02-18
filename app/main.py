@@ -41,6 +41,7 @@ from app.routers import (
     workspaces,
     governance,
     intent,
+    usage,
 )
 from app.routers import text_dumps
 
@@ -170,6 +171,8 @@ app.include_router(status.router, prefix=settings.API_PREFIX, dependencies=[Depe
 app.include_router(workspaces.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(governance.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(intent.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(usage.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(usage.routing_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 
 
 @app.get("/")

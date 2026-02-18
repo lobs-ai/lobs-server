@@ -1,0 +1,310 @@
+"""Usage tracking, budgets, and routing policy endpoints."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from typing import Any
+
+from fastapi import APIRouter, Depends
+from sqlalchemy import case, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.database import get_db
+from app.models import ModelPricing as ModelPricingModel, ModelUsageEvent as ModelUsageEventModel, OrchestratorSetting
+from app.schemas import (
+    BudgetLimits,
+    ModelPricing,
+    ModelPricingCreate,
+    ModelUsageEvent,
+    ModelUsageEventCreate,
+    RoutingPolicy,
+    UsageModelSummary,
+    UsageProjectionResponse,
+    UsageProviderSummary,
+    UsageSummaryResponse,
+)
+from app.services.usage import log_usage_event
+
+router = APIRouter(prefix="/usage", tags=["usage"])
+routing_router = APIRouter(prefix="/routing", tags=["usage"])
+
+BUDGETS_KEY = "usage.budgets"
+ROUTING_POLICY_KEY = "usage.routing_policy"
+
+DEFAULT_BUDGETS = BudgetLimits(
+    monthly_total_usd=150.0,
+    daily_alert_usd=10.0,
+    per_provider_monthly_usd={
+        "openai": 75.0,
+        "claude": 75.0,
+        "kimi": 50.0,
+        "minimax": 50.0,
+    },
+    per_task_hard_cap_usd=2.0,
+)
+
+DEFAULT_ROUTING_POLICY = RoutingPolicy(
+    gemini_first_task_types=["inbox", "quick_summary", "triage", "inbox_item"],
+    low_level_task_types=["inbox", "quick_summary", "triage", "inbox_item"],
+    fallback_chains={
+        "inbox": ["gemini", "kimi", "minimax", "openai", "claude"],
+        "quick_summary": ["gemini", "kimi", "minimax", "openai", "claude"],
+        "triage": ["gemini", "kimi", "minimax", "openai", "claude"],
+        "default": ["openai", "claude", "kimi", "minimax"],
+    },
+    quality_preference=["claude", "openai", "kimi", "minimax"],
+)
+
+
+def _window_start(window: str, now: datetime) -> datetime:
+    if window == "day":
+        return now - timedelta(days=1)
+    if window == "week":
+        return now - timedelta(days=7)
+    if window == "month":
+        return now - timedelta(days=30)
+    raise ValueError("window must be one of: day, week, month")
+
+
+def _error_rate(total_requests: int, error_requests: int) -> float:
+    if total_requests <= 0:
+        return 0.0
+    return round(error_requests / total_requests, 4)
+
+
+async def _get_setting_json(db: AsyncSession, key: str) -> Any | None:
+    row = await db.get(OrchestratorSetting, key)
+    return row.value if row else None
+
+
+async def _put_setting_json(db: AsyncSession, key: str, value: Any) -> None:
+    row = await db.get(OrchestratorSetting, key)
+    if row is None:
+        row = OrchestratorSetting(key=key, value=value)
+        db.add(row)
+    else:
+        row.value = value
+    await db.commit()
+
+
+@router.post("/events", response_model=ModelUsageEvent)
+async def create_usage_event(payload: ModelUsageEventCreate, db: AsyncSession = Depends(get_db)) -> ModelUsageEvent:
+    event = await log_usage_event(
+        db,
+        source=payload.source,
+        model=payload.model,
+        provider=payload.provider,
+        route_type=payload.route_type,
+        task_type=payload.task_type,
+        input_tokens=payload.input_tokens,
+        output_tokens=payload.output_tokens,
+        cached_tokens=payload.cached_tokens,
+        requests=payload.requests,
+        latency_ms=payload.latency_ms,
+        status=payload.status,
+        estimated_cost_usd=payload.estimated_cost_usd,
+        error_code=payload.error_code,
+        metadata=payload.event_metadata,
+        timestamp=payload.timestamp,
+    )
+    await db.commit()
+    await db.refresh(event)
+    return event
+
+
+@router.get("/summary", response_model=UsageSummaryResponse)
+async def get_usage_summary(window: str = "month", db: AsyncSession = Depends(get_db)) -> UsageSummaryResponse:
+    now = datetime.now(timezone.utc)
+    start = _window_start(window, now)
+
+    totals_result = await db.execute(
+        select(
+            func.coalesce(func.sum(ModelUsageEventModel.requests), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.cached_tokens), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0),
+        ).where(ModelUsageEventModel.timestamp >= start)
+    )
+    total_requests, total_input, total_output, total_cached, total_cost = totals_result.one()
+
+    provider_result = await db.execute(
+        select(
+            ModelUsageEventModel.provider,
+            func.coalesce(func.sum(ModelUsageEventModel.requests), 0).label("requests"),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.cached_tokens), 0).label("cached_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0).label("cost"),
+            func.avg(ModelUsageEventModel.latency_ms).label("avg_latency"),
+            func.coalesce(
+                func.sum(case((ModelUsageEventModel.status != "success", ModelUsageEventModel.requests), else_=0)),
+                0,
+            ).label("error_requests"),
+        )
+        .where(ModelUsageEventModel.timestamp >= start)
+        .group_by(ModelUsageEventModel.provider)
+        .order_by(func.sum(ModelUsageEventModel.estimated_cost_usd).desc())
+    )
+
+    by_provider: list[UsageProviderSummary] = []
+    for row in provider_result.all():
+        reqs = int(row.requests or 0)
+        errs = int(row.error_requests or 0)
+        by_provider.append(
+            UsageProviderSummary(
+                provider=row.provider,
+                requests=reqs,
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cached_tokens=int(row.cached_tokens or 0),
+                estimated_cost_usd=float(row.cost or 0.0),
+                avg_latency_ms=float(row.avg_latency) if row.avg_latency is not None else None,
+                error_rate=_error_rate(reqs, errs),
+            )
+        )
+
+    model_result = await db.execute(
+        select(
+            ModelUsageEventModel.provider,
+            ModelUsageEventModel.model,
+            ModelUsageEventModel.route_type,
+            func.coalesce(func.sum(ModelUsageEventModel.requests), 0).label("requests"),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.cached_tokens), 0).label("cached_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0).label("cost"),
+            func.avg(ModelUsageEventModel.latency_ms).label("avg_latency"),
+            func.coalesce(
+                func.sum(case((ModelUsageEventModel.status != "success", ModelUsageEventModel.requests), else_=0)),
+                0,
+            ).label("error_requests"),
+        )
+        .where(ModelUsageEventModel.timestamp >= start)
+        .group_by(ModelUsageEventModel.provider, ModelUsageEventModel.model, ModelUsageEventModel.route_type)
+        .order_by(func.sum(ModelUsageEventModel.estimated_cost_usd).desc())
+    )
+
+    by_model: list[UsageModelSummary] = []
+    for row in model_result.all():
+        reqs = int(row.requests or 0)
+        errs = int(row.error_requests or 0)
+        by_model.append(
+            UsageModelSummary(
+                provider=row.provider,
+                model=row.model,
+                route_type=row.route_type,
+                requests=reqs,
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cached_tokens=int(row.cached_tokens or 0),
+                estimated_cost_usd=float(row.cost or 0.0),
+                avg_latency_ms=float(row.avg_latency) if row.avg_latency is not None else None,
+                error_rate=_error_rate(reqs, errs),
+            )
+        )
+
+    return UsageSummaryResponse(
+        window=window,
+        period_start=start,
+        period_end=now,
+        total_requests=int(total_requests or 0),
+        total_input_tokens=int(total_input or 0),
+        total_output_tokens=int(total_output or 0),
+        total_cached_tokens=int(total_cached or 0),
+        total_estimated_cost_usd=float(total_cost or 0.0),
+        by_provider=by_provider,
+        by_model=by_model,
+    )
+
+
+@router.get("/providers")
+async def get_usage_by_provider(window: str = "month", db: AsyncSession = Depends(get_db)) -> list[UsageProviderSummary]:
+    summary = await get_usage_summary(window=window, db=db)
+    return summary.by_provider
+
+
+@router.get("/models")
+async def get_usage_by_model(window: str = "month", db: AsyncSession = Depends(get_db)) -> list[UsageModelSummary]:
+    summary = await get_usage_summary(window=window, db=db)
+    return summary.by_model
+
+
+@router.get("/projection", response_model=UsageProjectionResponse)
+async def get_usage_projection(db: AsyncSession = Depends(get_db)) -> UsageProjectionResponse:
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    result = await db.execute(
+        select(func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0)).where(ModelUsageEventModel.timestamp >= month_start)
+    )
+    month_to_date = float(result.scalar() or 0.0)
+
+    elapsed_days = max((now - month_start).total_seconds() / 86400.0, 1 / 24.0)
+    daily_burn = month_to_date / elapsed_days
+
+    next_month = (month_start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    days_in_month = (next_month - month_start).days
+    projected = daily_burn * days_in_month
+
+    return UsageProjectionResponse(
+        month_start=month_start,
+        now=now,
+        month_to_date_cost_usd=round(month_to_date, 4),
+        current_daily_burn_usd=round(daily_burn, 4),
+        projected_month_end_cost_usd=round(projected, 4),
+    )
+
+
+@router.get("/budgets", response_model=BudgetLimits)
+async def get_budgets(db: AsyncSession = Depends(get_db)) -> BudgetLimits:
+    raw = await _get_setting_json(db, BUDGETS_KEY)
+    if not isinstance(raw, dict):
+        return DEFAULT_BUDGETS
+    return BudgetLimits(**raw)
+
+
+@router.patch("/budgets", response_model=BudgetLimits)
+async def patch_budgets(payload: BudgetLimits, db: AsyncSession = Depends(get_db)) -> BudgetLimits:
+    await _put_setting_json(db, BUDGETS_KEY, payload.model_dump())
+    return payload
+
+
+@router.get("/pricing", response_model=list[ModelPricing])
+async def list_pricing(db: AsyncSession = Depends(get_db)) -> list[ModelPricing]:
+    result = await db.execute(select(ModelPricingModel).order_by(ModelPricingModel.provider, ModelPricingModel.model, ModelPricingModel.effective_date.desc()))
+    return list(result.scalars().all())
+
+
+@router.post("/pricing", response_model=ModelPricing)
+async def create_pricing(payload: ModelPricingCreate, db: AsyncSession = Depends(get_db)) -> ModelPricing:
+    pricing = ModelPricingModel(
+        id=payload.id or datetime.now(timezone.utc).strftime("pricing-%Y%m%d%H%M%S%f"),
+        provider=payload.provider,
+        model=payload.model,
+        route_type=payload.route_type,
+        input_per_1m_usd=payload.input_per_1m_usd,
+        output_per_1m_usd=payload.output_per_1m_usd,
+        cached_input_per_1m_usd=payload.cached_input_per_1m_usd,
+        effective_date=payload.effective_date or datetime.now(timezone.utc),
+        active=payload.active,
+        notes=payload.notes,
+    )
+    db.add(pricing)
+    await db.commit()
+    await db.refresh(pricing)
+    return pricing
+
+
+@routing_router.get("/policy", response_model=RoutingPolicy)
+async def get_routing_policy(db: AsyncSession = Depends(get_db)) -> RoutingPolicy:
+    raw = await _get_setting_json(db, ROUTING_POLICY_KEY)
+    if not isinstance(raw, dict):
+        return DEFAULT_ROUTING_POLICY
+    return RoutingPolicy(**raw)
+
+
+@routing_router.patch("/policy", response_model=RoutingPolicy)
+async def patch_routing_policy(payload: RoutingPolicy, db: AsyncSession = Depends(get_db)) -> RoutingPolicy:
+    await _put_setting_json(db, ROUTING_POLICY_KEY, payload.model_dump())
+    return payload

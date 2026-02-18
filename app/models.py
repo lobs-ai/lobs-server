@@ -586,3 +586,44 @@ class KnowledgeRequest(Base):
     source_research_request_id = Column(String, ForeignKey("research_requests.id"))
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ModelUsageEvent(Base):
+    """Normalized usage event across API and subscription routes."""
+    __tablename__ = "model_usage_events"
+
+    id = Column(String, primary_key=True)
+    timestamp = Column(DateTime, default=func.now(), nullable=False, index=True)
+    source = Column(String, nullable=False, default="unknown", index=True)
+    provider = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=False, index=True)
+    route_type = Column(String, nullable=False, default="api", index=True)  # api|subscription
+    task_type = Column(String, nullable=False, default="other", index=True)
+    input_tokens = Column(Integer, nullable=False, default=0)
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cached_tokens = Column(Integer, nullable=False, default=0)
+    requests = Column(Integer, nullable=False, default=1)
+    latency_ms = Column(Integer)
+    status = Column(String, nullable=False, default="success", index=True)
+    estimated_cost_usd = Column(Float, nullable=False, default=0.0)
+    error_code = Column(String)
+    event_metadata = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class ModelPricing(Base):
+    """Versioned model pricing catalog for cost estimation."""
+    __tablename__ = "model_pricing"
+
+    id = Column(String, primary_key=True)
+    provider = Column(String, nullable=False, index=True)
+    model = Column(String, nullable=False, index=True)
+    route_type = Column(String, nullable=False, default="api", index=True)
+    input_per_1m_usd = Column(Float, nullable=False, default=0.0)
+    output_per_1m_usd = Column(Float, nullable=False, default=0.0)
+    cached_input_per_1m_usd = Column(Float, nullable=False, default=0.0)
+    effective_date = Column(DateTime, nullable=False, default=func.now(), index=True)
+    active = Column(Boolean, nullable=False, default=True, index=True)
+    notes = Column(Text)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

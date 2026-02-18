@@ -38,16 +38,19 @@ MODEL_ROUTER_SETTING_KEYS = (
 # - LOBS_AVAILABLE_MODELS (optional allow-list)
 DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
     "cheap": (
-        "anthropic/claude-haiku-4-5",
         "google-gemini-cli/gemini-3-pro-preview",
+        "anthropic/claude-haiku-4-5",
     ),
     "standard": (
         "openai-codex/gpt-5.3-codex",
         "anthropic/claude-sonnet-4-5",
+        "moonshotai/kimi-k2.5",
+        "minimax/minimax-2.5",
     ),
     "strong": (
         "anthropic/claude-opus-4-6",
         "openai-codex/gpt-5.3-codex",
+        "moonshotai/kimi-k2.5",
     ),
 }
 

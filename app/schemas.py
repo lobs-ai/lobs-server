@@ -915,3 +915,112 @@ class KnowledgeRequest(KnowledgeRequestBase):
     created_at: datetime
     updated_at: datetime
     model_config = ConfigDict(from_attributes=True)
+
+
+class ModelUsageEventCreate(BaseModel):
+    timestamp: Optional[datetime] = None
+    source: str = "unknown"
+    provider: Optional[str] = None
+    model: str
+    route_type: str = "api"  # api|subscription
+    task_type: str = "other"
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cached_tokens: int = 0
+    requests: int = 1
+    latency_ms: Optional[int] = None
+    status: str = "success"
+    estimated_cost_usd: Optional[float] = None
+    error_code: Optional[str] = None
+    event_metadata: Optional[Any] = None
+
+
+class ModelUsageEvent(ModelUsageEventCreate):
+    id: str
+    estimated_cost_usd: float
+    timestamp: datetime
+    created_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ModelPricingBase(BaseModel):
+    provider: str
+    model: str
+    route_type: str = "api"
+    input_per_1m_usd: float = 0.0
+    output_per_1m_usd: float = 0.0
+    cached_input_per_1m_usd: float = 0.0
+    effective_date: Optional[datetime] = None
+    active: bool = True
+    notes: Optional[str] = None
+
+
+class ModelPricingCreate(ModelPricingBase):
+    id: Optional[str] = None
+
+
+class ModelPricing(ModelPricingBase):
+    id: str
+    effective_date: datetime
+    created_at: datetime
+    updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UsageProviderSummary(BaseModel):
+    provider: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    estimated_cost_usd: float
+    avg_latency_ms: Optional[float] = None
+    error_rate: float
+
+
+class UsageModelSummary(BaseModel):
+    provider: str
+    model: str
+    route_type: str
+    requests: int
+    input_tokens: int
+    output_tokens: int
+    cached_tokens: int
+    estimated_cost_usd: float
+    avg_latency_ms: Optional[float] = None
+    error_rate: float
+
+
+class UsageSummaryResponse(BaseModel):
+    window: str
+    period_start: datetime
+    period_end: datetime
+    total_requests: int
+    total_input_tokens: int
+    total_output_tokens: int
+    total_cached_tokens: int
+    total_estimated_cost_usd: float
+    by_provider: list[UsageProviderSummary]
+    by_model: list[UsageModelSummary]
+
+
+class UsageProjectionResponse(BaseModel):
+    month_start: datetime
+    now: datetime
+    month_to_date_cost_usd: float
+    current_daily_burn_usd: float
+    projected_month_end_cost_usd: float
+
+
+class BudgetLimits(BaseModel):
+    monthly_total_usd: float = 0.0
+    daily_alert_usd: float = 0.0
+    per_provider_monthly_usd: dict[str, float] = Field(default_factory=dict)
+    per_task_hard_cap_usd: float = 0.0
+
+
+class RoutingPolicy(BaseModel):
+    gemini_first_task_types: list[str] = Field(default_factory=lambda: ["inbox", "quick_summary", "triage"])
+    low_level_task_types: list[str] = Field(default_factory=lambda: ["inbox", "quick_summary", "triage"])
+    fallback_chains: dict[str, list[str]] = Field(default_factory=dict)
+    quality_preference: list[str] = Field(default_factory=lambda: ["claude", "openai", "kimi", "minimax"])
