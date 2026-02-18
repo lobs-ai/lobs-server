@@ -29,8 +29,14 @@ DEFAULT_RUNTIME_SETTINGS: dict[str, object] = {
         "syncIntervalSeconds": 300,
         "maxResults": 6,
         "snippetMaxChars": 400,
-        "paths": [],
+        "paths": [
+            {"name": "docs", "path": "/srv/lobs-system-docs", "pattern": "**/*.md"},
+        ],
         "fallbackBackend": "sqlite",
     },
-    SETTINGS_KEY_MEMORY_SEARCH_PATHS: [],
+    SETTINGS_KEY_MEMORY_SEARCH_PATHS: [
+        "../team-docs",
+        "/srv/shared-notes",
+        "/srv/lobs-system-docs",
+    ],
 }
