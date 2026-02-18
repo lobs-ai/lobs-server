@@ -697,11 +697,13 @@ class WorkerManager:
         if not summary and succeeded:
             summary = await self._read_work_summary(project_id)
 
-        # Reflection runs return structured JSON; persist into reflection/initiative tables
-        if worker_info.label.startswith("reflection-") and summary:
+        # Reflection/diagnostic runs return structured JSON; persist outputs
+        if (worker_info.label.startswith("reflection-") or worker_info.label.startswith("diagnostic-")) and summary:
+            reflection_type = "diagnostic" if worker_info.label.startswith("diagnostic-") else "strategic"
             await self._persist_reflection_output(
                 agent_type=agent_type,
                 reflection_label=worker_info.label,
+                reflection_type=reflection_type,
                 summary=summary,
                 succeeded=succeeded,
             )
@@ -828,17 +830,18 @@ class WorkerManager:
         *,
         agent_type: str,
         reflection_label: str,
+        reflection_type: str,
         summary: str,
         succeeded: bool,
     ) -> None:
-        """Persist strategic reflection outputs and derive initiatives."""
+        """Persist strategic/diagnostic outputs and derive initiatives for strategic runs."""
         try:
             reflection_result = await self.db.execute(
                 select(AgentReflection)
                 .where(
                     AgentReflection.agent_type == agent_type,
                     AgentReflection.status == "pending",
-                    AgentReflection.reflection_type == "strategic",
+                    AgentReflection.reflection_type == reflection_type,
                 )
                 .order_by(AgentReflection.created_at.desc())
                 .limit(1)
@@ -852,7 +855,7 @@ class WorkerManager:
             reflection.result = payload
             reflection.completed_at = datetime.now(timezone.utc)
 
-            if succeeded and isinstance(payload, dict):
+            if reflection_type == "strategic" and succeeded and isinstance(payload, dict):
                 initiatives = payload.get("proposed_initiatives") or []
                 policy = PolicyEngine()
                 for raw in initiatives:

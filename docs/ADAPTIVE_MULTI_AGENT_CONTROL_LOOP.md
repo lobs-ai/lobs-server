@@ -86,15 +86,22 @@ Built server-side in `app/orchestrator/context_packets.py`.
 - `app/orchestrator/policy_engine.py`
 - `app/orchestrator/context_packets.py`
 - `app/orchestrator/reflection_cycle.py`
+- `app/orchestrator/capability_registry.py`
+- `app/orchestrator/capability_router.py`
+- `app/orchestrator/sweep_arbitrator.py`
+- `app/orchestrator/diagnostic_triggers.py`
 
 ### Engine integration
+- Capability registry sync every hour.
 - Reflection cycle every 6 hours.
 - Daily compression guard once per day.
-- Sweep record creation in `system_sweeps`.
+- Initiative sweep/arbitration every 15 minutes.
+- Reactive diagnostic trigger scan every 10 minutes.
 
 ### Worker integration
-- Reflection session outputs parsed as JSON.
-- Derived initiatives persisted with policy-tiered status.
+- Reflection and diagnostic session outputs parsed as JSON.
+- Strategic reflections derive initiatives with policy metadata.
+- Diagnostics persist structured results to `agent_reflections`.
 
 ### API visibility
 - `GET /api/orchestrator/intelligence/summary`
@@ -104,22 +111,23 @@ Built server-side in `app/orchestrator/context_packets.py`.
 
 ## Remaining work (next passes)
 
-1. **Capability-based routing execution path**
-   - Route tasks by capability registry scoring before regex fallback.
+1. **Sweep contradiction detection upgrade**
+   - Current sweep dedupes exact overlaps and applies policy/budgets.
+   - Add contradiction detection across competing initiatives and auto-merge proposals.
 
-2. **Sweep arbitration engine**
-   - Deduplicate initiative overlap.
-   - Detect contradictions.
-   - Emit approved initiatives into tasks/inbox based on policy.
+2. **Initiative execution lifecycle depth**
+   - Add explicit transitions: proposed → approved → active → completed/rejected.
+   - Track outcome quality to improve future proposal scoring.
 
-3. **Reactive diagnostic triggers**
-   - Stalled task / repeated failures / idle drift should spawn lightweight diagnostic packets.
-
-4. **Identity rewrite quality upgrades**
+3. **Identity rewrite quality upgrades**
    - Replace placeholder compression text with structured synthesis from reflection payloads + run metrics.
 
-5. **Writer/researcher standing mandate budgets**
-   - Daily effort budgets and auto-execution quotas per agent.
+4. **Capability confidence learning**
+   - Adjust capability confidence using measured task outcomes.
+
+5. **Scheduler timezone precision**
+   - Daily compression currently uses UTC guard aligned for ET baseline.
+   - Move to explicit timezone-aware cron for DST-safe 3am local execution.
 
 ---
 

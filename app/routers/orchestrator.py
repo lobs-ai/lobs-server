@@ -8,6 +8,7 @@ from typing import Any
 
 from app.database import get_db
 from app.models import OrchestratorSetting, AgentInitiative, AgentReflection, SystemSweep
+from app.orchestrator.sweep_arbitrator import DEFAULT_DAILY_BUDGET
 from app.orchestrator import OrchestratorEngine
 from app.orchestrator.model_router import (
     MODEL_ROUTER_TIER_CHEAP_KEY,
@@ -28,6 +29,10 @@ class ModelTierConfig(BaseModel):
 class ModelRouterConfigUpdate(BaseModel):
     tiers: ModelTierConfig | None = Field(default=None)
     available_models: list[str] | None = Field(default=None)
+
+
+class AutonomyBudgetUpdate(BaseModel):
+    daily: dict[str, int]
 
 
 def get_orchestrator(request: Request) -> OrchestratorEngine:
@@ -256,3 +261,47 @@ async def list_initiatives(
             for row in rows
         ],
     }
+
+
+@router.get("/intelligence/budgets")
+async def get_autonomy_budgets(
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Get per-agent daily autonomy budgets for auto-approved initiatives."""
+
+    row = await db.get(OrchestratorSetting, "autonomy_budget.daily")
+    data = row.value if row and isinstance(row.value, dict) else {}
+
+    budgets = dict(DEFAULT_DAILY_BUDGET)
+    for key, value in data.items():
+        try:
+            budgets[str(key).lower()] = int(value)
+        except (TypeError, ValueError):
+            continue
+
+    return {"daily": budgets}
+
+
+@router.put("/intelligence/budgets")
+async def update_autonomy_budgets(
+    payload: AutonomyBudgetUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Update per-agent daily autonomy budgets."""
+
+    normalized: dict[str, int] = {}
+    for key, value in payload.daily.items():
+        try:
+            normalized[str(key).lower()] = max(0, int(value))
+        except (TypeError, ValueError):
+            continue
+
+    row = await db.get(OrchestratorSetting, "autonomy_budget.daily")
+    if row is None:
+        row = OrchestratorSetting(key="autonomy_budget.daily", value=normalized)
+        db.add(row)
+    else:
+        row.value = normalized
+
+    await db.commit()
+    return {"daily": normalized}

@@ -29,6 +29,8 @@ from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.scheduler import EventScheduler
 from app.orchestrator.inbox_processor import InboxProcessor
 from app.orchestrator.reflection_cycle import ReflectionCycleManager
+from app.orchestrator.sweep_arbitrator import SweepArbitrator
+from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.config import POLL_INTERVAL
 
 logger = logging.getLogger(__name__)
@@ -70,6 +72,10 @@ class OrchestratorEngine:
         self._last_daily_compression_date: str | None = None
         self._last_capability_sync = 0.0
         self._capability_sync_interval = 3600  # every hour
+        self._last_sweep_check = 0.0
+        self._sweep_interval = 900  # every 15 minutes
+        self._last_diagnostic_check = 0.0
+        self._diagnostic_interval = 600  # every 10 minutes
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -191,6 +197,8 @@ class OrchestratorEngine:
             agent_tracker = AgentTracker(db)
             scheduler = EventScheduler(db)
             reflection_manager = ReflectionCycleManager(db, worker_manager)
+            sweep_arbitrator = SweepArbitrator(db)
+            diagnostic_engine = DiagnosticTriggerEngine(db, worker_manager)
             capability_router = CapabilityRouter(db)
 
             # 1. Check scheduled events (every 60 seconds)
@@ -276,7 +284,29 @@ class OrchestratorEngine:
             except Exception as e:
                 logger.error("[ENGINE] Daily compression failed: %s", e, exc_info=True)
 
-            # 4. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
+            # 5. Lobs sweep/arbitration (every 15 minutes)
+            if current_time - self._last_sweep_check >= self._sweep_interval:
+                try:
+                    sweep_result = await sweep_arbitrator.run_once()
+                    self._last_sweep_check = current_time
+                    if sweep_result.get("approved", 0) > 0 or sweep_result.get("needs_review", 0) > 0:
+                        activity = True
+                    logger.debug("[ENGINE] Initiative sweep: %s", sweep_result)
+                except Exception as e:
+                    logger.error("[ENGINE] Initiative sweep failed: %s", e, exc_info=True)
+
+            # 6. Reactive diagnostics (every 10 minutes)
+            if not self._paused and self._openclaw_available and current_time - self._last_diagnostic_check >= self._diagnostic_interval:
+                try:
+                    diagnostic_result = await diagnostic_engine.run_once()
+                    self._last_diagnostic_check = current_time
+                    if diagnostic_result.get("spawned", 0) > 0:
+                        activity = True
+                    logger.debug("[ENGINE] Diagnostics: %s", diagnostic_result)
+                except Exception as e:
+                    logger.error("[ENGINE] Diagnostic triggers failed: %s", e, exc_info=True)
+
+            # 7. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
             if not self._paused and self._openclaw_available and current_time - self._last_pm_check >= self._pm_interval:
                 try:
                     unrouted_tasks = await scanner.get_unrouted_tasks()
