@@ -18,6 +18,8 @@ from typing import Any, Callable, Optional
 from app.database import AsyncSessionLocal
 from app.orchestrator.scanner import Scanner
 from app.orchestrator.router import Router
+from app.orchestrator.capability_router import CapabilityRouter
+from app.orchestrator.capability_registry import CapabilityRegistrySync
 from app.orchestrator.worker import WorkerManager
 from app.orchestrator.monitor import Monitor
 from app.orchestrator.monitor_enhanced import MonitorEnhanced
@@ -66,6 +68,8 @@ class OrchestratorEngine:
         self._last_reflection_check = 0.0
         self._reflection_interval = 21600  # every 6 hours
         self._last_daily_compression_date: str | None = None
+        self._last_capability_sync = 0.0
+        self._capability_sync_interval = 3600  # every hour
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
 
@@ -187,6 +191,7 @@ class OrchestratorEngine:
             agent_tracker = AgentTracker(db)
             scheduler = EventScheduler(db)
             reflection_manager = ReflectionCycleManager(db, worker_manager)
+            capability_router = CapabilityRouter(db)
 
             # 1. Check scheduled events (every 60 seconds)
             import time
@@ -218,7 +223,22 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
                     await db.rollback()
 
-            # 3. Strategic reflection cycle (every 6 hours)
+            # 3. Capability registry sync (hourly)
+            if current_time - self._last_capability_sync >= self._capability_sync_interval:
+                try:
+                    sync_result = await CapabilityRegistrySync(db).sync()
+                    self._last_capability_sync = current_time
+                    if sync_result.get("added", 0) > 0:
+                        activity = True
+                    logger.debug(
+                        "[ENGINE] Capability registry sync: added=%s updated=%s",
+                        sync_result.get("added", 0),
+                        sync_result.get("updated", 0),
+                    )
+                except Exception as e:
+                    logger.error("[ENGINE] Capability sync failed: %s", e, exc_info=True)
+
+            # 4. Strategic reflection cycle (every 6 hours)
             if (
                 not self._paused
                 and self._openclaw_available
@@ -334,11 +354,11 @@ class OrchestratorEngine:
                 # Use PM-assigned agent or fallback to router (legacy support)
                 agent_type = task_dict.get("agent")
                 if not agent_type:
-                    # Fallback to regex-based router (shouldn't happen if PM is working)
+                    # Capability routing first, regex fallback second
                     try:
-                        agent_type = self.router.route(task_dict)
+                        agent_type = await capability_router.route(task_dict)
                         logger.info(
-                            f"[ENGINE] Fallback routing task {task_id[:8]} to {agent_type} agent"
+                            f"[ENGINE] Capability routing task {task_id[:8]} to {agent_type} agent"
                         )
                     except Exception as e:
                         logger.warning(
