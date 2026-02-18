@@ -43,6 +43,7 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
     SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
+    SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +100,7 @@ class OrchestratorEngine:
         self._openclaw_model_sync_interval = 900  # every 15 minutes
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
+        self._reflection_anchor_loaded = False
 
     async def start(self) -> None:
         """Start the orchestrator engine as a background task."""
@@ -374,6 +376,17 @@ class OrchestratorEngine:
                     if reflection_result.get("spawned", 0) > 0:
                         activity = True
                     self._last_reflection_check = current_time
+
+                    # Persist reflection anchor across restarts.
+                    last_run_iso = datetime.now(timezone.utc).isoformat()
+                    anchor = await db.get(OrchestratorSetting, SETTINGS_KEY_REFLECTION_LAST_RUN_AT)
+                    if anchor is None:
+                        anchor = OrchestratorSetting(key=SETTINGS_KEY_REFLECTION_LAST_RUN_AT, value=last_run_iso)
+                        db.add(anchor)
+                    else:
+                        anchor.value = last_run_iso
+                    await db.commit()
+
                     logger.info(
                         "[ENGINE] Strategic reflection cycle: agents=%s spawned=%s",
                         reflection_result.get("agents", 0),
@@ -817,6 +830,7 @@ For **🔴 LARGE** tasks:
             SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
             SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
             SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
+            SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
         )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
@@ -834,6 +848,17 @@ For **🔴 LARGE** tasks:
         self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
         self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
         self._openclaw_model_sync_interval = _as_int(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS)
+
+        # Load persistent reflection anchor so restarts don't reset the 6h cadence.
+        if not self._reflection_anchor_loaded:
+            raw_last = rows.get(SETTINGS_KEY_REFLECTION_LAST_RUN_AT)
+            if isinstance(raw_last, str) and raw_last:
+                try:
+                    last_dt = datetime.fromisoformat(raw_last.replace("Z", "+00:00"))
+                    self._last_reflection_check = max(self._last_reflection_check, last_dt.timestamp())
+                except Exception:
+                    logger.warning("[ENGINE] Invalid reflection anchor timestamp: %s", raw_last)
+            self._reflection_anchor_loaded = True
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
