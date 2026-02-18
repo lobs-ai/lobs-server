@@ -36,6 +36,24 @@ def test_available_models_allowlist_filters_candidates(monkeypatch):
     assert d.models == ["model/cheap-b", "model/strong-a"]
 
 
+def test_runtime_overrides_argument_beats_env(monkeypatch):
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-env")
+    task = {"id": "t3b", "title": "Implement feature", "notes": "", "status": "active"}
+
+    d = decide_models(
+        "programmer",
+        task,
+        tier_overrides={
+            "cheap": ["model/cheap-db"],
+            "standard": ["model/std-db"],
+            "strong": ["model/strong-db"],
+        },
+        available_models=["model/std-db", "model/strong-db"],
+    )
+
+    assert d.models == ["model/std-db", "model/strong-db"]
+
+
 def test_high_criticality_always_includes_strong_tier(monkeypatch):
     monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
     monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")

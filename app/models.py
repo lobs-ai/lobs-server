@@ -237,6 +237,15 @@ class WorkerRun(Base):
     summary = Column(String)  # Work summary from .work-summary file
 
 
+class OrchestratorSetting(Base):
+    """Runtime-updatable orchestrator settings."""
+    __tablename__ = "orchestrator_settings"
+
+    key = Column(String, primary_key=True)
+    value = Column(JSON, nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class AgentStatus(Base):
     """Agent status model."""
     __tablename__ = "agent_status"

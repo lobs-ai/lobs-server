@@ -2,6 +2,26 @@
 
 This document describes the initial tier-based model-routing policy in `app/orchestrator/model_router.py` and how it is used by `WorkerManager`.
 
+## Runtime updates (no restart)
+
+Model tiers can be changed while the server is running via:
+- `GET /api/orchestrator/model-router`
+- `PUT /api/orchestrator/model-router`
+
+`PUT` payload:
+```json
+{
+  "tiers": {
+    "cheap": ["anthropic/claude-haiku-4-5"],
+    "standard": ["openai-codex/gpt-5.3-codex"],
+    "strong": ["anthropic/claude-opus-4-6", "openai-codex/gpt-5.3-codex"]
+  },
+  "available_models": ["openai-codex/gpt-5.3-codex", "anthropic/claude-opus-4-6"]
+}
+```
+
+Set a field to `null` to clear that DB override and fall back to env/defaults.
+
 ## Goals
 
 - Classify tasks with deterministic heuristics (no LLM in classifier).
@@ -12,14 +32,18 @@ This document describes the initial tier-based model-routing policy in `app/orch
 
 ## Configuration
 
-Routing is controlled by environment variables:
+Routing config precedence is:
+1. **DB runtime overrides** (`orchestrator_settings` table)
+2. environment variables
+3. in-code defaults
 
+Environment variables:
 - `LOBS_MODEL_TIER_CHEAP` (CSV)
 - `LOBS_MODEL_TIER_STANDARD` (CSV)
 - `LOBS_MODEL_TIER_STRONG` (CSV)
 - `LOBS_AVAILABLE_MODELS` (optional CSV allow-list)
 
-If tier env vars are not set, router uses safe defaults from code.
+If no DB/env settings are present, router uses safe defaults from code.
 
 ### Example
 

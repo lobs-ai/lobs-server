@@ -23,7 +23,7 @@ import aiohttp
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Task, WorkerStatus, WorkerRun, Project
+from app.models import Task, WorkerStatus, WorkerRun, Project, OrchestratorSetting
 from app.orchestrator.config import (
     BASE_DIR,
     WORKER_RESULTS_DIR,
@@ -33,7 +33,13 @@ from app.orchestrator.config import (
     GATEWAY_URL,
     GATEWAY_TOKEN,
 )
-from app.orchestrator.model_router import decide_models
+from app.orchestrator.model_router import (
+    decide_models,
+    MODEL_ROUTER_TIER_CHEAP_KEY,
+    MODEL_ROUTER_TIER_STANDARD_KEY,
+    MODEL_ROUTER_TIER_STRONG_KEY,
+    MODEL_ROUTER_AVAILABLE_MODELS_KEY,
+)
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
@@ -170,10 +176,16 @@ class WorkerManager:
                 prompt_file.write_text(prompt_content, encoding="utf-8")
 
             # Select model preference list + audit
-            decision = decide_models(agent_type, task)
+            router_cfg = await self._load_model_router_config()
+            decision = decide_models(
+                agent_type,
+                task,
+                tier_overrides=router_cfg.get("tiers"),
+                available_models=router_cfg.get("available_models"),
+            )
             logger.info(
                 "[MODEL_ROUTER] decision",
-                extra={"model_router": decision.audit},
+                extra={"model_router": {**decision.audit, "runtime_config": router_cfg}},
             )
 
             chosen_model: str | None = None
@@ -274,6 +286,39 @@ class WorkerManager:
                 exc_info=True
             )
             return False
+
+    async def _load_model_router_config(self) -> dict[str, Any]:
+        """Load runtime model-router overrides from DB.
+
+        This allows changing tier model pools while the server is running.
+        """
+
+        keys = (
+            MODEL_ROUTER_TIER_CHEAP_KEY,
+            MODEL_ROUTER_TIER_STANDARD_KEY,
+            MODEL_ROUTER_TIER_STRONG_KEY,
+            MODEL_ROUTER_AVAILABLE_MODELS_KEY,
+        )
+
+        result = await self.db.execute(
+            select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys))
+        )
+        rows = {row.key: row.value for row in result.scalars().all()}
+
+        def _list_value(key: str) -> list[str] | None:
+            val = rows.get(key)
+            if isinstance(val, list):
+                return [str(v).strip() for v in val if str(v).strip()]
+            return None
+
+        return {
+            "tiers": {
+                "cheap": _list_value(MODEL_ROUTER_TIER_CHEAP_KEY),
+                "standard": _list_value(MODEL_ROUTER_TIER_STANDARD_KEY),
+                "strong": _list_value(MODEL_ROUTER_TIER_STRONG_KEY),
+            },
+            "available_models": _list_value(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
+        }
 
     async def _spawn_session(
         self,
