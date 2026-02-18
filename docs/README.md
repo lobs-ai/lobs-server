@@ -13,14 +13,17 @@ Index of design documents, implementation notes, and research findings.
 - **[.env.example](../.env.example)** ✨ **NEW 2026-02-14** — Environment configuration reference
 
 ### Development Guides
+- **[BEST_PRACTICES.md](BEST_PRACTICES.md)** ✨ **NEW 2026-02-14** — N+1 prevention, SQLite optimization, Pydantic v2 patterns, code quality guidelines
 - **[TESTING.md](TESTING.md)** — Complete testing guide (setup, running tests, adding new tests)
 - **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** — Known issues, limitations, and technical debt
+- **[task-improvements-roadmap-implementation.md](task-improvements-roadmap-implementation.md)** ✨ **NEW 2026-02-18** — Phase 0.5→4 implementation, migrations, APIs, follow-ups
 
 ## Design Documents
 
 ### Agent Coordination & Orchestration
 - **[project-manager-agent.md](project-manager-agent.md)** — Project manager agent design (task routing, delegation, approval workflows)
 - **[tiered-approval-system.md](tiered-approval-system.md)** — Three-tier approval workflow (auto-approve, human review, escalate)
+- **[orchestrator-model-routing.md](orchestrator-model-routing.md)** — First-pass model router policy (complexity/criticality, fallback chain, audit logging)
 
 ### Topics & Knowledge System
 - **[TOPICS_IMPLEMENTATION.md](TOPICS_IMPLEMENTATION.md)** — Topics feature implementation (auto-creation, researcher integration)
@@ -47,6 +50,7 @@ Index of design documents, implementation notes, and research findings.
 | **API reference** | [AGENTS.md](../AGENTS.md) |
 | **API changelog** | [CHANGELOG.md](../CHANGELOG.md) ✨ |
 | **Environment config** | [.env.example](../.env.example) ✨ |
+| **Best practices** | [BEST_PRACTICES.md](BEST_PRACTICES.md) ✨ |
 | **Testing** | [TESTING.md](TESTING.md) |
 | **Known issues & limitations** | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
 | Project manager workflow | [project-manager-agent.md](project-manager-agent.md) |
@@ -69,6 +73,7 @@ Index of design documents, implementation notes, and research findings.
 ## Recent Additions & Updates
 
 ### 2026-02-14 (Latest)
+- ✅ **BEST_PRACTICES.md** — Comprehensive development guidelines: N+1 query prevention, SQLite WAL optimization, Pydantic v2 patterns, API design, testing standards
 - ✅ **Worker activity endpoint** — New `/api/worker/activity` API for activity feeds (AGENTS.md updated)
 - ✅ **Task state documentation** — Complete work_state vs. review_state vs. status explanation (ARCHITECTURE.md)
 - ✅ **inbox-responder removal** — Project-manager now handles all inbox processing (refactored)
