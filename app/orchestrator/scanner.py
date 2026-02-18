@@ -24,7 +24,7 @@ class Scanner:
         Returns tasks where:
         - status='active'
         - work_state in ('not_started', 'ready')
-        - agent is assigned (routed by PM)
+        - agent is assigned (routed automatically by orchestrator)
         """
         try:
             result = await self.db.execute(
@@ -49,7 +49,7 @@ class Scanner:
         Returns tasks where:
         - status='active'
         - work_state in ('not_started', 'ready')
-        - agent is null or empty (needs PM routing)
+        - agent is null or empty (needs automatic routing)
         """
         try:
             result = await self.db.execute(

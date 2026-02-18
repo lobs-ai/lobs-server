@@ -7,7 +7,7 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "project-manager"}
+VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect"}
 
 from app.orchestrator.model_router import decide_models
 
