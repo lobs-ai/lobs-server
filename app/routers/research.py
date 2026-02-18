@@ -12,6 +12,24 @@ from app.config import settings
 router = APIRouter(prefix="/research", tags=["research"])
 
 
+@router.get("/requests")
+async def list_all_research_requests(
+    topic_id: str | None = None,
+    limit: int = settings.DEFAULT_LIMIT,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db)
+) -> list[ResearchRequest]:
+    """List all research requests, optionally filtered by topic."""
+    query = select(ResearchRequestModel)
+    if topic_id:
+        query = query.where(ResearchRequestModel.topic_id == topic_id)
+
+    query = query.order_by(ResearchRequestModel.created_at.desc()).offset(offset).limit(min(limit, settings.MAX_LIMIT))
+    result = await db.execute(query)
+    requests = result.scalars().all()
+    return [ResearchRequest.model_validate(r) for r in requests]
+
+
 @router.get("/{project_id}/doc")
 async def get_research_doc(
     project_id: str,
@@ -121,8 +139,12 @@ async def create_research_request(
     request: ResearchRequestCreate,
     db: AsyncSession = Depends(get_db)
 ) -> ResearchRequest:
-    """Create a research request."""
-    db_request = ResearchRequestModel(**request.model_dump())
+    """Create a research request for a specific project path."""
+    request_data = request.model_dump()
+    # Keep path authoritative for project linkage.
+    request_data["project_id"] = project_id
+
+    db_request = ResearchRequestModel(**request_data)
     db.add(db_request)
     await db.flush()
     await db.refresh(db_request)

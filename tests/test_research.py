@@ -125,11 +125,29 @@ async def test_list_research_requests_empty(client: AsyncClient, sample_project)
 
 
 @pytest.mark.asyncio
+async def test_list_all_research_requests(client: AsyncClient, sample_project):
+    """Test listing all research requests across projects."""
+    await client.post(
+        f"/api/research/{sample_project['id']}/requests",
+        json={
+            "id": "req-all-1",
+            "project_id": sample_project["id"],
+            "prompt": "Global listing request"
+        }
+    )
+
+    response = await client.get("/api/research/requests")
+    assert response.status_code == 200
+    data = response.json()
+    assert any(r["id"] == "req-all-1" for r in data)
+
+
+@pytest.mark.asyncio
 async def test_create_research_request(client: AsyncClient, sample_project):
     """Test creating a research request."""
     request_data = {
         "id": "req-1",
-        "project_id": sample_project["id"],
+        "project_id": "wrong-project-id",
         "prompt": "Research this topic",
         "status": "pending",
         "priority": "high"
@@ -141,6 +159,7 @@ async def test_create_research_request(client: AsyncClient, sample_project):
     assert response.status_code == 200
     data = response.json()
     assert data["id"] == "req-1"
+    assert data["project_id"] == sample_project["id"]
     assert data["prompt"] == "Research this topic"
     assert data["status"] == "pending"
     assert data["priority"] == "high"
