@@ -311,9 +311,9 @@ class WorkerManager:
         """
         Call Gateway API to spawn a new session.
         
-        Uses cleanup=delete for auto-archival. Announces route to
-        sink agent with a bogus ollama model — errors out instantly,
-        zero tokens consumed.
+        Uses cleanup=delete for auto-archival. Sessions are spawned from the
+        internal sink session key; sink is a control-plane routing identity,
+        not an execution agent.
         
         Returns:
             (Dict with runId and childSessionKey, error_string)

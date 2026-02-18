@@ -25,7 +25,7 @@ TEMPLATE_FILES = ["AGENTS.md", "SOUL.md", "TOOLS.md", "USER.md", "IDENTITY.md"]
 # Files from worker-template that are shared across all agents
 SHARED_FILES = ["HEARTBEAT.md", "WORKER_RULES.md"]
 
-AGENT_TYPES = ["programmer", "researcher", "architect", "reviewer", "writer", "inbox-responder"]
+AGENT_TYPES = ["programmer", "researcher", "architect", "reviewer", "writer"]
 
 # Agent model configurations
 AGENT_MODELS = {
@@ -34,7 +34,6 @@ AGENT_MODELS = {
     "architect": "openai-codex/gpt-5.3-codex",
     "reviewer": "openai-codex/gpt-5.3-codex",
     "writer": "openai-codex/gpt-5.3-codex",
-    "inbox-responder": "openai-codex/gpt-5.3-codex",
 }
 
 
