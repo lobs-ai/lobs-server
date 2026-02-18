@@ -39,7 +39,7 @@ class SweepArbitrator:
     async def run_once(self) -> dict[str, Any]:
         initiatives = await self._load_proposed_initiatives()
         if not initiatives:
-            return {"proposed": 0, "lobs_review": 0, "rejected": 0}
+            return {"proposed": 0, "approved": 0, "deferred": 0, "lobs_review": 0, "rejected": 0}
 
         start = datetime.now(timezone.utc)
         budgets = await self._load_daily_budgets()
@@ -66,6 +66,9 @@ class SweepArbitrator:
                 dup.rationale = (dup.rationale or "") + " | Rejected as duplicate initiative"
                 rejected += 1
 
+        approved = 0
+        deferred = 0
+
         for initiative in initiatives:
             if initiative.status != "proposed":
                 continue
@@ -81,9 +84,40 @@ class SweepArbitrator:
             budget_remaining = max(0, daily_limit - used)
 
             recommendation = self._recommendation_for(decision.approval_mode, budget_remaining)
+
+            # Lobs-governed autonomy: low/medium work is auto-approved by Lobs when budget allows.
+            if decision.approval_mode in {"auto", "soft_gate"} and budget_remaining > 0:
+                await self.decision_engine.decide(
+                    initiative,
+                    decision="approve",
+                    selected_agent=suggested_agent,
+                    decision_summary=(
+                        f"Auto-approved by Lobs sweep ({decision.approval_mode}); "
+                        f"budget {used}/{daily_limit}; reason={decision.reason}"
+                    ),
+                    decided_by="lobs",
+                )
+                usage[owner] = used + 1
+                approved += 1
+                continue
+
+            if decision.approval_mode in {"auto", "soft_gate"} and budget_remaining <= 0:
+                await self.decision_engine.decide(
+                    initiative,
+                    decision="defer",
+                    selected_agent=suggested_agent,
+                    decision_summary=(
+                        f"Deferred by Lobs sweep due to budget cap {used}/{daily_limit}; "
+                        f"policy={decision.approval_mode}"
+                    ),
+                    decided_by="lobs",
+                )
+                deferred += 1
+                continue
+
             initiative.status = "lobs_review"
             initiative.rationale = (
-                f"Lobs decision required. Recommendation={recommendation}. "
+                f"Rafe decision required. Recommendation={recommendation}. "
                 f"Policy={decision.approval_mode}. Budget={used}/{daily_limit}. "
                 f"Reason={decision.reason}"
             )
@@ -106,6 +140,8 @@ class SweepArbitrator:
             window_end=datetime.now(timezone.utc),
             summary={
                 "proposed": len(initiatives),
+                "approved": approved,
+                "deferred": deferred,
                 "lobs_review": lobs_review,
                 "rejected": rejected,
             },
@@ -174,7 +210,7 @@ class SweepArbitrator:
         severity = "HIGH" if initiative.risk_tier == "C" else "MEDIUM"
 
         content = (
-            "Lobs initiative decision required.\n\n"
+            "Rafe decision required for high-impact initiative.\n\n"
             f"Recommendation: {recommendation}\n"
             f"Policy mode: {approval_mode}\n"
             f"Budget usage: {budget}\n"
@@ -187,13 +223,13 @@ class SweepArbitrator:
             f"Proposed by: {initiative.proposed_by_agent}\n"
             f"Owner agent: {initiative.owner_agent}\n\n"
             f"Description:\n{initiative.description or '(none)'}\n\n"
-            "Expected decision by Lobs: approve / defer / reject"
+            "Expected decision by Rafe: approve / defer / reject"
         )
 
         self.db.add(
             InboxItem(
                 id=str(uuid.uuid4()),
-                title=f"[{severity}] Lobs decision: {title[:80]}",
+                title=f"[{severity}] Rafe decision: {title[:80]}",
                 content=content,
                 is_read=False,
                 summary=f"Recommendation={recommendation} | {initiative.category}",
