@@ -60,7 +60,7 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 from app.orchestrator.policy_engine import PolicyEngine
-from app.services.usage import infer_provider, log_usage_event
+from app.services.usage import infer_provider, log_usage_event, resolve_route_type
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +235,7 @@ class WorkerManager:
                     agent_id=agent_type,
                     model=candidate,
                     label=label,
+                    routing_policy=router_cfg.get("routing_policy") or {},
                 )
                 attempts.append(
                     {
@@ -284,6 +285,8 @@ class WorkerManager:
                     ),
                     "strict_coding_tier": strict_coding_tier,
                     "degrade_on_quota": bool(router_cfg.get("degrade_on_quota", False)),
+                    "subscription_models": (router_cfg.get("routing_policy") or {}).get("subscription_models", []),
+                    "subscription_providers": (router_cfg.get("routing_policy") or {}).get("subscription_providers", []),
                 },
             )
             self.active_workers[worker_id] = worker_info
@@ -401,8 +404,17 @@ class WorkerManager:
             return candidate_models
 
         order = {str(p).lower(): i for i, p in enumerate(chain)}
+        subscription_models = policy.get("subscription_models") if isinstance(policy.get("subscription_models"), list) else []
+        subscription_providers = policy.get("subscription_providers") if isinstance(policy.get("subscription_providers"), list) else []
 
         def provider_rank(model_name: str) -> int:
+            route_type = resolve_route_type(
+                model_name,
+                subscription_models=subscription_models,
+                subscription_providers=subscription_providers,
+            )
+            if route_type == "subscription":
+                return order.get("subscription", len(order) + 5)
             provider = infer_provider(model_name)
             return order.get(provider, len(order) + 10)
 
@@ -457,7 +469,8 @@ class WorkerManager:
         task_prompt: str,
         agent_id: str,
         model: str,
-        label: str
+        label: str,
+        routing_policy: dict[str, Any] | None = None,
     ) -> tuple[Optional[dict[str, str]], Optional[str]]:
         """
         Call Gateway API to spawn a new session.
@@ -496,7 +509,7 @@ class WorkerManager:
                         self.db,
                         source="orchestrator-spawn",
                         model=model,
-                        route_type="subscription" if "gemini-cli" in model.lower() else "api",
+                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                         task_type="inbox" if "inbox" in label else "task_execution",
                         status="error",
                         error_code="sessions_spawn_failed",
@@ -516,7 +529,7 @@ class WorkerManager:
                         self.db,
                         source="orchestrator-spawn",
                         model=model,
-                        route_type="subscription" if "gemini-cli" in model.lower() else "api",
+                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                         task_type="inbox" if "inbox" in label else "task_execution",
                         status="error",
                         error_code="sessions_spawn_not_accepted",
@@ -532,7 +545,7 @@ class WorkerManager:
                     self.db,
                     source="orchestrator-spawn",
                     model=model,
-                    route_type="subscription" if "gemini-cli" in model.lower() else "api",
+                    route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                     task_type="inbox" if "inbox" in label else "task_execution",
                     status="success",
                     metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
@@ -972,8 +985,11 @@ class WorkerManager:
             self.db.add(run)
 
             if model:
-                lowered_model = model.lower()
-                route_type = "subscription" if "gemini-cli" in lowered_model else "api"
+                route_type = resolve_route_type(
+                    model,
+                    subscription_models=(model_audit or {}).get("subscription_models", []),
+                    subscription_providers=(model_audit or {}).get("subscription_providers", []),
+                )
                 await log_usage_event(
                     self.db,
                     source="orchestrator-worker",

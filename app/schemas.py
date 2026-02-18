@@ -1020,7 +1020,11 @@ class BudgetLimits(BaseModel):
 
 
 class RoutingPolicy(BaseModel):
-    gemini_first_task_types: list[str] = Field(default_factory=lambda: ["inbox", "quick_summary", "triage"])
-    low_level_task_types: list[str] = Field(default_factory=lambda: ["inbox", "quick_summary", "triage"])
+    subscription_first_task_types: list[str] = Field(default_factory=lambda: ["inbox", "quick_summary", "triage"])
+    subscription_providers: list[str] = Field(default_factory=list)
+    subscription_models: list[str] = Field(default_factory=list)
     fallback_chains: dict[str, list[str]] = Field(default_factory=dict)
     quality_preference: list[str] = Field(default_factory=lambda: ["claude", "openai", "kimi", "minimax"])
+
+    # Backward compatibility aliases (legacy field name)
+    gemini_first_task_types: list[str] = Field(default_factory=list)

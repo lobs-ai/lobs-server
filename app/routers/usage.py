@@ -44,13 +44,14 @@ DEFAULT_BUDGETS = BudgetLimits(
 )
 
 DEFAULT_ROUTING_POLICY = RoutingPolicy(
-    gemini_first_task_types=["inbox", "quick_summary", "triage", "inbox_item"],
-    low_level_task_types=["inbox", "quick_summary", "triage", "inbox_item"],
+    subscription_first_task_types=["inbox", "quick_summary", "triage", "inbox_item"],
+    subscription_providers=[],
+    subscription_models=[],
     fallback_chains={
-        "inbox": ["gemini", "kimi", "minimax", "openai", "claude"],
-        "quick_summary": ["gemini", "kimi", "minimax", "openai", "claude"],
-        "triage": ["gemini", "kimi", "minimax", "openai", "claude"],
-        "default": ["openai", "claude", "kimi", "minimax"],
+        "inbox": ["subscription", "kimi", "minimax", "openai", "claude"],
+        "quick_summary": ["subscription", "kimi", "minimax", "openai", "claude"],
+        "triage": ["subscription", "kimi", "minimax", "openai", "claude"],
+        "default": ["openai", "claude", "kimi", "minimax", "subscription"],
     },
     quality_preference=["claude", "openai", "kimi", "minimax"],
 )
@@ -77,7 +78,20 @@ async def _get_setting_json(db: AsyncSession, key: str) -> Any | None:
     return row.value if row else None
 
 
+def _normalize_routing_policy_dict(raw: dict[str, Any]) -> dict[str, Any]:
+    out = dict(raw)
+    if not out.get("subscription_first_task_types") and isinstance(out.get("gemini_first_task_types"), list):
+        out["subscription_first_task_types"] = out["gemini_first_task_types"]
+    out.setdefault("subscription_providers", [])
+    out.setdefault("subscription_models", [])
+    out.setdefault("subscription_first_task_types", ["inbox", "quick_summary", "triage"])
+    return out
+
+
 async def _put_setting_json(db: AsyncSession, key: str, value: Any) -> None:
+    if key == ROUTING_POLICY_KEY and isinstance(value, dict):
+        value = _normalize_routing_policy_dict(value)
+
     row = await db.get(OrchestratorSetting, key)
     if row is None:
         row = OrchestratorSetting(key=key, value=value)
@@ -301,7 +315,7 @@ async def get_routing_policy(db: AsyncSession = Depends(get_db)) -> RoutingPolic
     raw = await _get_setting_json(db, ROUTING_POLICY_KEY)
     if not isinstance(raw, dict):
         return DEFAULT_ROUTING_POLICY
-    return RoutingPolicy(**raw)
+    return RoutingPolicy(**_normalize_routing_policy_dict(raw))
 
 
 @routing_router.patch("/policy", response_model=RoutingPolicy)

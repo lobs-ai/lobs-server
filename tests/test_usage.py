@@ -81,14 +81,15 @@ async def test_budgets_and_routing_policy_roundtrip(client):
     policy_res = await client.get("/api/routing/policy")
     assert policy_res.status_code == 200
     policy = policy_res.json()
-    assert "gemini_first_task_types" in policy
+    assert "subscription_first_task_types" in policy
 
     new_policy = {
-        "gemini_first_task_types": ["inbox", "quick_summary"],
-        "low_level_task_types": ["inbox", "quick_summary"],
-        "fallback_chains": {"inbox": ["gemini", "openai"]},
+        "subscription_first_task_types": ["inbox", "quick_summary"],
+        "subscription_providers": ["gemini", "mistral"],
+        "subscription_models": ["google-gemini-cli/gemini-3-pro-preview"],
+        "fallback_chains": {"inbox": ["subscription", "openai"]},
         "quality_preference": ["claude", "openai", "kimi", "minimax"],
     }
     patch_policy = await client.patch("/api/routing/policy", json=new_policy)
     assert patch_policy.status_code == 200
-    assert patch_policy.json()["fallback_chains"]["inbox"] == ["gemini", "openai"]
+    assert patch_policy.json()["fallback_chains"]["inbox"] == ["subscription", "openai"]

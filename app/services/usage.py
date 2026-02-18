@@ -27,6 +27,24 @@ def infer_provider(model: str) -> str:
     return "unknown"
 
 
+def resolve_route_type(
+    model: str,
+    *,
+    subscription_models: list[str] | None = None,
+    subscription_providers: list[str] | None = None,
+) -> str:
+    normalized_model = (model or "").strip().lower()
+    if normalized_model and subscription_models:
+        if normalized_model in {m.strip().lower() for m in subscription_models if m}:
+            return "subscription"
+
+    provider = infer_provider(model)
+    if subscription_providers and provider in {p.strip().lower() for p in subscription_providers if p}:
+        return "subscription"
+
+    return "api"
+
+
 async def lookup_pricing(
     db: AsyncSession,
     *,
