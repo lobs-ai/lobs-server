@@ -33,7 +33,7 @@ from app.orchestrator.config import (
     GATEWAY_URL,
     GATEWAY_TOKEN,
 )
-from app.orchestrator.router import get_model_for_task
+from app.orchestrator.model_router import decide_models
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
@@ -53,6 +53,7 @@ class WorkerInfo:
     model: str
     start_time: float
     label: str
+    model_audit: dict[str, Any] | None = None
 
 
 class WorkerManager:
@@ -168,19 +169,42 @@ class WorkerManager:
                 prompt_content = f"{task_title}\n\n{task_notes}".strip()
                 prompt_file.write_text(prompt_content, encoding="utf-8")
 
-            # Select model based on agent type
-            model = get_model_for_task(agent_type, task)
-            
-            # Call Gateway API: sessions_spawn
-            spawn_result = await self._spawn_session(
-                task_prompt=prompt_content,
-                agent_id=agent_type,
-                model=model,
-                label=label
+            # Select model preference list + audit
+            decision = decide_models(agent_type, task)
+            logger.info(
+                "[MODEL_ROUTER] decision",
+                extra={"model_router": decision.audit},
             )
-            
-            if not spawn_result:
-                logger.error(f"[WORKER] Failed to spawn session for {task_id_short}")
+
+            chosen_model: str | None = None
+            spawn_result: Optional[dict[str, str]] = None
+            attempts: list[dict[str, Any]] = []
+
+            # Call Gateway API: sessions_spawn with fallback chain
+            for idx, candidate in enumerate(decision.models):
+                spawn_result, err = await self._spawn_session(
+                    task_prompt=prompt_content,
+                    agent_id=agent_type,
+                    model=candidate,
+                    label=label,
+                )
+                attempts.append(
+                    {
+                        "index": idx,
+                        "model": candidate,
+                        "ok": bool(spawn_result),
+                        "error": err,
+                    }
+                )
+                if spawn_result:
+                    chosen_model = candidate
+                    break
+
+            if not spawn_result or not chosen_model:
+                logger.error(
+                    f"[WORKER] Failed to spawn session for {task_id_short}",
+                    extra={"model_router": {**decision.audit, "attempts": attempts}},
+                )
                 return False
 
             run_id = spawn_result["runId"]
@@ -194,9 +218,18 @@ class WorkerManager:
                 task_id=task_id,
                 project_id=project_id,
                 agent_type=agent_type,
-                model=model,
+                model=chosen_model,
                 start_time=start_time,
-                label=label
+                label=label,
+                model_audit={
+                    **decision.audit,
+                    "attempts": attempts,
+                    "chosen_model": chosen_model,
+                    "fallback_used": chosen_model != decision.models[0],
+                    "fallback_reason": (
+                        "provider_failure" if chosen_model != decision.models[0] else None
+                    ),
+                },
             )
             self.active_workers[worker_id] = worker_info
             self.project_locks[project_id] = task_id
@@ -228,8 +261,9 @@ class WorkerManager:
 
             logger.info(
                 f"[WORKER] Spawned worker {worker_id} for task {task_id_short} "
-                f"(project={project_id}, agent={agent_type}, model={model}, "
-                f"runId={run_id[:12]}...)"
+                f"(project={project_id}, agent={agent_type}, model={chosen_model}, "
+                f"runId={run_id[:12]}...)" ,
+                extra={"model_router": worker_info.model_audit},
             )
 
             return True
@@ -247,7 +281,7 @@ class WorkerManager:
         agent_id: str,
         model: str,
         label: str
-    ) -> Optional[dict[str, str]]:
+    ) -> tuple[Optional[dict[str, str]], Optional[str]]:
         """
         Call Gateway API to spawn a new session.
         
@@ -256,7 +290,7 @@ class WorkerManager:
         zero tokens consumed.
         
         Returns:
-            Dict with runId and childSessionKey, or None on failure
+            (Dict with runId and childSessionKey, error_string)
         """
         try:
             async with aiohttp.ClientSession() as session:
@@ -281,24 +315,37 @@ class WorkerManager:
                 data = await resp.json()
                 
                 if not data.get("ok"):
-                    logger.error(f"[GATEWAY] sessions_spawn failed: {data}")
-                    return None
+                    logger.error(
+                        "[GATEWAY] sessions_spawn failed",
+                        extra={"gateway": {"model": model, "response": data}},
+                    )
+                    return None, f"sessions_spawn_failed: {data}"
                 
                 result = data.get("result", {})
                 # Gateway wraps tool results in {content, details}
                 details = result.get("details", result)
                 if details.get("status") != "accepted":
-                    logger.error(f"[GATEWAY] sessions_spawn not accepted: {result}")
-                    return None
-                
-                return {
-                    "runId": details["runId"],
-                    "childSessionKey": details["childSessionKey"]
-                }
-                
+                    logger.error(
+                        "[GATEWAY] sessions_spawn not accepted",
+                        extra={"gateway": {"model": model, "result": result}},
+                    )
+                    return None, f"sessions_spawn_not_accepted: {result}"
+
+                return (
+                    {
+                        "runId": details["runId"],
+                        "childSessionKey": details["childSessionKey"],
+                    },
+                    None,
+                )
+
         except Exception as e:
-            logger.error(f"[GATEWAY] Error calling sessions_spawn: {e}", exc_info=True)
-            return None
+            logger.error(
+                "[GATEWAY] Error calling sessions_spawn",
+                extra={"gateway": {"model": model, "error": str(e)}},
+                exc_info=True,
+            )
+            return None, str(e)
 
     async def check_workers(self) -> None:
         """
@@ -603,8 +650,10 @@ class WorkerManager:
             succeeded=succeeded,
             exit_code=0 if succeeded else -1,
             summary=summary,
+            model=worker_info.model,
+            model_audit=worker_info.model_audit,
             commit_sha=None,  # Sub-agents handle their own commits
-            files_modified=None
+            files_modified=None,
         )
 
         # Update worker status (mark inactive if no other workers)
@@ -679,8 +728,10 @@ class WorkerManager:
         succeeded: bool,
         exit_code: int,
         summary: str | None = None,
+        model: str | None = None,
+        model_audit: dict[str, Any] | None = None,
         commit_sha: str | None = None,
-        files_modified: list[str] | None = None
+        files_modified: list[str] | None = None,
     ) -> None:
         """Record worker run to history table."""
         try:
@@ -693,9 +744,11 @@ class WorkerManager:
                 succeeded=succeeded,
                 timeout_reason="exit_code_" + str(exit_code) if not succeeded else None,
                 source="orchestrator-gateway",
+                model=model,
+                task_log={"model_router": model_audit} if model_audit else None,
                 summary=summary,
                 commit_shas=[commit_sha] if commit_sha else None,
-                files_modified=files_modified
+                files_modified=files_modified,
             )
 
             self.db.add(run)
@@ -790,7 +843,6 @@ class WorkerManager:
         # Clear state
         self.active_workers.clear()
         self.project_locks.clear()
-        self.agent_locks.clear()
 
         # Update DB
         await self._update_worker_status(active=False)

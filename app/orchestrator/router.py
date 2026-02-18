@@ -9,21 +9,17 @@ logger = logging.getLogger(__name__)
 
 VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "project-manager"}
 
-# Model tiers for different agent types
-AGENT_MODEL_MAP = {
-    "programmer": "openai-codex/gpt-5.3-codex",
-    "researcher": "openai-codex/gpt-5.3-codex",
-    "architect": "openai-codex/gpt-5.3-codex",
-    "reviewer": "openai-codex/gpt-5.3-codex",
-    "writer": "openai-codex/gpt-5.3-codex",
-    "suggester": "openai-codex/gpt-5.3-codex",
-    "project-manager": "openai-codex/gpt-5.3-codex",
-}
+from app.orchestrator.model_router import decide_models
 
 
 def get_model_for_task(agent_type: str, task: dict[str, Any]) -> str:
-    """Select model based on agent type and task complexity."""
-    return AGENT_MODEL_MAP.get(agent_type, "openai-codex/gpt-5.3-codex")
+    """Backward-compatible single-model selector.
+
+    New code should prefer app.orchestrator.model_router.decide_models() which
+    returns a preference list + audit metadata.
+    """
+
+    return decide_models(agent_type, task).models[0]
 
 
 @dataclass(frozen=True, slots=True)
