@@ -12,18 +12,15 @@ Key changes:
 import asyncio
 import logging
 import shutil
+import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Optional
 
 from app.database import AsyncSessionLocal
 from app.orchestrator.scanner import Scanner
-from app.orchestrator.router import Router
-from app.orchestrator.capability_router import CapabilityRouter
 from app.orchestrator.capability_registry import CapabilityRegistrySync
 from app.orchestrator.worker import WorkerManager
-from app.orchestrator.monitor import Monitor
 from app.orchestrator.monitor_enhanced import MonitorEnhanced
-from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.scheduler import EventScheduler
@@ -32,7 +29,7 @@ from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.config import POLL_INTERVAL
-from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting
+from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem
 from app.services.github_sync import GitHubSyncService
 from app.services.openclaw_models import fetch_openclaw_model_catalog
 from sqlalchemy import select
@@ -44,6 +41,7 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
+    SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,7 +66,6 @@ class OrchestratorEngine:
         session_factory: Optional[Callable[[], Any]] = None,
     ):
         self._session_factory = session_factory or AsyncSessionLocal
-        self.router = Router()
         self._running = False
         self._paused = False
         self._task: Optional[asyncio.Task] = None
@@ -77,12 +74,9 @@ class OrchestratorEngine:
         self._scheduler_interval = 60  # Check events every 60 seconds
         self._last_inbox_check = 0.0
         self._inbox_interval = 45  # Process inbox every 45 seconds
-        self._last_pm_check = 0.0
-        self._pm_interval = 60  # PM routing review every 60 seconds max
-        self._pm_active = False
-        self._pm_session_id: Optional[str] = None
         self._last_reflection_check = 0.0
         self._reflection_interval = 21600  # every 6 hours
+        self._daily_compression_hour_utc = 8
         self._last_daily_compression_date: str | None = None
         self._last_capability_sync = 0.0
         self._capability_sync_interval = 3600  # every hour
@@ -211,16 +205,12 @@ class OrchestratorEngine:
             else:
                 self._worker_manager.db = db
             worker_manager = self._worker_manager
-            monitor = Monitor(db)
             monitor_enhanced = MonitorEnhanced(db)
             circuit_breaker = CircuitBreaker(db)
-            escalation = EscalationManagerEnhanced(db)
-            agent_tracker = AgentTracker(db)
             scheduler = EventScheduler(db)
             reflection_manager = ReflectionCycleManager(db, worker_manager)
             sweep_arbitrator = SweepArbitrator(db)
             diagnostic_engine = DiagnosticTriggerEngine(db, worker_manager)
-            capability_router = CapabilityRouter(db)
 
             # 1. Check scheduled events (every 60 seconds)
             import time
@@ -399,7 +389,7 @@ class OrchestratorEngine:
                 today_key = now_utc.date().isoformat()
                 if (
                     self._last_daily_compression_date != today_key
-                    and now_utc.hour >= 8  # 03:00 America/New_York ~= 08:00 UTC (standard)
+                    and now_utc.hour >= self._daily_compression_hour_utc
                 ):
                     daily_result = await reflection_manager.run_daily_compression()
                     self._last_daily_compression_date = today_key
@@ -434,18 +424,6 @@ class OrchestratorEngine:
                 except Exception as e:
                     logger.error("[ENGINE] Diagnostic triggers failed: %s", e, exc_info=True)
 
-            # 7. PM Coordination - route unassigned tasks (every 60 seconds, only if not paused)
-            if not self._paused and self._openclaw_available and current_time - self._last_pm_check >= self._pm_interval:
-                try:
-                    unrouted_tasks = await scanner.get_unrouted_tasks()
-                    if unrouted_tasks and not self._pm_active:
-                        await self._spawn_pm_review(unrouted_tasks, worker_manager)
-                        activity = True
-                    self._last_pm_check = current_time
-                except Exception as e:
-                    logger.error(f"[ENGINE] PM coordination failed: {e}", exc_info=True)
-
-
             # 4. Check active workers
             initial_active = len(worker_manager.active_workers)
             await worker_manager.check_workers()
@@ -473,7 +451,7 @@ class OrchestratorEngine:
             if not self._openclaw_available:
                 return activity
 
-            # 7. Scan for eligible tasks (already routed by PM)
+            # 7. Scan for eligible tasks
             eligible_tasks = await scanner.get_eligible_tasks()
             
             if not eligible_tasks:
@@ -488,7 +466,7 @@ class OrchestratorEngine:
                     f"{len(eligible_tasks)} task(s) queued."
                 )
 
-            # 8. Process eligible tasks (spawn specialists for PM-routed tasks)
+            # 8. Process eligible tasks
             for task_dict in eligible_tasks:
                 activity = True
                 
@@ -500,25 +478,17 @@ class OrchestratorEngine:
                     logger.warning("[ENGINE] Task missing ID or project_id, skipping")
                     continue
 
-                # Use PM-assigned agent or fallback to router (legacy support)
+                # Strict assignment policy: never guess agent routing in engine.
                 agent_type = task_dict.get("agent")
                 if not agent_type:
-                    # Capability routing first, regex fallback second
-                    try:
-                        agent_type = await capability_router.route(task_dict)
-                        logger.info(
-                            f"[ENGINE] Capability routing task {task_id[:8]} to {agent_type} agent"
-                        )
-                    except Exception as e:
-                        logger.warning(
-                            f"[ENGINE] Failed to route task {task_id[:8]}: {e}. "
-                            f"Using default (programmer)"
-                        )
-                        agent_type = "programmer"
-                else:
-                    logger.debug(
-                        f"[ENGINE] Task {task_id[:8]} already routed to {agent_type} (by PM)"
+                    created = await self._request_lobs_assignment(db, task_dict)
+                    if created:
+                        activity = True
+                    logger.info(
+                        "[ENGINE] Task %s has no assigned agent; queued Lobs assignment request",
+                        task_id[:8],
                     )
+                    continue
 
                 # GitHub claim handshake before spawning work
                 if task_dict.get("external_source") == "github":
@@ -580,97 +550,44 @@ class OrchestratorEngine:
 
         return activity
 
-    async def _spawn_pm_review(self, unrouted_tasks: list[dict[str, Any]], worker_manager: WorkerManager) -> None:
-        """Spawn project-manager to review and route unrouted tasks."""
-        # Limit to 10 tasks at a time to avoid overwhelming the PM
-        tasks_to_route = unrouted_tasks[:10]
-        
-        task_summaries = []
-        for t in tasks_to_route:
-            task_id = t.get('id', 'unknown')
-            title = t.get('title', 'untitled')
-            project_id = t.get('project_id', 'unknown')
-            notes = t.get('notes') or ''
-            
-            task_summaries.append(
-                f"- ID: {task_id}\n"
-                f"  Title: {title}\n"
-                f"  Project: {project_id}\n"
-                f"  Notes: {notes[:200]}"
+    async def _request_lobs_assignment(self, db: Any, task: dict[str, Any]) -> bool:
+        """Create a deduplicated inbox item requesting Lobs to assign an agent."""
+        task_id = task.get("id")
+        if not task_id:
+            return False
+
+        marker = f"assignment_request:{task_id}"
+        existing = await db.execute(
+            select(InboxItem).where(InboxItem.summary == marker)
+        )
+        if existing.scalar_one_or_none():
+            return False
+
+        title = task.get("title") or "Untitled task"
+        project_id = task.get("project_id") or "unknown"
+        notes = (task.get("notes") or "").strip()
+        notes_preview = notes[:1200] + ("..." if len(notes) > 1200 else "")
+
+        db.add(
+            InboxItem(
+                id=str(uuid.uuid4()),
+                title=f"[ASSIGNMENT] Agent needed: {title[:80]}",
+                content=(
+                    "Lobs agent assignment required before execution.\n\n"
+                    f"Task ID: {task_id}\n"
+                    f"Project ID: {project_id}\n"
+                    f"Title: {title}\n\n"
+                    "Notes:\n"
+                    f"{notes_preview or '(none)'}\n\n"
+                    "Action: set the task `agent` field explicitly."
+                ),
+                is_read=False,
+                summary=marker,
+                modified_at=datetime.now(timezone.utc),
             )
-        
-        prompt = f"""## Task Routing Review
-
-You have {len(tasks_to_route)} task(s) that need agent assignment. Review each and assign the best agent.
-
-### Available Agents
-- programmer: Code implementation, bug fixes, features (codex)
-- researcher: Investigation, analysis, comparison (codex)
-- architect: System design, technical strategy (codex)
-- reviewer: Code review, quality checks (codex)
-- writer: Documentation, summaries, content (codex)
-
-### Tasks to Route
-{chr(10).join(task_summaries)}
-
-### Instructions
-For each task, assign the agent using the script:
-```bash
-./scripts/lobs-tasks set-agent FULL_TASK_ID AGENT_TYPE
-```
-
-Choose the agent based on:
-1. Task title and notes content
-2. Keywords (research → researcher, design → architect, etc.)
-3. Default to programmer if unclear
-
-Route ALL tasks. Do not skip any."""
-
-        try:
-            # Spawn PM via Gateway API (same mechanism as specialist workers)
-            spawn_result = await worker_manager._spawn_session(
-                task_prompt=prompt,
-                agent_id="project-manager",
-                model="openai-codex/gpt-5.3-codex",  # Standardized primary model
-                label="pm-task-routing"
-            )
-            
-            if not spawn_result:
-                logger.warning("[ENGINE] Failed to spawn PM review session")
-                return
-            
-            self._pm_active = True
-            self._pm_session_id = spawn_result.get("runId")
-            logger.info(
-                f"[ENGINE] Spawned PM for task routing: {spawn_result['runId']} "
-                f"({len(tasks_to_route)} task(s))"
-            )
-            
-            # Schedule PM status reset after timeout
-            run_id = spawn_result["runId"]
-            async def reset_pm_status():
-                await asyncio.sleep(150)  # 2.5 minutes
-                if self._pm_session_id == run_id:
-                    self._pm_active = False
-                    self._pm_session_id = None
-                    logger.debug(f"[ENGINE] PM session {run_id} timeout - resetting active flag")
-            
-            asyncio.create_task(reset_pm_status())
-            
-        except Exception as e:
-            logger.error(f"[ENGINE] Failed to spawn PM review: {e}", exc_info=True)
-            self._pm_active = False
-            self._pm_session_id = None
-
-    async def _spawn_pm_proactive_review(self, worker_manager: WorkerManager) -> None:
-        """Deprecated: proactive PM task creation is disabled.
-
-        All autonomous work proposals must flow through the 6-hour reflection -> initiative
-        sweep -> Lobs approval path before any task is created.
-        """
-        logger.info("[ENGINE] PM proactive review is disabled by governance policy")
-        return
-
+        )
+        await db.commit()
+        return True
 
     async def _refresh_runtime_settings(self, db: Any) -> None:
         """Load runtime loop intervals from DB without restart."""
@@ -681,6 +598,7 @@ Route ALL tasks. Do not skip any."""
             SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
             SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
             SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
+            SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
         )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
@@ -698,6 +616,19 @@ Route ALL tasks. Do not skip any."""
         self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
         self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
         self._openclaw_model_sync_interval = _as_int(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS)
+        try:
+            self._daily_compression_hour_utc = max(
+                0,
+                min(
+                    23,
+                    int(rows.get(
+                        SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
+                        DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC],
+                    )),
+                ),
+            )
+        except Exception:
+            self._daily_compression_hour_utc = int(DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC])
 
         # Load persistent reflection anchor so restarts don't reset the 6h cadence.
         if not self._reflection_anchor_loaded:

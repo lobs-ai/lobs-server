@@ -22,8 +22,8 @@ BASE_DIR = Path(os.environ.get("LOBS_PROJECTS_DIR", str(Path.home())))
 WORKER_RESULTS_DIR = Path.home() / ".openclaw" / "worker-results"
 WORKER_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Agent types
-AGENT_TYPES = ("architect", "programmer", "researcher", "reviewer", "writer")
+# Control-plane identities (not execution workers)
+CONTROL_PLANE_AGENTS = ("lobs", "project-manager")
 
 # OpenClaw Gateway API configuration
 GATEWAY_URL = os.environ.get("OPENCLAW_GATEWAY_URL", "http://127.0.0.1:18789")

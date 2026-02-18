@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentCapability
+from app.orchestrator.config import CONTROL_PLANE_AGENTS
 from app.orchestrator.registry import AgentRegistry
 
 
@@ -20,7 +21,7 @@ class CapabilityRegistrySync:
         agents = self.registry.available_types()
 
         for agent in agents:
-            if agent == "project-manager":
+            if agent in CONTROL_PLANE_AGENTS:
                 continue
 
             config = self.registry.get_agent(agent)

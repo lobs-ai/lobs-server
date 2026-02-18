@@ -24,6 +24,7 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
     SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
+    SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
     SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
     SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
 )
@@ -62,6 +63,7 @@ class RuntimeIntervalsUpdate(BaseModel):
     diagnostic_seconds: int | None = None
     github_sync_seconds: int | None = None
     openclaw_model_sync_seconds: int | None = None
+    daily_compression_hour_utc: int | None = None
 
 
 class ModelPolicyUpdate(BaseModel):
@@ -259,6 +261,8 @@ async def update_runtime_intervals(
         updates[SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS] = max(30, int(payload.github_sync_seconds))
     if payload.openclaw_model_sync_seconds is not None:
         updates[SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS] = max(60, int(payload.openclaw_model_sync_seconds))
+    if payload.daily_compression_hour_utc is not None:
+        updates[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC] = max(0, min(23, int(payload.daily_compression_hour_utc)))
 
     for key, value in updates.items():
         row = await db.get(OrchestratorSetting, key)

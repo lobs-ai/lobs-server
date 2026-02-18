@@ -11,7 +11,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentStatus
-from app.orchestrator.config import AGENT_TYPES
 
 logger = logging.getLogger(__name__)
 

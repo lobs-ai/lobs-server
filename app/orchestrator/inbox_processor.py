@@ -6,14 +6,11 @@ analyzes the response, and determines actions:
 - resolve: Mark thread as resolved (no further action needed)
 - pending: Mark as pending (acknowledged but not actionable yet)
 
-Uses LLM-based analysis via project-manager agent. Falls back to regex on failure.
+Uses deterministic server-side analysis so control flow stays inside lobs-server.
 """
 
-import asyncio
-import json
 import logging
 import re
-import subprocess
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -162,8 +159,8 @@ class InboxProcessor:
             return stats
         latest = rafe_msgs[-1]
 
-        # Analyze response using LLM agent
-        action = await self._analyze_response(latest.text, inbox_item, thread.id)
+        # Analyze response using deterministic server rules
+        action = await self._analyze_response(latest.text, inbox_item)
 
         logger.info(
             f"[INBOX] Thread {thread.id[:8]} → {action['type']} "
@@ -173,7 +170,7 @@ class InboxProcessor:
         response_message = action.get("response_message")
 
         if action["type"] == "create_task":
-            # Use LLM-provided task details if available
+            # Use action-provided task fields if available
             task_title = action.get("task_title") or inbox_item.title
             task_notes = action.get("task_notes")
             agent_type = action.get("agent_type")
@@ -219,118 +216,13 @@ class InboxProcessor:
         return stats
 
     async def _analyze_response(
-        self, user_message: str, inbox_item: InboxItem, thread_id: str
+        self, user_message: str, inbox_item: InboxItem
     ) -> dict[str, Any]:
         """
-        Analyze user response using LLM agent.
-        Falls back to regex on failure.
+        Analyze user response with deterministic rules.
         """
-        try:
-            # Get available projects
-            valid_projects = await self._get_valid_project_ids()
-            
-            # Build payload for project-manager agent
-            payload = {
-                "inbox_item": {
-                    "title": inbox_item.title,
-                    "content": inbox_item.content or "",
-                    "summary": inbox_item.summary or "",
-                },
-                "user_response": user_message,
-                "available_projects": list(valid_projects),
-            }
-            
-            # Use isolated session per thread
-            session_id = f"inbox-{thread_id[:8]}"
-            
-            # Call OpenClaw agent in executor for async compatibility
-            loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                self._call_inbox_agent,
-                json.dumps(payload),
-                session_id
-            )
-            
-            if result:
-                # Parse and validate response
-                try:
-                    response = json.loads(result)
-                    action_type = response.get("action")
-                    
-                    # Map LLM action to internal action type
-                    if action_type == "create_task":
-                        return {
-                            "type": "create_task",
-                            "agent_type": response.get("agent_type"),
-                            "project_id": response.get("project_id", "default"),
-                            "task_title": response.get("task_title"),
-                            "task_notes": response.get("task_notes"),
-                            "response_message": response.get("response_message"),
-                        }
-                    elif action_type == "resolve":
-                        return {
-                            "type": "resolve",
-                            "response_message": response.get("response_message"),
-                        }
-                    elif action_type == "pending":
-                        return {
-                            "type": "pending",
-                            "response_message": response.get("response_message"),
-                        }
-                    else:
-                        # no_action or invalid
-                        return {"type": "no_action"}
-                        
-                except json.JSONDecodeError as e:
-                    logger.warning(f"[INBOX] Failed to parse LLM response: {e}")
-                    # Fall through to regex fallback
-        
-        except Exception as e:
-            logger.warning(f"[INBOX] LLM analysis failed: {e}, falling back to regex")
-        
-        # Fallback to regex-based analysis
-        logger.debug("[INBOX] Using regex fallback for response analysis")
+        logger.debug("[INBOX] Using deterministic response analysis")
         return self._analyze_response_fallback(user_message, inbox_item)
-    
-    def _call_inbox_agent(self, payload_json: str, session_id: str) -> str | None:
-        """
-        Call project-manager agent via subprocess for inbox analysis.
-        Synchronous method meant to be called in executor.
-        """
-        try:
-            cmd = [
-                "openclaw",
-                "agent",
-                "--agent", "project-manager",
-                "--session-id", session_id,
-                "-m", payload_json,
-                "--json",
-                "--timeout", "60",
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=70,  # Slightly longer than openclaw timeout
-            )
-            
-            if result.returncode == 0:
-                return result.stdout.strip()
-            else:
-                logger.warning(
-                    f"[INBOX] project-manager agent failed with exit code {result.returncode}: "
-                    f"{result.stderr[:200]}"
-                )
-                return None
-                
-        except subprocess.TimeoutExpired:
-            logger.warning("[INBOX] project-manager agent timed out")
-            return None
-        except Exception as e:
-            logger.error(f"[INBOX] Error calling project-manager agent: {e}")
-            return None
 
     def _analyze_response_fallback(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
         """Determine action from user's response. More permissive pattern matching."""
@@ -417,62 +309,6 @@ class InboxProcessor:
 
         return "default"
 
-    def _infer_agent_type(self, inbox_item: InboxItem, user_message: str) -> str | None:
-        """Infer agent type from inbox item and user message.
-        
-        Uses same logic as router.py for consistency.
-        Returns None if no clear agent type (defaults to programmer in router).
-        """
-        # Build searchable text
-        text = f"{inbox_item.title}\n{inbox_item.content or ''}\n{user_message}".lower()
-        
-        # Research keywords
-        research_keywords = [
-            "research", "investigate", "explore", "compare alternatives",
-            "ideas", "analysis", "analyze", "evaluate", "study",
-            "proof of concept", "proof-of-concept", "feasibility",
-            "batch", "suggestions", "propose", "proposal",
-        ]
-        if any(kw in text for kw in research_keywords):
-            return "researcher"
-        
-        # Writer keywords (specific phrases)
-        writer_patterns = [
-            r'write\s+(?:a\s+)?(?:doc|summary|report|guide|readme)',
-            r'draft\s+(?:doc|summary|report|guide|readme)',
-            r'write\s+up',
-            r'documentation\s+for',
-        ]
-        if any(re.search(p, text) for p in writer_patterns):
-            return "writer"
-        
-        # Architect keywords
-        architect_keywords = [
-            "design system", "architect", "rework architecture", "restructure",
-            "design proposal", "system design", "framework",
-        ]
-        if any(kw in text for kw in architect_keywords):
-            return "architect"
-        
-        # Reviewer keywords
-        reviewer_keywords = [
-            "code review", "audit code", "review pr",
-            "failure analysis", "hygiene", "cleanup",
-        ]
-        if any(kw in text for kw in reviewer_keywords):
-            return "reviewer"
-        
-        # Programmer keywords (explicit check, though it's default)
-        programmer_keywords = [
-            "implement", "fix", "build", "code", "develop",
-            "create", "add feature", "integrate", "refactor",
-        ]
-        if any(kw in text for kw in programmer_keywords):
-            return "programmer"
-        
-        # No clear match - return None (router will default to programmer)
-        return None
-
     async def _create_task_from_action(
         self,
         inbox_item: InboxItem,
@@ -506,9 +342,8 @@ class InboxProcessor:
                 notes += content
             notes += f"\n\n---\n**User direction:** {user_message}"
 
-        # Use LLM-provided agent type or infer
-        if not agent_type:
-            agent_type = self._infer_agent_type(inbox_item, user_message)
+        # Strict assignment policy: only accept explicit assignment from action.
+        normalized_agent: str | None = (agent_type or "").strip().lower() or None
 
         task = Task(
             id=task_id,
@@ -517,7 +352,7 @@ class InboxProcessor:
             work_state="not_started",
             owner="lobs",
             project_id=project_id,
-            agent=agent_type,  # Set agent field for router
+            agent=normalized_agent,
             notes=notes,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
@@ -526,7 +361,7 @@ class InboxProcessor:
         self.db.add(task)
         logger.info(
             f"[INBOX] Created task {task_id[:8]}: {task.title[:50]} "
-            f"(project={project_id}, agent={agent_type or 'default'})"
+            f"(project={project_id}, agent={normalized_agent or 'unassigned'})"
         )
         return task
 

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 import aiohttp
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -30,10 +30,8 @@ from app.models import (
     WorkerStatus,
     WorkerRun,
     Project,
-    OrchestratorSetting,
     AgentReflection,
     AgentInitiative,
-    ModelUsageEvent,
 )
 from app.orchestrator.config import (
     BASE_DIR,
@@ -44,29 +42,15 @@ from app.orchestrator.config import (
     GATEWAY_URL,
     GATEWAY_TOKEN,
 )
-from app.orchestrator.model_router import (
-    decide_models,
-    MODEL_ROUTER_TIER_CHEAP_KEY,
-    MODEL_ROUTER_TIER_STANDARD_KEY,
-    MODEL_ROUTER_TIER_STRONG_KEY,
-    MODEL_ROUTER_AVAILABLE_MODELS_KEY,
-)
-from app.orchestrator.runtime_settings import (
-    SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
-    SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
-)
+from app.orchestrator.model_chooser import ModelChooser
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 from app.orchestrator.policy_engine import PolicyEngine
-from app.services.usage import infer_provider, log_usage_event, resolve_route_type
+from app.services.usage import log_usage_event, resolve_route_type
 
 logger = logging.getLogger(__name__)
-
-USAGE_BUDGETS_KEY = "usage.budgets"
-USAGE_ROUTING_POLICY_KEY = "usage.routing_policy"
-
 
 @dataclass
 class WorkerInfo:
@@ -196,38 +180,20 @@ class WorkerManager:
                 prompt_file.write_text(prompt_content, encoding="utf-8")
 
             # Select model preference list + audit
-            router_cfg = await self._load_model_router_config()
-            decision = decide_models(
-                agent_type,
-                task,
-                tier_overrides=router_cfg.get("tiers"),
-                available_models=router_cfg.get("available_models"),
+            chooser = ModelChooser(self.db)
+            choice = await chooser.choose(
+                agent_type=agent_type,
+                task=task,
+                purpose="execution",
             )
-            logger.info(
-                "[MODEL_ROUTER] decision",
-                extra={"model_router": {**decision.audit, "runtime_config": router_cfg}},
-            )
+            logger.info("[MODEL_ROUTER] decision", extra={"model_router": choice.audit})
 
             chosen_model: str | None = None
             spawn_result: Optional[dict[str, str]] = None
             attempts: list[dict[str, Any]] = []
 
-            candidate_models = list(decision.models)
-            candidate_models = self._apply_routing_policy(
-                candidate_models=candidate_models,
-                task=task,
-                policy=router_cfg.get("routing_policy") or {},
-            )
-            candidate_models = await self._apply_budget_guards(
-                candidate_models=candidate_models,
-                budgets=router_cfg.get("budgets") or {},
-            )
-            candidate_models = await self._apply_health_penalty(candidate_models)
-
-            strict_coding_tier = bool(router_cfg.get("strict_coding_tier", True))
-            if agent_type == "programmer" and strict_coding_tier and candidate_models:
-                # Do not silently downgrade coding runs.
-                candidate_models = [candidate_models[0]]
+            candidate_models = list(choice.candidates)
+            strict_coding_tier = bool(choice.strict_coding_tier)
 
             # Call Gateway API: sessions_spawn with fallback chain
             for idx, candidate in enumerate(candidate_models):
@@ -236,7 +202,7 @@ class WorkerManager:
                     agent_id=agent_type,
                     model=candidate,
                     label=label,
-                    routing_policy=router_cfg.get("routing_policy") or {},
+                    routing_policy=choice.routing_policy or {},
                 )
                 attempts.append(
                     {
@@ -254,11 +220,11 @@ class WorkerManager:
                 if agent_type == "programmer" and strict_coding_tier:
                     logger.error(
                         "[MODEL_ROUTER] strict coding tier prevented model downgrade after spawn failure",
-                        extra={"model_router": {**decision.audit, "attempts": attempts}},
+                        extra={"model_router": {**choice.audit, "attempts": attempts}},
                     )
                 logger.error(
                     f"[WORKER] Failed to spawn session for {task_id_short}",
-                    extra={"model_router": {**decision.audit, "attempts": attempts}},
+                    extra={"model_router": {**choice.audit, "attempts": attempts}},
                 )
                 return False
 
@@ -277,17 +243,17 @@ class WorkerManager:
                 start_time=start_time,
                 label=label,
                 model_audit={
-                    **decision.audit,
+                    **choice.audit,
                     "attempts": attempts,
                     "chosen_model": chosen_model,
-                    "fallback_used": chosen_model != decision.models[0],
+                    "fallback_used": chosen_model != candidate_models[0],
                     "fallback_reason": (
-                        "provider_failure" if chosen_model != decision.models[0] else None
+                        "provider_failure" if chosen_model != candidate_models[0] else None
                     ),
                     "strict_coding_tier": strict_coding_tier,
-                    "degrade_on_quota": bool(router_cfg.get("degrade_on_quota", False)),
-                    "subscription_models": (router_cfg.get("routing_policy") or {}).get("subscription_models", []),
-                    "subscription_providers": (router_cfg.get("routing_policy") or {}).get("subscription_providers", []),
+                    "degrade_on_quota": bool(choice.degrade_on_quota),
+                    "subscription_models": (choice.routing_policy or {}).get("subscription_models", []),
+                    "subscription_providers": (choice.routing_policy or {}).get("subscription_providers", []),
                 },
             )
             self.active_workers[worker_id] = worker_info
@@ -333,174 +299,6 @@ class WorkerManager:
                 exc_info=True
             )
             return False
-
-    async def _load_model_router_config(self) -> dict[str, Any]:
-        """Load runtime model-router overrides from DB.
-
-        This allows changing tier model pools while the server is running.
-        """
-
-        keys = (
-            MODEL_ROUTER_TIER_CHEAP_KEY,
-            MODEL_ROUTER_TIER_STANDARD_KEY,
-            MODEL_ROUTER_TIER_STRONG_KEY,
-            MODEL_ROUTER_AVAILABLE_MODELS_KEY,
-            SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER,
-            SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA,
-            USAGE_BUDGETS_KEY,
-            USAGE_ROUTING_POLICY_KEY,
-        )
-
-        result = await self.db.execute(
-            select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys))
-        )
-        rows = {row.key: row.value for row in result.scalars().all()}
-
-        def _list_value(key: str) -> list[str] | None:
-            val = rows.get(key)
-            if isinstance(val, list):
-                return [str(v).strip() for v in val if str(v).strip()]
-            return None
-
-        return {
-            "tiers": {
-                "cheap": _list_value(MODEL_ROUTER_TIER_CHEAP_KEY),
-                "standard": _list_value(MODEL_ROUTER_TIER_STANDARD_KEY),
-                "strong": _list_value(MODEL_ROUTER_TIER_STRONG_KEY),
-            },
-            "available_models": _list_value(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
-            "strict_coding_tier": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER, True)),
-            "degrade_on_quota": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA, False)),
-            "routing_policy": rows.get(USAGE_ROUTING_POLICY_KEY) if isinstance(rows.get(USAGE_ROUTING_POLICY_KEY), dict) else {},
-            "budgets": rows.get(USAGE_BUDGETS_KEY) if isinstance(rows.get(USAGE_BUDGETS_KEY), dict) else {},
-        }
-
-    @staticmethod
-    def _task_type(task: dict[str, Any]) -> str:
-        status = str(task.get("status") or "").lower()
-        title = str(task.get("title") or "").lower()
-        notes = str(task.get("notes") or "").lower()
-        if status == "inbox":
-            return "inbox"
-        if "summary" in title or "summary" in notes:
-            return "quick_summary"
-        if "triage" in title or "triage" in notes:
-            return "triage"
-        return "default"
-
-    def _apply_routing_policy(
-        self,
-        *,
-        candidate_models: list[str],
-        task: dict[str, Any],
-        policy: dict[str, Any],
-    ) -> list[str]:
-        if not candidate_models or not policy:
-            return candidate_models
-
-        task_type = self._task_type(task)
-        chains = policy.get("fallback_chains") if isinstance(policy.get("fallback_chains"), dict) else {}
-        chain = chains.get(task_type) or chains.get("default")
-        if not isinstance(chain, list) or not chain:
-            return candidate_models
-
-        order = {str(p).lower(): i for i, p in enumerate(chain)}
-        subscription_models = policy.get("subscription_models") if isinstance(policy.get("subscription_models"), list) else []
-        subscription_providers = policy.get("subscription_providers") if isinstance(policy.get("subscription_providers"), list) else []
-
-        def provider_rank(model_name: str) -> int:
-            route_type = resolve_route_type(
-                model_name,
-                subscription_models=subscription_models,
-                subscription_providers=subscription_providers,
-            )
-            if route_type == "subscription":
-                return order.get("subscription", len(order) + 5)
-            provider = infer_provider(model_name)
-            return order.get(provider, len(order) + 10)
-
-        return sorted(candidate_models, key=provider_rank)
-
-    async def _provider_month_cost(self, provider: str, now: datetime) -> float:
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        result = await self.db.execute(
-            select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
-                ModelUsageEvent.provider == provider,
-                ModelUsageEvent.timestamp >= month_start,
-            )
-        )
-        return float(result.scalar() or 0.0)
-
-    async def _provider_recent_error_rate(self, provider: str, minutes: int = 30) -> float:
-        since = datetime.now(timezone.utc) - timedelta(minutes=minutes)
-        total_q = await self.db.execute(
-            select(func.coalesce(func.sum(ModelUsageEvent.requests), 0)).where(
-                ModelUsageEvent.provider == provider,
-                ModelUsageEvent.timestamp >= since,
-            )
-        )
-        err_q = await self.db.execute(
-            select(func.coalesce(func.sum(ModelUsageEvent.requests), 0)).where(
-                ModelUsageEvent.provider == provider,
-                ModelUsageEvent.timestamp >= since,
-                ModelUsageEvent.status != "success",
-            )
-        )
-        total = int(total_q.scalar() or 0)
-        errs = int(err_q.scalar() or 0)
-        return (errs / total) if total > 0 else 0.0
-
-    async def _apply_health_penalty(self, candidate_models: list[str]) -> list[str]:
-        if not candidate_models:
-            return candidate_models
-
-        async def score(model_name: str) -> tuple[int, float]:
-            provider = infer_provider(model_name)
-            err_rate = await self._provider_recent_error_rate(provider, minutes=30)
-            penalty = 1 if err_rate >= 0.5 else 0
-            return penalty, err_rate
-
-        scored = []
-        for model_name in candidate_models:
-            penalty, err_rate = await score(model_name)
-            scored.append((penalty, err_rate, model_name))
-
-        scored.sort(key=lambda x: (x[0], x[1]))
-        return [m for _, _, m in scored]
-
-    async def _apply_budget_guards(
-        self,
-        *,
-        candidate_models: list[str],
-        budgets: dict[str, Any],
-    ) -> list[str]:
-        per_provider = budgets.get("per_provider_monthly_usd") if isinstance(budgets.get("per_provider_monthly_usd"), dict) else {}
-        if not per_provider:
-            return candidate_models
-
-        now = datetime.now(timezone.utc)
-        allowed: list[str] = []
-        blocked: list[str] = []
-
-        for model_name in candidate_models:
-            provider = infer_provider(model_name)
-            cap = per_provider.get(provider)
-            if cap is None:
-                allowed.append(model_name)
-                continue
-            spent = await self._provider_month_cost(provider, now)
-            if float(spent) >= float(cap):
-                blocked.append(model_name)
-            else:
-                allowed.append(model_name)
-
-        if allowed:
-            return allowed
-
-        # If all blocked, preserve original list to avoid hard outage.
-        if blocked:
-            logger.warning("[MODEL_ROUTER] all candidate models exceeded provider caps; preserving fallback list")
-        return candidate_models
 
     async def _spawn_session(
         self,

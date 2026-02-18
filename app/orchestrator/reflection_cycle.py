@@ -11,7 +11,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentReflection, AgentIdentityVersion, SystemSweep
+from app.orchestrator.config import CONTROL_PLANE_AGENTS
 from app.orchestrator.context_packets import ContextPacketBuilder
+from app.orchestrator.model_chooser import ModelChooser
 from app.orchestrator.registry import AgentRegistry
 from app.orchestrator.worker import WorkerManager
 
@@ -26,12 +28,16 @@ class ReflectionCycleManager:
         self.worker_manager = worker_manager
         self.registry = AgentRegistry()
 
+    def _execution_agents(self) -> list[str]:
+        return [a for a in self.registry.available_types() if a not in CONTROL_PLANE_AGENTS]
+
     async def run_strategic_reflection_cycle(self) -> dict[str, Any]:
-        agents = [a for a in self.registry.available_types() if a != "project-manager"]
+        agents = self._execution_agents()
         if not agents:
             return {"agents": 0, "spawned": 0}
 
         packet_builder = ContextPacketBuilder(self.db)
+        chooser = ModelChooser(self.db)
         window_end = datetime.now(timezone.utc)
         window_start = window_end - timedelta(hours=6)
 
@@ -53,10 +59,20 @@ class ReflectionCycleManager:
             )
 
             prompt = self._build_reflection_prompt(agent, packet.to_dict(), reflection_id)
+            choice = await chooser.choose(
+                agent_type=agent,
+                task={
+                    "id": reflection_id,
+                    "title": "Strategic reflection cycle",
+                    "notes": "Periodic strategic reflection run",
+                    "status": "inbox",
+                },
+                purpose="reflection",
+            )
             result, error = await self.worker_manager._spawn_session(
                 task_prompt=prompt,
                 agent_id=agent,
-                model="anthropic/claude-haiku-4-5",
+                model=choice.model,
                 label=f"reflection-{agent}",
             )
 
@@ -81,7 +97,7 @@ class ReflectionCycleManager:
         return {"agents": len(agents), "spawned": spawned, "sweep_id": sweep.id}
 
     async def run_daily_compression(self) -> dict[str, Any]:
-        agents = [a for a in self.registry.available_types() if a != "project-manager"]
+        agents = self._execution_agents()
         now = datetime.now(timezone.utc)
         since = now - timedelta(hours=24)
 

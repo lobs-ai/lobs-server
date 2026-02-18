@@ -219,7 +219,7 @@ def classify_task(task: dict[str, Any], *, agent_type: str) -> tuple[Complexity,
 
     # Inbox / lightweight coordination tasks are typically cheap.
     status = (task.get("status") or "").strip().lower()
-    if status == "inbox" and agent_type in {"project-manager", "writer", "reviewer", "architect", "researcher"}:
+    if status == "inbox" and agent_type in {"writer", "reviewer", "architect", "researcher", "lobs"}:
         complexity = "light"
 
     return complexity, criticality

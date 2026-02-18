@@ -65,7 +65,7 @@ Built into the server — direct DB access, no HTTP overhead.
 | engine.py | Main polling loop, dispatches work |
 | worker.py | Spawns workers via OpenClaw Gateway `/tools/invoke` API |
 | scanner.py | Finds eligible tasks |
-| router.py | Routes tasks to agent types (or project-manager for delegation) |
+| router.py | Routes tasks to agent types (explicit assignment -> capability match -> fallback) |
 | monitor.py | Basic health monitoring |
 | monitor_enhanced.py | Stuck task detection, auto-unblock, failure patterns |
 | escalation.py | Basic failure handling |
@@ -77,7 +77,7 @@ Built into the server — direct DB access, no HTTP overhead.
 | registry.py | Agent template registry (loads agent configs from `agents/`) |
 
 **Worker spawning**: Uses OpenClaw Gateway `/tools/invoke` with `sessions_spawn` (not direct `openclaw` CLI).  
-**Agent delegation**: Tasks can be routed to `project-manager` agent for intelligent delegation and approval flows.  
+**Agent delegation**: Routing is server-driven; `lobs-server` applies explicit task agent assignment first, then capability routing, then deterministic fallback.  
 **Graceful degradation**: If Gateway is unreachable, orchestrator runs in monitoring-only mode.
 
 ## Services (app/services/)

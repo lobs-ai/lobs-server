@@ -7,7 +7,7 @@ Central backend for [Lobs Mission Control](https://github.com/RafeSymonds/lobs-m
 - **Memory System** — Second brain: daily notes, long-term memory, search, quick capture
 - **Topics/Knowledge** — Research workspaces with documents and auto-created topics
 - **Chat** — Real-time WebSocket messaging with OpenClaw agent bridge
-- **Orchestrator** — Automatic task routing via project-manager, worker spawning, model routing with fallback chains, failure escalation
+- **Orchestrator** — Automatic server-side task routing (explicit agent -> capability registry -> fallback), worker spawning, model routing with fallback chains, failure escalation
 - **Calendar Integration** — Events, recurring schedules, tracker deadline sync
 - **System Health** — Activity timeline, cost tracking, monitoring
 - **Auth** — Bearer token authentication on all endpoints

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentReflection, AgentStatus, Task
 from app.orchestrator.context_packets import ContextPacketBuilder
+from app.orchestrator.model_chooser import ModelChooser
 from app.orchestrator.worker import WorkerManager
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ class DiagnosticTriggerEngine:
         self.db = db
         self.worker_manager = worker_manager
         self.packet_builder = ContextPacketBuilder(db)
+        self.model_chooser = ModelChooser(db)
 
     async def run_once(self) -> dict[str, int]:
         triggers = 0
@@ -139,10 +141,20 @@ class DiagnosticTriggerEngine:
         await self.db.commit()
 
         prompt = self._build_prompt(agent_type, reflection.id, context_packet)
+        choice = await self.model_chooser.choose(
+            agent_type=agent_type,
+            task={
+                "id": reflection.id,
+                "title": f"Diagnostic trigger: {trigger.get('kind', 'unknown')}",
+                "notes": "Reactive diagnostic analysis run",
+                "status": "inbox",
+            },
+            purpose="diagnostic",
+        )
         result, error = await self.worker_manager._spawn_session(
             task_prompt=prompt,
             agent_id=agent_type,
-            model="anthropic/claude-haiku-4-5",
+            model=choice.model,
             label=f"diagnostic-{agent_type}",
         )
 

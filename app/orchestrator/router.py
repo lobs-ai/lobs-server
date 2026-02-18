@@ -7,8 +7,6 @@ from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
-VALID_AGENTS = {"programmer", "researcher", "reviewer", "writer", "architect", "project-manager"}
-
 from app.orchestrator.model_router import decide_models
 
 
@@ -93,7 +91,7 @@ class Router:
         """
         # 1. Explicit agent field
         explicit = (task.get("agent") or "").strip()
-        if explicit and explicit in VALID_AGENTS:
+        if explicit:
             logger.info(f"[ROUTER] Explicit agent field: {explicit}")
             return explicit
 

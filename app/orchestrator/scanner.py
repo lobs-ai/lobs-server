@@ -24,15 +24,13 @@ class Scanner:
         Returns tasks where:
         - status='active'
         - work_state in ('not_started', 'ready')
-        - agent is assigned (routed by PM)
+        - sync state is compatible with pickup
         """
         try:
             result = await self.db.execute(
                 select(Task).where(
                     Task.status == "active",
                     Task.work_state.in_(["not_started", "ready"]),
-                    Task.agent != None,
-                    Task.agent != "",
                     (Task.sync_state == None) | (Task.sync_state.in_(["synced", "local_changed"])),
                 )
             )
@@ -44,12 +42,12 @@ class Scanner:
             return []
 
     async def get_unrouted_tasks(self) -> list[dict[str, Any]]:
-        """Get tasks that need routing (no agent assigned, not started).
+        """Get active tasks with no explicit assignee (for diagnostics/UI).
         
         Returns tasks where:
         - status='active'
         - work_state in ('not_started', 'ready')
-        - agent is null or empty (needs PM routing)
+        - agent is null or empty
         """
         try:
             result = await self.db.execute(
