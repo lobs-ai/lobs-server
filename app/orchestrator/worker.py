@@ -902,6 +902,7 @@ class WorkerManager:
                             category=category or "unknown",
                             risk_tier=decision.risk_tier,
                             status="proposed",
+                            score=float(effort_int) if effort_int is not None else None,
                             rationale=(
                                 f"Proposed by {agent_type}. Initial policy signal={decision.approval_mode}. "
                                 f"Reason={decision.reason}"

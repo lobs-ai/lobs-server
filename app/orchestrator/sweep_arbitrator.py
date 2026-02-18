@@ -1,10 +1,11 @@
-"""Lobs sweep phase: dedupe initiatives, apply policy gates, and emit actions."""
+"""Lobs sweep phase: wait for full agent proposal set, filter bad ideas, dedupe, and route."""
 
 from __future__ import annotations
 
+import re
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -12,12 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AgentInitiative,
+    AgentReflection,
     InboxItem,
     OrchestratorSetting,
     SystemSweep,
 )
+from app.orchestrator.config import CONTROL_PLANE_AGENTS
 from app.orchestrator.policy_engine import PolicyEngine
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
+from app.orchestrator.registry import AgentRegistry
 
 DEFAULT_DAILY_BUDGET = {
     "writer": 4,
@@ -35,11 +39,29 @@ class SweepArbitrator:
         self.db = db
         self.policy = PolicyEngine()
         self.decision_engine = InitiativeDecisionEngine(db)
+        self.registry = AgentRegistry()
 
     async def run_once(self) -> dict[str, Any]:
+        batch_ready = await self._is_reflection_batch_ready()
+        if not batch_ready["ready"]:
+            return {
+                "proposed": 0,
+                "approved": 0,
+                "deferred": 0,
+                "lobs_review": 0,
+                "rejected": 0,
+                "waiting_for_agents": batch_ready.get("missing_agents", []),
+            }
+
         initiatives = await self._load_proposed_initiatives()
         if not initiatives:
-            return {"proposed": 0, "approved": 0, "deferred": 0, "lobs_review": 0, "rejected": 0}
+            return {
+                "proposed": 0,
+                "approved": 0,
+                "deferred": 0,
+                "lobs_review": 0,
+                "rejected": 0,
+            }
 
         start = datetime.now(timezone.utc)
         budgets = await self._load_daily_budgets()
@@ -48,11 +70,21 @@ class SweepArbitrator:
         lobs_review = 0
         rejected = 0
 
-        dedupe_map: dict[tuple[str, str], list[AgentInitiative]] = defaultdict(list)
-        for i in initiatives:
-            dedupe_map[(self._norm(i.category), self._norm(i.title))].append(i)
+        # First-pass quality filter: reject low-signal/bad ideas.
+        for initiative in initiatives:
+            bad_reason = self._bad_idea_reason(initiative)
+            if bad_reason:
+                initiative.status = "rejected"
+                initiative.rationale = (initiative.rationale or "") + f" | Rejected by quality gate: {bad_reason}"
+                rejected += 1
 
-        # reject duplicates except newest
+        # Dedupe by normalized title+description signature. Keep newest.
+        dedupe_map: dict[str, list[AgentInitiative]] = defaultdict(list)
+        for i in initiatives:
+            if i.status != "proposed":
+                continue
+            dedupe_map[self._dedupe_key(i)].append(i)
+
         for _k, bucket in dedupe_map.items():
             if len(bucket) <= 1:
                 continue
@@ -76,24 +108,30 @@ class SweepArbitrator:
             suggested_agent = await self.decision_engine.suggest_agent(initiative)
             initiative.owner_agent = suggested_agent
             owner = (suggested_agent or initiative.proposed_by_agent or "programmer").lower()
-            decision = self.policy.decide(initiative.category)
+            decision = self.policy.decide(
+                initiative.category,
+                estimated_effort=int(initiative.score) if initiative.score is not None else None,
+            )
             initiative.risk_tier = decision.risk_tier
 
             daily_limit = budgets.get(owner, 2)
             used = usage.get(owner, 0)
             budget_remaining = max(0, daily_limit - used)
 
-            recommendation = self._recommendation_for(decision.approval_mode, budget_remaining)
+            size = self._size_bucket(initiative, decision.approval_mode)
+            recommendation = self._recommendation_for(size=size, budget_remaining=budget_remaining)
 
-            # Lobs-governed autonomy: low/medium work is auto-approved by Lobs when budget allows.
-            if decision.approval_mode in {"auto", "soft_gate"} and budget_remaining > 0:
+            # Requested behavior:
+            # - small/medium -> auto create task (if budget allows)
+            # - large -> send to Rafe approval
+            if size in {"small", "medium"} and budget_remaining > 0:
                 await self.decision_engine.decide(
                     initiative,
                     decision="approve",
                     selected_agent=suggested_agent,
                     decision_summary=(
-                        f"Auto-approved by Lobs sweep ({decision.approval_mode}); "
-                        f"budget {used}/{daily_limit}; reason={decision.reason}"
+                        f"Auto-approved by Lobs sweep ({size}); "
+                        f"budget {used}/{daily_limit}; policy={decision.approval_mode}; reason={decision.reason}"
                     ),
                     decided_by="lobs",
                 )
@@ -101,14 +139,14 @@ class SweepArbitrator:
                 approved += 1
                 continue
 
-            if decision.approval_mode in {"auto", "soft_gate"} and budget_remaining <= 0:
+            if size in {"small", "medium"} and budget_remaining <= 0:
                 await self.decision_engine.decide(
                     initiative,
                     decision="defer",
                     selected_agent=suggested_agent,
                     decision_summary=(
                         f"Deferred by Lobs sweep due to budget cap {used}/{daily_limit}; "
-                        f"policy={decision.approval_mode}"
+                        f"size={size}; policy={decision.approval_mode}"
                     ),
                     decided_by="lobs",
                 )
@@ -117,7 +155,7 @@ class SweepArbitrator:
 
             initiative.status = "lobs_review"
             initiative.rationale = (
-                f"Rafe decision required. Recommendation={recommendation}. "
+                f"Rafe decision required for {size} initiative. Recommendation={recommendation}. "
                 f"Policy={decision.approval_mode}. Budget={used}/{daily_limit}. "
                 f"Reason={decision.reason}"
             )
@@ -129,6 +167,7 @@ class SweepArbitrator:
                 decision_reason=decision.reason,
                 approval_mode=decision.approval_mode,
                 suggested_agent=suggested_agent,
+                size=size,
             )
             lobs_review += 1
 
@@ -196,6 +235,35 @@ class SweepArbitrator:
             usage[owner] += 1
         return dict(usage)
 
+    async def _is_reflection_batch_ready(self) -> dict[str, Any]:
+        """Only sweep once every execution agent has completed a recent strategic reflection."""
+        execution_agents = [
+            a for a in self.registry.available_types() if a not in CONTROL_PLANE_AGENTS
+        ]
+        if not execution_agents:
+            return {"ready": True, "missing_agents": []}
+
+        since = datetime.now(timezone.utc) - timedelta(hours=8)
+        result = await self.db.execute(
+            select(AgentReflection).where(
+                AgentReflection.reflection_type == "strategic",
+                AgentReflection.created_at >= since,
+            )
+        )
+        rows = result.scalars().all()
+
+        # Backward-compatible fallback: if there are no recent strategic reflections,
+        # allow manual/testing initiative sweeps to proceed.
+        if not rows:
+            return {"ready": True, "missing_agents": []}
+
+        completed_agents = {
+            r.agent_type for r in rows if r.status == "completed" and (r.agent_type in execution_agents)
+        }
+
+        missing = [a for a in execution_agents if a not in completed_agents]
+        return {"ready": len(missing) == 0, "missing_agents": missing}
+
     async def _create_lobs_decision_item(
         self,
         initiative: AgentInitiative,
@@ -205,12 +273,14 @@ class SweepArbitrator:
         decision_reason: str,
         approval_mode: str,
         suggested_agent: str,
+        size: str,
     ) -> None:
         title = initiative.title or "Untitled initiative"
         severity = "HIGH" if initiative.risk_tier == "C" else "MEDIUM"
 
         content = (
             "Rafe decision required for high-impact initiative.\n\n"
+            f"Estimated size: {size}\n"
             f"Recommendation: {recommendation}\n"
             f"Policy mode: {approval_mode}\n"
             f"Budget usage: {budget}\n"
@@ -238,14 +308,59 @@ class SweepArbitrator:
         )
 
     @staticmethod
-    def _recommendation_for(approval_mode: str, budget_remaining: int) -> str:
-        if approval_mode == "hard_gate":
+    def _recommendation_for(*, size: str, budget_remaining: int) -> str:
+        if size == "large":
             return "review"
         if budget_remaining <= 0:
             return "defer"
-        if approval_mode == "auto":
-            return "approve"
-        return "review"
+        return "approve"
+
+    @staticmethod
+    def _size_bucket(initiative: AgentInitiative, approval_mode: str) -> str:
+        effort = int(initiative.score) if initiative.score is not None else None
+        if effort is not None:
+            if effort >= 7:
+                return "large"
+            if effort >= 4:
+                return "medium"
+            return "small"
+
+        if approval_mode == "hard_gate":
+            return "large"
+        if approval_mode == "soft_gate":
+            return "medium"
+        return "small"
+
+    @staticmethod
+    def _bad_idea_reason(initiative: AgentInitiative) -> str | None:
+        title = (initiative.title or "").strip()
+        desc = (initiative.description or "").strip()
+        joined = f"{title} {desc}".lower()
+
+        if len(title) < 6:
+            return "title too short"
+        if len(desc) < 12:
+            return "description too short"
+
+        blocked_patterns = [
+            r"\b(tbd|todo|n/a|none|unknown)\b",
+            r"^\?+$",
+            r"\bdo\s+nothing\b",
+            r"\bjust\s+vibes\b",
+        ]
+        for pattern in blocked_patterns:
+            if re.search(pattern, joined):
+                return f"low-signal content matched '{pattern}'"
+
+        return None
+
+    @staticmethod
+    def _dedupe_key(initiative: AgentInitiative) -> str:
+        normalized = " ".join(
+            re.sub(r"[^a-z0-9\s]", " ", f"{initiative.title or ''} {initiative.description or ''}".lower()).split()
+        )
+        category = " ".join((initiative.category or "").strip().lower().split())
+        return f"{category}|{normalized[:220]}"
 
     @staticmethod
     def _norm(value: str | None) -> str:
