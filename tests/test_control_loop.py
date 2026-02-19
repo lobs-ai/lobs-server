@@ -83,7 +83,7 @@ async def test_reflection_and_daily_compression_cadence(db_session):
     assert second.reflection_triggered is False
     assert second.compression_triggered is True
 
-    same_day_again = datetime(2026, 2, 17, 14, 0, tzinfo=timezone.utc)
+    same_day_again = datetime(2026, 2, 17, 13, 0, tzinfo=timezone.utc)
     third = await service.run_once(now_utc=same_day_again)
     assert third.compression_triggered is False
 
