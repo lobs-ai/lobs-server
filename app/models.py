@@ -297,8 +297,33 @@ class AgentReflection(Base):
     window_end = Column(DateTime)
     context_packet = Column(JSON)
     result = Column(JSON)
+    inefficiencies = Column(JSON)
+    system_risks = Column(JSON)
+    missed_opportunities = Column(JSON)
+    identity_adjustments = Column(JSON)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     completed_at = Column(DateTime)
+
+
+class DiagnosticTriggerEvent(Base):
+    """Auditable reactive diagnostic trigger events and outcomes."""
+    __tablename__ = "diagnostic_trigger_events"
+
+    id = Column(String, primary_key=True)
+    trigger_type = Column(String, nullable=False, index=True)
+    trigger_key = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, index=True)  # fired/suppressed/spawned/failed/completed
+    suppression_reason = Column(String)
+    agent_type = Column(String, index=True)
+    task_id = Column(String, ForeignKey("tasks.id"), index=True)
+    project_id = Column(String, ForeignKey("projects.id"), index=True)
+    trigger_payload = Column(JSON)
+    diagnostic_reflection_id = Column(String, ForeignKey("agent_reflections.id"), index=True)
+    diagnostic_result = Column(JSON)
+    remediation_task_ids = Column(JSON)
+    outcome = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
 class AgentInitiative(Base):
@@ -313,6 +338,8 @@ class AgentInitiative(Base):
     description = Column(Text)
     category = Column(String, nullable=False, index=True)
     risk_tier = Column(String, nullable=False, default="A", index=True)
+    policy_lane = Column(String, nullable=False, default="review_required", index=True)
+    policy_reason = Column(Text)
     status = Column(String, nullable=False, default="proposed", index=True)
     score = Column(Float)
     rationale = Column(Text)
@@ -324,6 +351,24 @@ class AgentInitiative(Base):
     learning_feedback = Column(Text)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class InitiativeDecisionRecord(Base):
+    """Auditable decision records for every initiative evaluated by Lobs."""
+    __tablename__ = "initiative_decision_records"
+
+    id = Column(String, primary_key=True)
+    initiative_id = Column(String, ForeignKey("agent_initiatives.id"), nullable=False, index=True)
+    sweep_id = Column(String, ForeignKey("system_sweeps.id"), index=True)
+    decision = Column(String, nullable=False, index=True)  # approve/defer/reject/review
+    decided_by = Column(String, nullable=False, default="lobs")
+    decision_summary = Column(Text)
+    overlap_with_ids = Column(JSON)
+    contradiction_with_ids = Column(JSON)
+    capability_gap = Column(Boolean, default=False, nullable=False)
+    source_reflection_ids = Column(JSON)
+    task_id = Column(String, ForeignKey("tasks.id"))
+    created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
 class AgentIdentityVersion(Base):
@@ -338,9 +383,13 @@ class AgentIdentityVersion(Base):
     version = Column(Integer, nullable=False)
     identity_text = Column(Text, nullable=False)
     summary = Column(Text)
-    active = Column(Boolean, default=True, nullable=False, index=True)
+    active = Column(Boolean, default=False, nullable=False, index=True)
     window_start = Column(DateTime)
     window_end = Column(DateTime)
+    changed_heuristics = Column(JSON)
+    removed_rules = Column(JSON)
+    validation_status = Column(String, nullable=False, default="pending", index=True)
+    validation_reason = Column(Text)
     created_at = Column(DateTime, default=func.now(), nullable=False)
 
 
@@ -557,19 +606,67 @@ class AgentProfile(Base):
 
 
 class RoutineRegistry(Base):
-    """Routine registry for automation policies."""
+    """Routine registry for automation policies.
+
+    Phase 3 expands the registry from a passive catalog to an executable schedule.
+
+    Notes:
+    - `execution_policy` controls what happens when a routine is due:
+      * auto: execute immediately
+      * notify: create a notification item, do not execute
+      * confirm: request confirmation via inbox item; requires manual trigger
+    - `schedule` is expected to be a 5-field cron expression (M H DOM MON DOW).
+    """
+
     __tablename__ = "routine_registry"
 
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False, unique=True)
     description = Column(Text)
-    trigger = Column(String)
-    schedule = Column(String)
-    policy_tier = Column(String, default="standard", nullable=False)
+
+    # Hook selection
+    trigger = Column(String)  # optional: category/grouping
+    hook = Column(String, nullable=True)  # execution hook key (e.g., "reflection_cycle")
+
+    # Scheduling
+    schedule = Column(String)  # cron expression
+    schedule_timezone = Column(String, nullable=False, default="UTC")
+    next_run_at = Column(DateTime, nullable=True, index=True)
+    last_run_at = Column(DateTime, nullable=True)
+
+    # Controls
     enabled = Column(Boolean, default=True, nullable=False)
+    paused_until = Column(DateTime, nullable=True)
+    cooldown_seconds = Column(Integer, nullable=True)
+    max_runs_per_day = Column(Integer, nullable=True)
+    pending_confirmation = Column(Boolean, default=False, nullable=False)
+
+    # Policy
+    execution_policy = Column(String, default="auto", nullable=False)  # auto|notify|confirm
+    # Backward compat with older clients/tests
+    policy_tier = Column(String, default="standard", nullable=False)
+
+    # Stats
+    run_count = Column(Integer, default=0, nullable=False)
+
     config = Column(JSON)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class RoutineAuditEvent(Base):
+    """Audit trail of routine scheduling/execution decisions."""
+
+    __tablename__ = "routine_audit_events"
+
+    id = Column(String, primary_key=True)
+    routine_id = Column(String, ForeignKey("routine_registry.id"), nullable=False, index=True)
+    routine_name = Column(String, nullable=False, index=True)
+    action = Column(String, nullable=False)  # due|executed|notified|confirmation_requested|error
+    status = Column(String, nullable=False, default="ok")  # ok|error
+    message = Column(Text)
+    event_metadata = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False, index=True)
 
 
 class KnowledgeRequest(Base):
@@ -627,3 +724,26 @@ class ModelPricing(Base):
     notes = Column(Text)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class ControlLoopEvent(Base):
+    """Durable control-loop event queue and audit trail."""
+    __tablename__ = "control_loop_events"
+
+    id = Column(String, primary_key=True)
+    event_type = Column(String, nullable=False, index=True)
+    status = Column(String, nullable=False, default="pending", index=True)  # pending/completed/failed/ignored
+    payload = Column(JSON)
+    result = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False, index=True)
+    processed_at = Column(DateTime)
+
+
+class ControlLoopHeartbeat(Base):
+    """Latest control-loop heartbeat for status/observability."""
+    __tablename__ = "control_loop_heartbeats"
+
+    id = Column(String, primary_key=True)
+    phase = Column(String, nullable=False)
+    last_heartbeat_at = Column(DateTime, nullable=False, index=True)
+    heartbeat_metadata = Column("metadata", JSON)

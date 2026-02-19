@@ -1,7 +1,11 @@
 """Tests for agents API endpoints."""
 
+import uuid
+
 import pytest
 from httpx import AsyncClient
+
+from app.models import AgentIdentityVersion
 
 
 @pytest.mark.asyncio
@@ -121,3 +125,62 @@ async def test_agent_status_with_stats(client: AsyncClient):
     data = response.json()
     assert data["stats"]["tasks_completed"] == 10
     assert data["stats"]["total_tokens"] == 50000
+
+
+@pytest.mark.asyncio
+async def test_list_agent_identity_versions(client: AsyncClient, db_session):
+    db_session.add_all(
+        [
+            AgentIdentityVersion(
+                id=str(uuid.uuid4()),
+                agent_type="programmer",
+                version=1,
+                identity_text="# v1",
+                active=False,
+                validation_status="passed",
+                changed_heuristics=["h1"],
+                removed_rules=[],
+            ),
+            AgentIdentityVersion(
+                id=str(uuid.uuid4()),
+                agent_type="programmer",
+                version=2,
+                identity_text="# v2",
+                active=True,
+                validation_status="passed",
+                changed_heuristics=["h2"],
+                removed_rules=["r1"],
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    response = await client.get("/api/agents/programmer/identity-versions")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data) == 2
+    assert data[0]["version"] == 2
+    assert data[1]["version"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_active_identity_version(client: AsyncClient, db_session):
+    db_session.add(
+        AgentIdentityVersion(
+            id=str(uuid.uuid4()),
+            agent_type="researcher",
+            version=3,
+            identity_text="# active",
+            active=True,
+            validation_status="passed",
+            changed_heuristics=["h"],
+            removed_rules=[],
+        )
+    )
+    await db_session.commit()
+
+    response = await client.get("/api/agents/researcher/identity-versions/active")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["version"] == 3
+    assert data["active"] is True

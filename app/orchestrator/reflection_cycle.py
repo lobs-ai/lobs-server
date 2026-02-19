@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentReflection, AgentIdentityVersion, SystemSweep
@@ -102,6 +102,10 @@ class ReflectionCycleManager:
         since = now - timedelta(hours=24)
 
         rewritten = 0
+        validations_failed = 0
+        changed_heuristics_total = 0
+        removed_rules_total = 0
+
         for agent in agents:
             reflections_result = await self.db.execute(
                 select(AgentReflection)
@@ -125,22 +129,68 @@ class ReflectionCycleManager:
             )
             max_version = version_q.scalar() or 0
 
-            compressed_text = self._compress_reflections(agent, reflections)
-
-            self.db.add(
-                AgentIdentityVersion(
-                    id=str(uuid.uuid4()),
-                    agent_type=agent,
-                    version=max_version + 1,
-                    identity_text=compressed_text,
-                    summary=f"Auto-compressed from {len(reflections)} reflections",
-                    active=True,
-                    window_start=since,
-                    window_end=now,
+            active_q = await self.db.execute(
+                select(AgentIdentityVersion)
+                .where(
+                    AgentIdentityVersion.agent_type == agent,
+                    AgentIdentityVersion.active.is_(True),
                 )
+                .order_by(AgentIdentityVersion.version.desc())
+                .limit(1)
+            )
+            previous_active = active_q.scalar_one_or_none()
+
+            compressed = self._compress_reflections(agent, reflections)
+            changed_heuristics = compressed["changed_heuristics"]
+            removed_rules = compressed["removed_rules"]
+
+            validation_ok, validation_reason = self._run_lobs_validation_gate(
+                identity_text=compressed["identity_text"],
+                changed_heuristics=changed_heuristics,
+                removed_rules=removed_rules,
             )
 
-            rewritten += 1
+            candidate = AgentIdentityVersion(
+                id=str(uuid.uuid4()),
+                agent_type=agent,
+                version=max_version + 1,
+                identity_text=compressed["identity_text"],
+                summary=f"Auto-compressed from {len(reflections)} reflections",
+                active=False,
+                window_start=since,
+                window_end=now,
+                changed_heuristics=changed_heuristics,
+                removed_rules=removed_rules,
+                validation_status="passed" if validation_ok else "failed",
+                validation_reason=validation_reason,
+            )
+            self.db.add(candidate)
+
+            if validation_ok:
+                await self.db.execute(
+                    update(AgentIdentityVersion)
+                    .where(
+                        and_(
+                            AgentIdentityVersion.agent_type == agent,
+                            AgentIdentityVersion.active.is_(True),
+                        )
+                    )
+                    .values(active=False)
+                )
+                candidate.active = True
+                rewritten += 1
+                changed_heuristics_total += len(changed_heuristics)
+                removed_rules_total += len(removed_rules)
+            else:
+                validations_failed += 1
+                if previous_active is not None:
+                    previous_active.active = True
+                logger.warning(
+                    "Daily identity compression validation failed for %s v%s: %s",
+                    agent,
+                    max_version + 1,
+                    validation_reason,
+                )
 
         sweep = SystemSweep(
             id=str(uuid.uuid4()),
@@ -148,14 +198,31 @@ class ReflectionCycleManager:
             status="completed",
             window_start=since,
             window_end=now,
-            summary={"agents": len(agents), "rewritten": rewritten},
-            decisions={"identity_rewrite": "created new version rows"},
+            summary={
+                "agents": len(agents),
+                "rewritten": rewritten,
+                "validation_failures": validations_failed,
+                "changed_heuristics": changed_heuristics_total,
+                "removed_rules": removed_rules_total,
+            },
+            decisions={
+                "identity_rewrite": "versioned rewrite with lobs validation gate",
+                "changed_heuristics": changed_heuristics_total,
+                "removed_rules": removed_rules_total,
+            },
             completed_at=now,
         )
         self.db.add(sweep)
         await self.db.commit()
 
-        return {"agents": len(agents), "rewritten": rewritten, "sweep_id": sweep.id}
+        return {
+            "agents": len(agents),
+            "rewritten": rewritten,
+            "validation_failures": validations_failed,
+            "changed_heuristics": changed_heuristics_total,
+            "removed_rules": removed_rules_total,
+            "sweep_id": sweep.id,
+        }
 
     @staticmethod
     def _build_reflection_prompt(agent: str, packet: dict[str, Any], reflection_id: str) -> str:
@@ -192,20 +259,83 @@ Return STRICT JSON with this schema (no prose outside JSON):
 """
 
     @staticmethod
-    def _compress_reflections(agent: str, reflections: list[AgentReflection]) -> str:
+    def _compress_reflections(agent: str, reflections: list[AgentReflection]) -> dict[str, Any]:
+        inefficiencies: list[str] = []
+        system_risks: list[str] = []
+        missed: list[str] = []
+        adjustments: list[str] = []
+
+        for reflection in reflections:
+            inefficiencies.extend(reflection.inefficiencies or [])
+            system_risks.extend(reflection.system_risks or [])
+            missed.extend(reflection.missed_opportunities or [])
+            adjustments.extend(reflection.identity_adjustments or [])
+
+        changed_heuristics = sorted({*adjustments, *missed})
+        removed_rules = sorted(set(inefficiencies[:3]))
+
+        success_count = sum(1 for r in reflections if r.status == "completed")
+        failure_count = sum(1 for r in reflections if r.status == "failed")
+
         lines = [
             f"# Identity Snapshot: {agent}",
             "",
-            f"Generated from {len(reflections)} recent reflections.",
+            f"Generated from {len(reflections)} reflections in prior 24h.",
             "",
-            "## Stable strengths",
-            "- Executes scoped work quickly when context is bounded.",
+            "## Performance patterns",
+            f"- Success reflections: {success_count}",
+            f"- Failure reflections: {failure_count}",
             "",
             "## Risk patterns",
-            "- Watch for repeated failures and stale backlogs.",
+        ]
+
+        if system_risks:
+            lines.extend([f"- {item}" for item in sorted(set(system_risks))[:5]])
+        else:
+            lines.append("- No major system risks surfaced in this window.")
+
+        lines.extend([
+            "",
+            "## Changed heuristics",
+        ])
+        if changed_heuristics:
+            lines.extend([f"- {item}" for item in changed_heuristics[:8]])
+        else:
+            lines.append("- No heuristic updates in this window.")
+
+        lines.extend([
+            "",
+            "## Removed rules",
+        ])
+        if removed_rules:
+            lines.extend([f"- {item}" for item in removed_rules])
+        else:
+            lines.append("- No rules removed in this window.")
+
+        lines.extend([
             "",
             "## Behavioral directives",
-            "- Prefer deterministic checks before proposing broad refactors.",
+            "- Prefer deterministic checks before broad refactors.",
             "- Raise cross-agent conflicts early.",
-        ]
-        return "\n".join(lines)
+            "- Keep changes scoped and reversible.",
+        ])
+
+        return {
+            "identity_text": "\n".join(lines),
+            "changed_heuristics": changed_heuristics,
+            "removed_rules": removed_rules,
+        }
+
+    @staticmethod
+    def _run_lobs_validation_gate(
+        identity_text: str,
+        changed_heuristics: list[str],
+        removed_rules: list[str],
+    ) -> tuple[bool, str | None]:
+        if not identity_text.strip():
+            return False, "identity artifact is empty"
+        if "## Behavioral directives" not in identity_text:
+            return False, "missing behavioral directives section"
+        if len(changed_heuristics) == 0 and len(removed_rules) == 0:
+            return False, "no meaningful identity deltas detected"
+        return True, None

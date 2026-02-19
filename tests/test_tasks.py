@@ -2,6 +2,9 @@
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
+
+from app.models import ControlLoopEvent
 
 
 @pytest.mark.asyncio
@@ -25,6 +28,28 @@ async def test_create_task(client: AsyncClient, sample_project):
     assert data["project_id"] == sample_project["id"]
     assert "created_at" in data
     assert "updated_at" in data
+
+
+@pytest.mark.asyncio
+async def test_create_task_emits_control_loop_event(client: AsyncClient, sample_project, db_session):
+    task_data = {
+        "id": "task-control-loop",
+        "title": "Route me",
+        "status": "inbox",
+        "project_id": sample_project["id"],
+        "sort_order": 0,
+        "pinned": False,
+    }
+    response = await client.post("/api/tasks", json=task_data)
+    assert response.status_code == 200
+
+    result = await db_session.execute(
+        select(ControlLoopEvent).where(ControlLoopEvent.event_type == "TaskCreated")
+    )
+    events = result.scalars().all()
+    assert len(events) == 1
+    assert events[0].status == "pending"
+    assert events[0].payload["task_id"] == "task-control-loop"
 
 
 @pytest.mark.asyncio

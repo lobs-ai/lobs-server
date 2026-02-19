@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AgentCapability, AgentInitiative, AgentReflection, Project, Task
+from app.models import AgentCapability, AgentInitiative, AgentReflection, InitiativeDecisionRecord, Project, Task
 
 
 class InitiativeDecisionEngine:
@@ -20,6 +20,10 @@ class InitiativeDecisionEngine:
         self.db = db
 
     async def suggest_agent(self, initiative: AgentInitiative) -> str:
+        agent, _has_capability_match = await self.suggest_agent_with_diagnostics(initiative)
+        return agent
+
+    async def suggest_agent_with_diagnostics(self, initiative: AgentInitiative) -> tuple[str, bool]:
         text = "\n".join(
             [
                 initiative.title or "",
@@ -30,8 +34,9 @@ class InitiativeDecisionEngine:
 
         result = await self.db.execute(select(AgentCapability))
         rows = result.scalars().all()
+        fallback = initiative.owner_agent or initiative.proposed_by_agent or "programmer"
         if not rows:
-            return initiative.owner_agent or initiative.proposed_by_agent
+            return fallback, False
 
         scores: dict[str, float] = defaultdict(float)
         for row in rows:
@@ -48,10 +53,10 @@ class InitiativeDecisionEngine:
             scores[row.agent_type] += overlap * float(row.confidence or 0.5)
 
         if not scores:
-            return initiative.owner_agent or initiative.proposed_by_agent
+            return fallback, False
 
         best_agent, _score = max(scores.items(), key=lambda item: item[1])
-        return best_agent
+        return best_agent, True
 
     async def decide(
         self,
@@ -65,6 +70,10 @@ class InitiativeDecisionEngine:
         decision_summary: str | None = None,
         learning_feedback: str | None = None,
         decided_by: str = "lobs",
+        sweep_id: str | None = None,
+        overlap_with_ids: list[str] | None = None,
+        contradiction_with_ids: list[str] | None = None,
+        capability_gap: bool = False,
     ) -> dict[str, Any]:
         decision = decision.strip().lower()
         if decision not in {"approve", "defer", "reject"}:
@@ -98,6 +107,22 @@ class InitiativeDecisionEngine:
         else:
             initiative.status = "rejected"
 
+        self.db.add(
+            InitiativeDecisionRecord(
+                id=str(uuid.uuid4()),
+                initiative_id=initiative.id,
+                sweep_id=sweep_id,
+                decision=decision,
+                decided_by=decided_by,
+                decision_summary=decision_summary,
+                overlap_with_ids=overlap_with_ids or [],
+                contradiction_with_ids=contradiction_with_ids or [],
+                capability_gap=bool(capability_gap),
+                source_reflection_ids=[initiative.source_reflection_id] if initiative.source_reflection_id else [],
+                task_id=initiative.task_id,
+            )
+        )
+
         await self._record_feedback_reflection(
             initiative,
             decision=decision,
@@ -130,7 +155,8 @@ class InitiativeDecisionEngine:
             raise ValueError("No project available for initiative task creation")
 
         notes = (
-            f"Converted by Lobs from initiative {initiative.id}.\n\n"
+            f"Converted by Lobs from initiative {initiative.id}.\n"
+            f"Source reflection: {initiative.source_reflection_id or 'unknown'}\n\n"
             f"Original proposer: {initiative.proposed_by_agent}\n"
             f"Category: {initiative.category}\n"
             f"Risk tier: {initiative.risk_tier}\n"

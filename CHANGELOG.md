@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
+- **Agent Lifecycle Documentation Set** — Added canonical docs for agent lifecycle architecture, operator recruitment/management playbook, and API contracts (`docs/agent-lifecycle-architecture.md`, `docs/agent-operations-playbook.md`, `docs/agent-api-contracts.md`)
 - **Task Improvements Roadmap (Phase 0.5–4 core)** — GitHub two-way sync metadata/conflict support, default inbox assignment for project-optional tasks, Intent Router v1, workspace tenancy/files/link graph APIs, governance registries (agent profiles + routines), and knowledge request model/backfill path
 - **Concurrent Agent Execution** — Removed agent locks; can now run up to 5 concurrent workers (multiple programmers/writers/etc in parallel on different projects)
 - **Enhanced Activity Endpoint** — `GET /api/worker/activity` captures agent result summaries from completed sessions

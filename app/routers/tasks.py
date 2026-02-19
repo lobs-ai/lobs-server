@@ -1,16 +1,17 @@
 """Task API endpoints."""
 
 import os
+import uuid
 from pathlib import Path
 from typing import Optional
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models import Task as TaskModel, Project as ProjectModel
+from app.models import Task as TaskModel, Project as ProjectModel, ControlLoopEvent
 from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate
 from app.config import settings
 from app.services.github_sync import GitHubSyncService
@@ -121,6 +122,20 @@ async def create_task(
 
     db_task = TaskModel(**payload)
     db.add(db_task)
+
+    db.add(ControlLoopEvent(
+        id=str(uuid.uuid4()),
+        event_type="TaskCreated",
+        status="pending",
+        payload={
+            "task_id": db_task.id,
+            "project_id": db_task.project_id,
+            "title": db_task.title,
+            "agent": db_task.agent,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+    ))
+
     await db.flush()
     await db.refresh(db_task)
     return Task.model_validate(db_task)

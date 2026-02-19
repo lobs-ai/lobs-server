@@ -32,6 +32,8 @@ from app.models import (
     Project,
     AgentReflection,
     AgentInitiative,
+    DiagnosticTriggerEvent,
+    OrchestratorSetting,
 )
 from app.orchestrator.config import (
     BASE_DIR,
@@ -49,6 +51,11 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 from app.orchestrator.policy_engine import PolicyEngine
+from app.orchestrator.runtime_settings import (
+    DEFAULT_RUNTIME_SETTINGS,
+    SETTINGS_KEY_DIAG_AUTO_REMEDIATION,
+    SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS,
+)
 from app.services.usage import log_usage_event, resolve_route_type
 
 logger = logging.getLogger(__name__)
@@ -892,7 +899,18 @@ class WorkerManager:
             payload = self._extract_json(summary)
             reflection.status = "completed" if succeeded else "failed"
             reflection.result = payload
+            reflection.inefficiencies = self._json_list(payload.get("inefficiencies_detected"))
+            reflection.system_risks = self._json_list(payload.get("system_risks"))
+            reflection.missed_opportunities = self._json_list(payload.get("missed_opportunities"))
+            reflection.identity_adjustments = self._json_list(payload.get("identity_adjustments"))
             reflection.completed_at = datetime.now(timezone.utc)
+
+            if reflection_type == "diagnostic":
+                await self._persist_diagnostic_event_outcome(
+                    reflection=reflection,
+                    payload=payload,
+                    succeeded=succeeded,
+                )
 
             if reflection_type == "strategic" and succeeded and isinstance(payload, dict):
                 initiatives = payload.get("proposed_initiatives") or []
@@ -916,11 +934,13 @@ class WorkerManager:
                             description=str(raw.get("description") or ""),
                             category=category or "unknown",
                             risk_tier=decision.risk_tier,
+                            policy_lane=decision.lane,
+                            policy_reason=decision.reason,
                             status="proposed",
                             score=float(effort_int) if effort_int is not None else None,
                             rationale=(
-                                f"Proposed by {agent_type}. Initial policy signal={decision.approval_mode}. "
-                                f"Reason={decision.reason}"
+                                f"Proposed by {agent_type}. Initial policy lane={decision.lane} "
+                                f"(mode={decision.approval_mode}). Reason={decision.reason}"
                             ),
                         )
                     )
@@ -930,6 +950,97 @@ class WorkerManager:
         except Exception as e:
             logger.warning("[WORKER] Failed to persist reflection output: %s", e, exc_info=True)
             await self.db.rollback()
+
+    async def _persist_diagnostic_event_outcome(
+        self,
+        *,
+        reflection: AgentReflection,
+        payload: dict[str, Any],
+        succeeded: bool,
+    ) -> None:
+        trigger = ((reflection.context_packet or {}).get("trigger") or {}) if isinstance(reflection.context_packet, dict) else {}
+        trigger_event_id = trigger.get("trigger_event_id")
+        if not trigger_event_id:
+            return
+
+        event = await self.db.get(DiagnosticTriggerEvent, str(trigger_event_id))
+        if event is None:
+            return
+
+        event.status = "completed" if succeeded else "failed"
+        event.diagnostic_result = payload
+
+        remediation_ids: list[str] = []
+        if succeeded and await self._auto_remediation_enabled() and isinstance(payload, dict):
+            remediation_ids = await self._create_remediation_tasks(event=event, payload=payload)
+
+        event.remediation_task_ids = remediation_ids
+        event.outcome = {
+            "succeeded": succeeded,
+            "recommended_actions": payload.get("recommended_actions") if isinstance(payload, dict) else None,
+            "remediation_tasks_created": len(remediation_ids),
+        }
+
+    async def _auto_remediation_enabled(self) -> bool:
+        result = await self.db.execute(
+            select(OrchestratorSetting).where(
+                OrchestratorSetting.key.in_([
+                    SETTINGS_KEY_DIAG_AUTO_REMEDIATION,
+                    SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS,
+                ])
+            )
+        )
+        settings = {row.key: row.value for row in result.scalars().all()}
+        merged = {**DEFAULT_RUNTIME_SETTINGS, **settings}
+        return bool(merged.get(SETTINGS_KEY_DIAG_AUTO_REMEDIATION, False))
+
+    async def _create_remediation_tasks(
+        self,
+        *,
+        event: DiagnosticTriggerEvent,
+        payload: dict[str, Any],
+    ) -> list[str]:
+        actions = payload.get("recommended_actions")
+        if not isinstance(actions, list):
+            return []
+
+        result = await self.db.execute(
+            select(OrchestratorSetting).where(OrchestratorSetting.key == SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS)
+        )
+        setting = result.scalar_one_or_none()
+        max_tasks = int((setting.value if setting else DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS]) or 0)
+        max_tasks = max(0, max_tasks)
+        created: list[str] = []
+
+        for raw in actions[:max_tasks]:
+            action = str(raw).strip()
+            if not action:
+                continue
+            task_id = str(uuid.uuid4())
+            self.db.add(
+                Task(
+                    id=task_id,
+                    title=f"Remediation: {action[:80]}",
+                    status="inbox",
+                    work_state="not_started",
+                    project_id=event.project_id,
+                    agent=event.agent_type,
+                    notes=(
+                        "Auto-created from diagnostic trigger event.\n"
+                        f"Trigger: {event.trigger_type}\n"
+                        f"Action: {action}\n"
+                    ),
+                )
+            )
+            created.append(task_id)
+
+        return created
+
+    @staticmethod
+    def _json_list(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if isinstance(item, (str, int, float))]
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:

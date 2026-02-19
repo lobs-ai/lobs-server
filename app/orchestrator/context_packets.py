@@ -14,6 +14,8 @@ from app.models import AgentInitiative, AgentReflection, Task, WorkerRun
 
 @dataclass
 class AgentContextPacket:
+    schema_version: str
+    packet_type: str
     agent_type: str
     generated_at: str
     recent_tasks_summary: list[dict[str, Any]]
@@ -41,13 +43,15 @@ class ContextPacketBuilder:
         backlog = await self._backlog(agent_type)
         metrics = await self._performance_metrics(agent_type, since)
         other_activity = await self._other_agent_activity(agent_type, since)
-        initiative_feedback = await self._initiative_feedback(agent_type, since)
+        initiatives = await self._active_initiatives(agent_type, since)
 
         return AgentContextPacket(
+            schema_version="agent-context-packet.v1",
+            packet_type="strategic_reflection_input",
             agent_type=agent_type,
             generated_at=now.isoformat(),
             recent_tasks_summary=recent_tasks,
-            active_initiatives=initiative_feedback,
+            active_initiatives=initiatives,
             backlog_summary=backlog,
             performance_metrics=metrics,
             other_agent_activity_summary=other_activity,
@@ -142,7 +146,7 @@ class ContextPacketBuilder:
             for t in tasks
         ]
 
-    async def _initiative_feedback(self, agent_type: str, since: datetime) -> list[dict[str, Any]]:
+    async def _active_initiatives(self, agent_type: str, since: datetime) -> list[dict[str, Any]]:
         reflections_result = await self.db.execute(
             select(AgentReflection)
             .where(
@@ -159,40 +163,41 @@ class ContextPacketBuilder:
             select(AgentInitiative)
             .where(
                 AgentInitiative.proposed_by_agent == agent_type,
-                AgentInitiative.updated_at >= since,
+                AgentInitiative.status.in_(["proposed", "approved", "in_progress"]),
             )
             .order_by(AgentInitiative.updated_at.desc())
             .limit(20)
         )
         initiatives = initiatives_result.scalars().all()
 
-        items: list[dict[str, Any]] = []
+        feedback_by_initiative: dict[str, dict[str, Any]] = {}
         for r in reflections:
             payload = r.result if isinstance(r.result, dict) else {}
-            items.append(
-                {
-                    "type": "feedback",
-                    "initiative_id": payload.get("initiative_id"),
+            initiative_id = payload.get("initiative_id")
+            if initiative_id and initiative_id not in feedback_by_initiative:
+                feedback_by_initiative[initiative_id] = {
                     "decision": payload.get("decision"),
                     "selected_agent": payload.get("selected_agent"),
                     "task_id": payload.get("task_id"),
                     "learning_feedback": payload.get("learning_feedback"),
                 }
-            )
 
+        items: list[dict[str, Any]] = []
         for i in initiatives:
             items.append(
                 {
-                    "type": "initiative_status",
                     "initiative_id": i.id,
                     "title": i.title,
                     "status": i.status,
+                    "category": i.category,
+                    "risk_tier": i.risk_tier,
                     "selected_agent": i.selected_agent,
                     "task_id": i.task_id,
+                    "last_feedback": feedback_by_initiative.get(i.id),
                 }
             )
 
-        return items[:30]
+        return items[:20]
 
     @staticmethod
     def _run_matches_agent(run: WorkerRun, agent_type: str) -> bool:

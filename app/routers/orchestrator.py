@@ -364,6 +364,8 @@ async def list_initiatives(
                 "description": row.description,
                 "category": row.category,
                 "risk_tier": row.risk_tier,
+                "policy_lane": row.policy_lane,
+                "policy_reason": row.policy_reason,
                 "status": row.status,
                 "rationale": row.rationale,
                 "decision_summary": row.decision_summary,

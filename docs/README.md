@@ -21,6 +21,9 @@ Index of design documents, implementation notes, and research findings.
 ## Design Documents
 
 ### Agent Coordination & Orchestration
+- **[agent-lifecycle-architecture.md](agent-lifecycle-architecture.md)** ✨ **NEW 2026-02-18** — Canonical lifecycle architecture (recruitment, execution, reflection/compression, DB-mediated coordination)
+- **[agent-operations-playbook.md](agent-operations-playbook.md)** ✨ **NEW 2026-02-18** — Operator runbook for recruiting and managing agent types end-to-end
+- **[agent-api-contracts.md](agent-api-contracts.md)** ✨ **NEW 2026-02-18** — Implemented API and model contracts for agent lifecycle/control loops
 - **[project-manager-agent.md](project-manager-agent.md)** — Project manager agent design (task routing, delegation, approval workflows)
 - **[tiered-approval-system.md](tiered-approval-system.md)** — Three-tier approval workflow (auto-approve, human review, escalate)
 - **[orchestrator-model-routing.md](orchestrator-model-routing.md)** — First-pass model router policy (complexity/criticality, fallback chain, audit logging)
@@ -53,6 +56,9 @@ Index of design documents, implementation notes, and research findings.
 | **Best practices** | [BEST_PRACTICES.md](BEST_PRACTICES.md) ✨ |
 | **Testing** | [TESTING.md](TESTING.md) |
 | **Known issues & limitations** | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
+| Agent lifecycle architecture | [agent-lifecycle-architecture.md](agent-lifecycle-architecture.md) ✨ |
+| Agent operations playbook | [agent-operations-playbook.md](agent-operations-playbook.md) ✨ |
+| Agent API contracts | [agent-api-contracts.md](agent-api-contracts.md) ✨ |
 | Project manager workflow | [project-manager-agent.md](project-manager-agent.md) |
 | Approval system overview | [tiered-approval-system.md](tiered-approval-system.md) |
 | Creating topics from agents | [researcher-topic-creation-design.md](researcher-topic-creation-design.md) |
@@ -71,6 +77,9 @@ Index of design documents, implementation notes, and research findings.
 - **Fixes** — Bug investigations and solutions (in `fixes/`)
 
 ## Recent Additions & Updates
+
+### 2026-02-18
+- ✅ **Agent lifecycle docs set** — Added canonical architecture, operations playbook, and API contracts for recruiting/managing agents and control-loop operations
 
 ### 2026-02-14 (Latest)
 - ✅ **BEST_PRACTICES.md** — Comprehensive development guidelines: N+1 query prevention, SQLite WAL optimization, Pydantic v2 patterns, API design, testing standards

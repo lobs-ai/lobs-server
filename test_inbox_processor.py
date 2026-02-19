@@ -84,44 +84,27 @@ def test_analyze_response():
 
 
 def test_agent_type_inference():
-    """Test agent type inference."""
+    """InboxProcessor no longer infers agent types implicitly.
+
+    Assignment is strict/explicit: unless the action includes an agent_type,
+    created tasks should be unassigned (None) so routing happens elsewhere.
+    """
     processor = InboxProcessor(MockDB())
-    
-    # Test researcher
-    item = MockInboxItem(
-        "Research alternatives",
-        "We need to investigate different database options"
-    )
-    agent_type = processor._infer_agent_type(item, "yes investigate this")
-    assert agent_type == "researcher", f"Expected researcher, got {agent_type}"
-    print("✓ Agent type inference (researcher) works")
-    
-    # Test programmer
-    item = MockInboxItem(
-        "Fix the bug",
-        "Implement error handling in the API"
-    )
-    agent_type = processor._infer_agent_type(item, "yes fix this")
-    assert agent_type == "programmer", f"Expected programmer, got {agent_type}"
-    print("✓ Agent type inference (programmer) works")
-    
-    # Test writer
-    item = MockInboxItem(
-        "Documentation needed",
-        "Write a guide for the new API endpoints"
-    )
-    agent_type = processor._infer_agent_type(item, "yes write the doc")
-    assert agent_type == "writer", f"Expected writer, got {agent_type}"
-    print("✓ Agent type inference (writer) works")
-    
-    # Test architect
-    item = MockInboxItem(
-        "System redesign",
-        "Design system for better scalability"
-    )
-    agent_type = processor._infer_agent_type(item, "yes design this")
-    assert agent_type == "architect", f"Expected architect, got {agent_type}"
-    print("✓ Agent type inference (architect) works")
+
+    cases = [
+        ("Research alternatives", "We need to investigate different database options", "yes investigate this"),
+        ("Fix the bug", "Implement error handling in the API", "yes fix this"),
+        ("Documentation needed", "Write a guide for the new API endpoints", "yes write the doc"),
+        ("System redesign", "Design system for better scalability", "yes design this"),
+    ]
+
+    for title, content, user_msg in cases:
+        item = MockInboxItem(title, content)
+        action = processor._analyze_response_fallback(user_msg, item)
+        assert action["type"] == "create_task"
+        assert action.get("agent_type") is None
+
+    print("✓ Agent type inference disabled (strict assignment) works")
 
 
 def test_project_extraction():

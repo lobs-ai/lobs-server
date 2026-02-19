@@ -4,12 +4,12 @@ import os
 import subprocess
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models import AgentStatus as AgentStatusModel
+from app.models import AgentIdentityVersion, AgentStatus as AgentStatusModel
 from app.schemas import AgentStatus, AgentStatusUpdate
 from app.config import settings
 
@@ -26,6 +26,21 @@ class AgentSetupResponse(BaseModel):
 class AgentFileContent(BaseModel):
     """Schema for agent file content."""
     content: str
+
+
+class AgentIdentityVersionResponse(BaseModel):
+    id: str
+    agent_type: str
+    version: int
+    identity_text: str
+    summary: str | None = None
+    active: bool
+    window_start: str | None = None
+    window_end: str | None = None
+    changed_heuristics: list[str] | None = None
+    removed_rules: list[str] | None = None
+    validation_status: str
+    validation_reason: str | None = None
 
 
 # Agent file storage directory (configurable via env)
@@ -56,6 +71,78 @@ async def get_agent_status(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
     return AgentStatus.model_validate(agent)
+
+
+@router.get("/{agent_type}/identity-versions")
+async def list_agent_identity_versions(
+    agent_type: str,
+    limit: int = settings.DEFAULT_LIMIT,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+) -> list[AgentIdentityVersionResponse]:
+    """List immutable identity versions for an agent (history is queryable)."""
+    query = (
+        select(AgentIdentityVersion)
+        .where(AgentIdentityVersion.agent_type == agent_type)
+        .order_by(AgentIdentityVersion.version.desc())
+        .offset(offset)
+        .limit(min(limit, settings.MAX_LIMIT))
+    )
+    result = await db.execute(query)
+    rows = result.scalars().all()
+    return [
+        AgentIdentityVersionResponse(
+            id=row.id,
+            agent_type=row.agent_type,
+            version=row.version,
+            identity_text=row.identity_text,
+            summary=row.summary,
+            active=row.active,
+            window_start=row.window_start.isoformat() if row.window_start else None,
+            window_end=row.window_end.isoformat() if row.window_end else None,
+            changed_heuristics=row.changed_heuristics,
+            removed_rules=row.removed_rules,
+            validation_status=row.validation_status,
+            validation_reason=row.validation_reason,
+        )
+        for row in rows
+    ]
+
+
+@router.get("/{agent_type}/identity-versions/active")
+async def get_active_identity_version(
+    agent_type: str,
+    db: AsyncSession = Depends(get_db),
+) -> AgentIdentityVersionResponse:
+    """Get active identity version for an agent."""
+    result = await db.execute(
+        select(AgentIdentityVersion)
+        .where(
+            and_(
+                AgentIdentityVersion.agent_type == agent_type,
+                AgentIdentityVersion.active.is_(True),
+            )
+        )
+        .order_by(AgentIdentityVersion.version.desc())
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="No active identity version found")
+    return AgentIdentityVersionResponse(
+        id=row.id,
+        agent_type=row.agent_type,
+        version=row.version,
+        identity_text=row.identity_text,
+        summary=row.summary,
+        active=row.active,
+        window_start=row.window_start.isoformat() if row.window_start else None,
+        window_end=row.window_end.isoformat() if row.window_end else None,
+        changed_heuristics=row.changed_heuristics,
+        removed_rules=row.removed_rules,
+        validation_status=row.validation_status,
+        validation_reason=row.validation_reason,
+    )
 
 
 @router.put("/{agent_type}")

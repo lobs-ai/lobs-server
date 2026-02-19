@@ -24,12 +24,14 @@ from app.orchestrator.monitor_enhanced import MonitorEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.scheduler import EventScheduler
+from app.orchestrator.routine_runner import RoutineRunner
 from app.orchestrator.inbox_processor import InboxProcessor
 from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
+from app.orchestrator.control_loop import LobsControlLoopService
 from app.orchestrator.config import POLL_INTERVAL
-from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem
+from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat
 from app.services.github_sync import GitHubSyncService
 from app.services.openclaw_models import fetch_openclaw_model_catalog
 from sqlalchemy import select
@@ -42,6 +44,7 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
+    SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,12 +75,14 @@ class OrchestratorEngine:
         self.last_poll = 0.0
         self._last_scheduler_check = 0.0
         self._scheduler_interval = 60  # Check events every 60 seconds
+        self._last_routine_check = 0.0
+        self._routine_interval = 60  # Check routine registry every 60 seconds
         self._last_inbox_check = 0.0
         self._inbox_interval = 45  # Process inbox every 45 seconds
         self._last_reflection_check = 0.0
         self._reflection_interval = 21600  # every 6 hours
-        self._daily_compression_hour_utc = 8
-        self._last_daily_compression_date: str | None = None
+        self._daily_compression_hour_et = 3
+        self._last_daily_compression_date_et: str | None = None
         self._last_capability_sync = 0.0
         self._capability_sync_interval = 3600  # every hour
         self._last_sweep_check = 0.0
@@ -237,6 +242,29 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Scheduler check failed: {e}", exc_info=True)
                     await db.rollback()
 
+            # 1a. Check routine registry (every 60 seconds)
+            if current_time - self._last_routine_check >= self._routine_interval:
+                try:
+                    runner = RoutineRunner(db, hooks={
+                        # Built-in no-op hook for smoke tests and manual triggers.
+                        "noop": (lambda _r: asyncio.sleep(0, result={"hook": "noop", "status": "ok"})),
+                    })
+                    routine_result = await runner.process_due_routines(limit=10)
+                    if routine_result.executed or routine_result.notified or routine_result.confirmation_requested:
+                        activity = True
+                        logger.info(
+                            "[ENGINE] Routines processed: executed=%s notified=%s confirm=%s errors=%s",
+                            routine_result.executed,
+                            routine_result.notified,
+                            routine_result.confirmation_requested,
+                            routine_result.errors,
+                        )
+                    self._last_routine_check = current_time
+                    await db.commit()
+                except Exception as e:
+                    logger.error("[ENGINE] Routine registry check failed: %s", e, exc_info=True)
+                    await db.rollback()
+
             # 1b. Sync GitHub-backed projects (every 2 minutes)
             if current_time - self._last_github_sync_check >= self._github_sync_interval:
                 try:
@@ -353,56 +381,61 @@ class OrchestratorEngine:
                 except Exception as e:
                     logger.error("[ENGINE] Capability sync failed: %s", e, exc_info=True)
 
-            # 4. Strategic reflection cycle (every 6 hours)
-            if (
-                not self._paused
-                and self._openclaw_available
-                and current_time - self._last_reflection_check >= self._reflection_interval
-            ):
+            # 4. Lobs-as-PM control loop phases (event handling + reflection + daily compression)
+            if not self._paused:
                 try:
-                    reflection_result = await reflection_manager.run_strategic_reflection_cycle()
-                    if reflection_result.get("spawned", 0) > 0:
-                        activity = True
-                    self._last_reflection_check = current_time
+                    async def _run_reflection() -> dict[str, Any]:
+                        reflection_result = await reflection_manager.run_strategic_reflection_cycle()
+                        self._last_reflection_check = current_time
 
-                    # Persist reflection anchor across restarts.
-                    last_run_iso = datetime.now(timezone.utc).isoformat()
-                    anchor = await db.get(OrchestratorSetting, SETTINGS_KEY_REFLECTION_LAST_RUN_AT)
-                    if anchor is None:
-                        anchor = OrchestratorSetting(key=SETTINGS_KEY_REFLECTION_LAST_RUN_AT, value=last_run_iso)
-                        db.add(anchor)
-                    else:
-                        anchor.value = last_run_iso
-                    await db.commit()
+                        # Persist reflection anchor across restarts.
+                        last_run_iso = datetime.now(timezone.utc).isoformat()
+                        anchor = await db.get(OrchestratorSetting, SETTINGS_KEY_REFLECTION_LAST_RUN_AT)
+                        if anchor is None:
+                            anchor = OrchestratorSetting(key=SETTINGS_KEY_REFLECTION_LAST_RUN_AT, value=last_run_iso)
+                            db.add(anchor)
+                        else:
+                            anchor.value = last_run_iso
+                        return reflection_result
 
-                    logger.info(
-                        "[ENGINE] Strategic reflection cycle: agents=%s spawned=%s",
-                        reflection_result.get("agents", 0),
-                        reflection_result.get("spawned", 0),
+                    async def _run_compression() -> dict[str, Any]:
+                        daily_result = await reflection_manager.run_daily_compression()
+                        return daily_result
+
+                    async def _route_task_created(payload: dict[str, Any]) -> bool:
+                        task_id = payload.get("task_id")
+                        if not task_id:
+                            return False
+                        db_task = await db.get(TaskModel, task_id)
+                        if db_task is None or db_task.agent:
+                            return False
+                        return await self._request_lobs_assignment(db, {
+                            "id": db_task.id,
+                            "project_id": db_task.project_id,
+                            "title": db_task.title,
+                            "notes": db_task.notes,
+                            "agent": db_task.agent,
+                        })
+
+                    control_loop = LobsControlLoopService(
+                        db,
+                        reflection_interval_seconds=self._reflection_interval,
+                        reflection_last_run_at=self._last_reflection_check,
+                        compression_hour_et=self._daily_compression_hour_et,
+                        last_compression_date_et=self._last_daily_compression_date_et,
+                        run_reflection=_run_reflection,
+                        run_daily_compression=_run_compression,
+                        route_task_created=_route_task_created,
                     )
+                    loop_result = await control_loop.run_once()
+                    self._last_reflection_check = control_loop.reflection_last_run_at
+                    self._last_daily_compression_date_et = control_loop.last_compression_date_et
+
+                    if loop_result.events_processed > 0 or loop_result.reflection_triggered or loop_result.compression_triggered:
+                        activity = True
                 except Exception as e:
-                    logger.error("[ENGINE] Reflection cycle failed: %s", e, exc_info=True)
+                    logger.error("[ENGINE] Lobs control loop failed: %s", e, exc_info=True)
                     await db.rollback()
-
-            # 3a. Daily compression sweep (~03:00 UTC-triggered daily guard)
-            try:
-                now_utc = datetime.now(timezone.utc)
-                today_key = now_utc.date().isoformat()
-                if (
-                    self._last_daily_compression_date != today_key
-                    and now_utc.hour >= self._daily_compression_hour_utc
-                ):
-                    daily_result = await reflection_manager.run_daily_compression()
-                    self._last_daily_compression_date = today_key
-                    if daily_result.get("rewritten", 0) > 0:
-                        activity = True
-                    logger.info(
-                        "[ENGINE] Daily compression sweep: rewritten=%s",
-                        daily_result.get("rewritten", 0),
-                    )
-            except Exception as e:
-                logger.error("[ENGINE] Daily compression failed: %s", e, exc_info=True)
-                await db.rollback()
 
             # 5. Lobs sweep/arbitration (every 15 minutes)
             if current_time - self._last_sweep_check >= self._sweep_interval:
@@ -603,6 +636,7 @@ class OrchestratorEngine:
             SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
             SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
             SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
+            SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
         )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
@@ -620,19 +654,18 @@ class OrchestratorEngine:
         self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
         self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
         self._openclaw_model_sync_interval = _as_int(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS)
+        # Prefer ET-local setting; fall back to legacy UTC key for compatibility.
+        daily_hour_raw = rows.get(
+            SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
+            rows.get(
+                SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
+                DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET],
+            ),
+        )
         try:
-            self._daily_compression_hour_utc = max(
-                0,
-                min(
-                    23,
-                    int(rows.get(
-                        SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
-                        DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC],
-                    )),
-                ),
-            )
+            self._daily_compression_hour_et = max(0, min(23, int(daily_hour_raw)))
         except Exception:
-            self._daily_compression_hour_utc = int(DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC])
+            self._daily_compression_hour_et = int(DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET])
 
         # Load persistent reflection anchor so restarts don't reset the 6h cadence.
         if not self._reflection_anchor_loaded:
@@ -657,12 +690,23 @@ class OrchestratorEngine:
             worker_status = await self._worker_manager.get_worker_status()
             agent_statuses = await agent_tracker.get_all_statuses()
 
+            heartbeat = await db.get(ControlLoopHeartbeat, "main")
+
             return {
                 "running": self._running,
                 "paused": self._paused,
                 "worker": worker_status,
                 "agents": agent_statuses,
-                "poll_interval": POLL_INTERVAL
+                "poll_interval": POLL_INTERVAL,
+                "control_loop": {
+                    "reflection_interval_seconds": self._reflection_interval,
+                    "daily_compression_hour_et": self._daily_compression_hour_et,
+                    "last_reflection_check": datetime.fromtimestamp(self._last_reflection_check, tz=timezone.utc).isoformat() if self._last_reflection_check else None,
+                    "last_daily_compression_date_et": self._last_daily_compression_date_et,
+                    "last_heartbeat": heartbeat.last_heartbeat_at.isoformat() if heartbeat else None,
+                    "heartbeat_phase": heartbeat.phase if heartbeat else None,
+                    "heartbeat_metadata": heartbeat.heartbeat_metadata if heartbeat else None,
+                },
             }
 
     async def get_worker_details(self) -> list[dict[str, Any]]:

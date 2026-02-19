@@ -878,10 +878,27 @@ class AgentProfile(AgentProfileBase):
 class RoutineRegistryBase(BaseModel):
     name: str
     description: Optional[str] = None
+
     trigger: Optional[str] = None
+    hook: Optional[str] = None
+
     schedule: Optional[str] = None
-    policy_tier: str = "standard"
+    schedule_timezone: str = "UTC"
+    next_run_at: Optional[datetime] = None
+    last_run_at: Optional[datetime] = None
+
     enabled: bool = True
+    paused_until: Optional[datetime] = None
+    cooldown_seconds: Optional[int] = None
+    max_runs_per_day: Optional[int] = None
+    pending_confirmation: bool = False
+
+    execution_policy: str = "auto"  # auto|notify|confirm
+    # Backward compat: retained for older clients
+    policy_tier: str = "standard"
+
+    run_count: int = 0
+
     config: Optional[Any] = None
 
 
@@ -893,6 +910,25 @@ class RoutineRegistry(RoutineRegistryBase):
     id: str
     created_at: datetime
     updated_at: datetime
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RoutineAuditEventBase(BaseModel):
+    routine_id: str
+    routine_name: str
+    action: str
+    status: str = "ok"
+    message: Optional[str] = None
+    event_metadata: Optional[Any] = None
+
+
+class RoutineAuditEventCreate(RoutineAuditEventBase):
+    id: str
+
+
+class RoutineAuditEvent(RoutineAuditEventBase):
+    id: str
+    created_at: datetime
     model_config = ConfigDict(from_attributes=True)
 
 

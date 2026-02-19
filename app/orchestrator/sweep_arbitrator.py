@@ -64,8 +64,11 @@ class SweepArbitrator:
             }
 
         start = datetime.now(timezone.utc)
+        sweep_id = str(uuid.uuid4())
         budgets = await self._load_daily_budgets()
         usage = await self._daily_budget_usage()
+        overlap_map, contradiction_map = self._detect_relationships(initiatives)
+        capability_gap_map: dict[str, bool] = {}
 
         lobs_review = 0
         rejected = 0
@@ -105,7 +108,9 @@ class SweepArbitrator:
             if initiative.status != "proposed":
                 continue
 
-            suggested_agent = await self.decision_engine.suggest_agent(initiative)
+            suggested_agent, has_capability_match = await self.decision_engine.suggest_agent_with_diagnostics(initiative)
+            capability_gap = not has_capability_match
+            capability_gap_map[initiative.id] = capability_gap
             initiative.owner_agent = suggested_agent
             owner = (suggested_agent or initiative.proposed_by_agent or "programmer").lower()
             decision = self.policy.decide(
@@ -113,6 +118,8 @@ class SweepArbitrator:
                 estimated_effort=int(initiative.score) if initiative.score is not None else None,
             )
             initiative.risk_tier = decision.risk_tier
+            initiative.policy_lane = decision.lane
+            initiative.policy_reason = decision.reason
 
             daily_limit = budgets.get(owner, 2)
             used = usage.get(owner, 0)
@@ -120,44 +127,105 @@ class SweepArbitrator:
 
             size = self._size_bucket(initiative, decision.approval_mode)
             recommendation = self._recommendation_for(size=size, budget_remaining=budget_remaining)
+            contradiction_ids = contradiction_map.get(initiative.id, [])
+            overlap_ids = overlap_map.get(initiative.id, [])
 
-            # Requested behavior:
-            # - small/medium -> auto create task (if budget allows)
-            # - large -> send to Rafe approval
-            if size in {"small", "medium"} and budget_remaining > 0:
-                await self.decision_engine.decide(
-                    initiative,
-                    decision="approve",
-                    selected_agent=suggested_agent,
-                    decision_summary=(
-                        f"Auto-approved by Lobs sweep ({size}); "
-                        f"budget {used}/{daily_limit}; policy={decision.approval_mode}; reason={decision.reason}"
-                    ),
-                    decided_by="lobs",
+            if contradiction_ids:
+                initiative.status = "lobs_review"
+                initiative.rationale = (
+                    (initiative.rationale or "")
+                    + f" | Contradiction detected with initiatives: {', '.join(contradiction_ids)}"
                 )
-                usage[owner] = used + 1
-                approved += 1
-                continue
-
-            if size in {"small", "medium"} and budget_remaining <= 0:
+                await self._create_lobs_decision_item(
+                    initiative,
+                    recommendation="review",
+                    budget=f"{used}/{daily_limit}",
+                    decision_reason="Contradictory initiatives detected in reflection sweep",
+                    approval_mode=decision.approval_mode,
+                    suggested_agent=suggested_agent,
+                    size=size,
+                )
                 await self.decision_engine.decide(
                     initiative,
                     decision="defer",
                     selected_agent=suggested_agent,
-                    decision_summary=(
-                        f"Deferred by Lobs sweep due to budget cap {used}/{daily_limit}; "
-                        f"size={size}; policy={decision.approval_mode}"
-                    ),
+                    decision_summary="Deferred for human review due to contradiction detection.",
                     decided_by="lobs",
+                    sweep_id=sweep_id,
+                    overlap_with_ids=overlap_ids,
+                    contradiction_with_ids=contradiction_ids,
+                    capability_gap=capability_gap,
                 )
-                deferred += 1
+                lobs_review += 1
                 continue
 
-            initiative.status = "lobs_review"
-            initiative.rationale = (
-                f"Rafe decision required for {size} initiative. Recommendation={recommendation}. "
-                f"Policy={decision.approval_mode}. Budget={used}/{daily_limit}. "
-                f"Reason={decision.reason}"
+            if decision.lane == "blocked":
+                await self.decision_engine.decide(
+                    initiative,
+                    decision="reject",
+                    selected_agent=suggested_agent,
+                    decision_summary=(
+                        f"Rejected by policy lane. category={initiative.category}; "
+                        f"reason={decision.reason}; size={size}; budget={used}/{daily_limit}"
+                    ),
+                    decided_by="lobs",
+                    sweep_id=sweep_id,
+                    overlap_with_ids=overlap_ids,
+                    contradiction_with_ids=contradiction_ids,
+                    capability_gap=capability_gap,
+                )
+                rejected += 1
+                continue
+
+            if decision.lane == "auto_allowed":
+                if budget_remaining > 0:
+                    await self.decision_engine.decide(
+                        initiative,
+                        decision="approve",
+                        selected_agent=suggested_agent,
+                        decision_summary=(
+                            f"Auto-approved by Lobs sweep ({size}); lane={decision.lane}; "
+                            f"budget {used}/{daily_limit}; reason={decision.reason}"
+                        ),
+                        decided_by="lobs",
+                        sweep_id=sweep_id,
+                        overlap_with_ids=overlap_ids,
+                        contradiction_with_ids=contradiction_ids,
+                        capability_gap=capability_gap,
+                    )
+                    usage[owner] = used + 1
+                    approved += 1
+                else:
+                    await self.decision_engine.decide(
+                        initiative,
+                        decision="defer",
+                        selected_agent=suggested_agent,
+                        decision_summary=(
+                            f"Deferred by Lobs sweep due to budget cap {used}/{daily_limit}; "
+                            f"lane={decision.lane}; size={size}"
+                        ),
+                        decided_by="lobs",
+                        sweep_id=sweep_id,
+                        overlap_with_ids=overlap_ids,
+                        contradiction_with_ids=contradiction_ids,
+                        capability_gap=capability_gap,
+                    )
+                    deferred += 1
+                continue
+
+            await self.decision_engine.decide(
+                initiative,
+                decision="defer",
+                selected_agent=suggested_agent,
+                decision_summary=(
+                    f"Deferred for Lobs review. Recommendation={recommendation}. "
+                    f"Lane={decision.lane}. Budget={used}/{daily_limit}. Reason={decision.reason}"
+                ),
+                decided_by="lobs",
+                sweep_id=sweep_id,
+                overlap_with_ids=overlap_ids,
+                contradiction_with_ids=contradiction_ids,
+                capability_gap=capability_gap,
             )
 
             await self._create_lobs_decision_item(
@@ -171,8 +239,10 @@ class SweepArbitrator:
             )
             lobs_review += 1
 
+        capability_gaps = [i.id for i, is_gap in capability_gap_map.items() if is_gap]
+
         sweep = SystemSweep(
-            id=str(uuid.uuid4()),
+            id=sweep_id,
             sweep_type="initiative_sweep",
             status="completed",
             window_start=start,
@@ -183,8 +253,18 @@ class SweepArbitrator:
                 "deferred": deferred,
                 "lobs_review": lobs_review,
                 "rejected": rejected,
+                "contradictions": sum(1 for v in contradiction_map.values() if v),
+                "overlap_candidates": sum(1 for v in overlap_map.values() if v),
+                "capability_gaps": len(capability_gaps),
             },
-            decisions={"budgets": budgets, "usage": usage, "mode": "lobs_governed"},
+            decisions={
+                "budgets": budgets,
+                "usage": usage,
+                "mode": "lobs_governed",
+                "overlap_map": {k: v for k, v in overlap_map.items() if v},
+                "contradiction_map": {k: v for k, v in contradiction_map.items() if v},
+                "capability_gaps": capability_gaps,
+            },
             completed_at=datetime.now(timezone.utc),
         )
         self.db.add(sweep)
@@ -279,10 +359,11 @@ class SweepArbitrator:
         severity = "HIGH" if initiative.risk_tier == "C" else "MEDIUM"
 
         content = (
-            "Rafe decision required for high-impact initiative.\n\n"
+            "Rafe decision required for policy-gated initiative.\n\n"
             f"Estimated size: {size}\n"
             f"Recommendation: {recommendation}\n"
             f"Policy mode: {approval_mode}\n"
+            f"Policy lane: {initiative.policy_lane or 'review_required'}\n"
             f"Budget usage: {budget}\n"
             f"Reason: {decision_reason}\n"
             f"Suggested execution agent: {suggested_agent}\n\n"
@@ -330,6 +411,47 @@ class SweepArbitrator:
         if approval_mode == "soft_gate":
             return "medium"
         return "small"
+
+    def _detect_relationships(self, initiatives: list[AgentInitiative]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        overlap_map: dict[str, list[str]] = defaultdict(list)
+        contradiction_map: dict[str, list[str]] = defaultdict(list)
+
+        for i, left in enumerate(initiatives):
+            left_text = self._norm(f"{left.title or ''} {left.description or ''}")
+            left_tokens = set(tok for tok in left_text.split() if len(tok) > 3)
+            left_dir = self._direction(left_text)
+            for right in initiatives[i + 1 :]:
+                if left.id == right.id:
+                    continue
+                right_text = self._norm(f"{right.title or ''} {right.description or ''}")
+                right_tokens = set(tok for tok in right_text.split() if len(tok) > 3)
+                if not left_tokens or not right_tokens:
+                    continue
+
+                overlap = len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
+                same_category = self._norm(left.category) == self._norm(right.category)
+                if same_category and overlap >= 0.5:
+                    overlap_map[left.id].append(right.id)
+                    overlap_map[right.id].append(left.id)
+
+                right_dir = self._direction(right_text)
+                if same_category and overlap >= 0.3 and left_dir and right_dir and left_dir != right_dir:
+                    contradiction_map[left.id].append(right.id)
+                    contradiction_map[right.id].append(left.id)
+
+        return dict(overlap_map), dict(contradiction_map)
+
+    @staticmethod
+    def _direction(text: str) -> str | None:
+        positive = ["increase", "expand", "add", "enable", "raise", "more"]
+        negative = ["decrease", "reduce", "remove", "disable", "lower", "less"]
+        pos = any(tok in text for tok in positive)
+        neg = any(tok in text for tok in negative)
+        if pos and not neg:
+            return "up"
+        if neg and not pos:
+            return "down"
+        return None
 
     @staticmethod
     def _bad_idea_reason(initiative: AgentInitiative) -> str | None:

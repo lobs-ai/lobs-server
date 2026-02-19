@@ -1,4 +1,4 @@
-"""Policy engine for initiative autonomy and approval gating."""
+"""Policy engine for initiative autonomy lanes and approval gating."""
 
 from __future__ import annotations
 
@@ -6,20 +6,25 @@ from dataclasses import dataclass
 from typing import Iterable
 
 
-AUTO_APPROVE_CATEGORIES = {
+AUTO_ALLOWED_CATEGORIES = {
+    # Writer routine maintenance
     "docs_sync",
+    "writer_doc_freshness_maintenance",
+    # Researcher bounded exploration
+    "light_research",
+    "research_bounded_exploration",
+    # General hygiene
     "test_hygiene",
     "stale_triage",
-    "light_research",
 }
 
-SOFT_APPROVE_CATEGORIES = {
+REVIEW_REQUIRED_CATEGORIES = {
     "backlog_reprioritization",
     "automation_proposal",
     "moderate_refactor",
 }
 
-HARD_APPROVE_CATEGORIES = {
+BLOCKED_CATEGORIES = {
     "architecture_change",
     "destructive_operation",
     "cross_project_migration",
@@ -32,48 +37,54 @@ class PolicyDecision:
     """Result of policy evaluation for a proposed initiative."""
 
     risk_tier: str  # A/B/C
-    approval_mode: str  # auto/soft_gate/hard_gate
+    lane: str  # auto_allowed/review_required/blocked
+    approval_mode: str  # auto/soft_gate/hard_gate (backward compatibility)
     reason: str
 
 
 class PolicyEngine:
-    """Classifies initiatives into autonomy tiers."""
+    """Classifies initiatives into explicit proactivity lanes."""
 
     def decide(self, category: str, *, estimated_effort: int | None = None) -> PolicyDecision:
         normalized = (category or "").strip().lower()
 
-        if normalized in AUTO_APPROVE_CATEGORIES:
+        if normalized in AUTO_ALLOWED_CATEGORIES:
             return PolicyDecision(
                 risk_tier="A",
+                lane="auto_allowed",
                 approval_mode="auto",
-                reason="low-risk recurring maintenance",
+                reason="routine maintenance within autonomous lane",
             )
 
-        if normalized in SOFT_APPROVE_CATEGORIES:
+        if normalized in REVIEW_REQUIRED_CATEGORIES:
             return PolicyDecision(
                 risk_tier="B",
+                lane="review_required",
                 approval_mode="soft_gate",
-                reason="moderate impact; allow with governance visibility",
+                reason="new-scope or moderate-impact initiative requires Lobs review",
             )
 
-        if normalized in HARD_APPROVE_CATEGORIES:
+        if normalized in BLOCKED_CATEGORIES:
             return PolicyDecision(
                 risk_tier="C",
+                lane="blocked",
                 approval_mode="hard_gate",
-                reason="high-impact or irreversible change",
+                reason="high-risk category is blocked pending explicit override",
             )
 
         if estimated_effort is not None and estimated_effort <= 2:
             return PolicyDecision(
                 risk_tier="A",
+                lane="auto_allowed",
                 approval_mode="auto",
                 reason="small bounded task under effort threshold",
             )
 
         return PolicyDecision(
             risk_tier="B",
+            lane="review_required",
             approval_mode="soft_gate",
-            reason="unknown category defaults to supervised autonomy",
+            reason="unknown category defaults to review-required lane",
         )
 
     @staticmethod
