@@ -43,6 +43,12 @@ async def list_tasks(
     if owner:
         query = query.where(TaskModel.owner == owner)
     
+    # IMPORTANT: apply a deterministic ordering before pagination.
+    # Without ORDER BY, SQLite can return rows in an arbitrary order; with a LIMIT
+    # this can make newly-created tasks “disappear” from the client after a reload
+    # when the task falls outside the first page.
+    query = query.order_by(TaskModel.updated_at.desc(), TaskModel.created_at.desc())
+
     query = query.offset(offset).limit(min(limit, settings.MAX_LIMIT))
     result = await db.execute(query)
     tasks = result.scalars().all()
