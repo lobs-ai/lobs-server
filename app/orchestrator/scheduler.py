@@ -85,10 +85,10 @@ class EventScheduler:
         Returns a summary of what was processed.
         """
         now = datetime.now(timezone.utc)
-        # SQLite stores datetimes as text. SQLAlchemy may bind with 'T' or ' '
-        # separator depending on the driver. Use isoformat string for consistent
-        # comparison so that string ordering works correctly in SQLite.
-        now_str = now.isoformat()
+        # SQLite stores datetimes as text and lexical ordering matters.
+        # Normalize to the same "YYYY-MM-DD HH:MM:SS" style used by persisted
+        # scheduled_at/next_fire_at values to avoid false "due" matches.
+        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
         
         # Find pending events that are due
         pending_query = (

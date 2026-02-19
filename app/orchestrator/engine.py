@@ -382,6 +382,7 @@ class OrchestratorEngine:
                     )
                 except Exception as e:
                     logger.error("[ENGINE] Reflection cycle failed: %s", e, exc_info=True)
+                    await db.rollback()
 
             # 3a. Daily compression sweep (~03:00 UTC-triggered daily guard)
             try:
@@ -401,6 +402,7 @@ class OrchestratorEngine:
                     )
             except Exception as e:
                 logger.error("[ENGINE] Daily compression failed: %s", e, exc_info=True)
+                await db.rollback()
 
             # 5. Lobs sweep/arbitration (every 15 minutes)
             if current_time - self._last_sweep_check >= self._sweep_interval:
@@ -412,6 +414,7 @@ class OrchestratorEngine:
                     logger.debug("[ENGINE] Initiative sweep: %s", sweep_result)
                 except Exception as e:
                     logger.error("[ENGINE] Initiative sweep failed: %s", e, exc_info=True)
+                    await db.rollback()
 
             # 6. Reactive diagnostics (every 10 minutes)
             if not self._paused and self._openclaw_available and current_time - self._last_diagnostic_check >= self._diagnostic_interval:
@@ -423,6 +426,7 @@ class OrchestratorEngine:
                     logger.debug("[ENGINE] Diagnostics: %s", diagnostic_result)
                 except Exception as e:
                     logger.error("[ENGINE] Diagnostic triggers failed: %s", e, exc_info=True)
+                    await db.rollback()
 
             # 4. Check active workers
             initial_active = len(worker_manager.active_workers)

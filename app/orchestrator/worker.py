@@ -41,6 +41,7 @@ from app.orchestrator.config import (
     WORKER_KILL_TIMEOUT,
     GATEWAY_URL,
     GATEWAY_TOKEN,
+    GATEWAY_SESSION_KEY,
 )
 from app.orchestrator.model_chooser import ModelChooser
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
@@ -51,6 +52,19 @@ from app.orchestrator.policy_engine import PolicyEngine
 from app.services.usage import log_usage_event, resolve_route_type
 
 logger = logging.getLogger(__name__)
+
+
+async def _safe_log_usage_event(db: AsyncSession, **kwargs: Any) -> None:
+    """Best-effort usage logging that never poisons the caller DB session."""
+    try:
+        await log_usage_event(db, **kwargs)
+    except Exception as e:
+        logger.warning("[USAGE] Skipping usage event due to DB/logging error: %s", e)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
 
 @dataclass
 class WorkerInfo:
@@ -320,12 +334,13 @@ class WorkerManager:
         """
         try:
             async with aiohttp.ClientSession() as session:
+                parent_session_key = f"{GATEWAY_SESSION_KEY}-spawn-{uuid.uuid4().hex[:8]}"
                 resp = await session.post(
                     f"{GATEWAY_URL}/tools/invoke",
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
                         "tool": "sessions_spawn",
-                        "sessionKey": "agent:sink:orchestrator-sink",
+                        "sessionKey": parent_session_key,
                         "args": {
                             "task": task_prompt,
                             "agentId": agent_id,
@@ -341,7 +356,7 @@ class WorkerManager:
                 data = await resp.json()
                 
                 if not data.get("ok"):
-                    await log_usage_event(
+                    await _safe_log_usage_event(
                         self.db,
                         source="orchestrator-spawn",
                         model=model,
@@ -361,7 +376,7 @@ class WorkerManager:
                 # Gateway wraps tool results in {content, details}
                 details = result.get("details", result)
                 if details.get("status") != "accepted":
-                    await log_usage_event(
+                    await _safe_log_usage_event(
                         self.db,
                         source="orchestrator-spawn",
                         model=model,
@@ -377,7 +392,7 @@ class WorkerManager:
                     )
                     return None, f"sessions_spawn_not_accepted: {result}"
 
-                await log_usage_event(
+                await _safe_log_usage_event(
                     self.db,
                     source="orchestrator-spawn",
                     model=model,
@@ -826,7 +841,7 @@ class WorkerManager:
                     subscription_models=(model_audit or {}).get("subscription_models", []),
                     subscription_providers=(model_audit or {}).get("subscription_providers", []),
                 )
-                await log_usage_event(
+                await _safe_log_usage_event(
                     self.db,
                     source="orchestrator-worker",
                     model=model,
