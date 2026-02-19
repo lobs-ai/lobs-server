@@ -29,6 +29,7 @@ from app.orchestrator.routine_runner import RoutineRunner
 from app.orchestrator.inbox_processor import InboxProcessor
 from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
+from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.control_loop import LobsControlLoopService
 from app.orchestrator.config import POLL_INTERVAL
@@ -81,6 +82,8 @@ class OrchestratorEngine:
         self._routine_interval = 60  # Check routine registry every 60 seconds
         self._last_inbox_check = 0.0
         self._inbox_interval = 45  # Process inbox every 45 seconds
+        self._auto_assign_interval = 60  # Auto-assign unassigned tasks every 60 seconds
+        self._last_auto_assign_check = 0.0
         self._last_reflection_check = 0.0
         self._reflection_interval = 21600  # every 6 hours
         self._daily_compression_hour_et = 3
@@ -368,7 +371,26 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
                     await db.rollback()
 
-            # 3. Capability registry sync (hourly)
+            # 3. Auto-assign agents for unassigned active tasks (best-effort)
+            if not self._paused and current_time - self._last_auto_assign_check >= self._auto_assign_interval:
+                try:
+                    assigner = TaskAutoAssigner(db)
+                    assign_result = await assigner.run_once(limit=20)
+                    self._last_auto_assign_check = current_time
+                    if assign_result.assigned > 0:
+                        activity = True
+                        logger.info(
+                            "[ENGINE] Auto-assign: scanned=%s assigned=%s skipped=%s failed=%s",
+                            assign_result.scanned,
+                            assign_result.assigned,
+                            assign_result.skipped,
+                            assign_result.failed,
+                        )
+                except Exception as e:
+                    logger.error("[ENGINE] Auto-assign failed: %s", e, exc_info=True)
+                    await db.rollback()
+
+            # 4. Capability registry sync (hourly)
             if current_time - self._last_capability_sync >= self._capability_sync_interval:
                 try:
                     sync_result = await CapabilityRegistrySync(db).sync()
