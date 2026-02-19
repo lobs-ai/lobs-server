@@ -14,6 +14,7 @@ import logging
 import shutil
 import uuid
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Optional
 
 from app.database import AsyncSessionLocal
@@ -45,6 +46,7 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
+    SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET,
 )
 
 logger = logging.getLogger(__name__)
@@ -400,6 +402,17 @@ class OrchestratorEngine:
 
                     async def _run_compression() -> dict[str, Any]:
                         daily_result = await reflection_manager.run_daily_compression()
+
+                        # Persist "ran today" marker in ET so restarts don't lose the daily state.
+                        now_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+                        today_key = now_et.date().isoformat()
+                        marker = await db.get(OrchestratorSetting, SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET)
+                        if marker is None:
+                            marker = OrchestratorSetting(key=SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET, value=today_key)
+                            db.add(marker)
+                        else:
+                            marker.value = today_key
+
                         return daily_result
 
                     async def _route_task_created(payload: dict[str, Any]) -> bool:
@@ -430,6 +443,10 @@ class OrchestratorEngine:
                     loop_result = await control_loop.run_once()
                     self._last_reflection_check = control_loop.reflection_last_run_at
                     self._last_daily_compression_date_et = control_loop.last_compression_date_et
+
+                    # Important: commit here so heartbeat + any control-plane settings (reflection anchor,
+                    # daily compression marker) actually persist.
+                    await db.commit()
 
                     if loop_result.events_processed > 0 or loop_result.reflection_triggered or loop_result.compression_triggered:
                         activity = True
@@ -637,6 +654,7 @@ class OrchestratorEngine:
             SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
             SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
             SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
+            SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET,
         )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
@@ -666,6 +684,11 @@ class OrchestratorEngine:
             self._daily_compression_hour_et = max(0, min(23, int(daily_hour_raw)))
         except Exception:
             self._daily_compression_hour_et = int(DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET])
+
+        # Load persistent daily compression marker so restarts don't lose "already ran today" state.
+        raw_last_compression = rows.get(SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET)
+        if isinstance(raw_last_compression, str) and raw_last_compression.strip():
+            self._last_daily_compression_date_et = raw_last_compression.strip()
 
         # Load persistent reflection anchor so restarts don't reset the 6h cadence.
         if not self._reflection_anchor_loaded:

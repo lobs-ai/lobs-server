@@ -10,6 +10,8 @@ SETTINGS_KEY_REFLECTION_LAST_RUN_AT = "orchestrator.reflection.last_run_at"
 SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC = "orchestrator.daily_compression.hour_utc"
 # Preferred semantic key (America/New_York local hour). Keep UTC key for backwards compatibility.
 SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET = "orchestrator.daily_compression.hour_et"
+# Persisted marker so restarts don't cause repeated daily runs and so status can report last run.
+SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET = "orchestrator.daily_compression.last_date_et"
 
 # Reactive diagnostic trigger thresholds/policy
 SETTINGS_KEY_DIAG_STALL_HOURS = "orchestrator.diagnostics.stalled_task.hours"
@@ -34,6 +36,7 @@ DEFAULT_RUNTIME_SETTINGS: dict[str, object] = {
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS: 900,
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC: 3,
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET: 3,
+    SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET: "",
     SETTINGS_KEY_DIAG_STALL_HOURS: 2,
     SETTINGS_KEY_DIAG_FAILURE_RETRY_COUNT: 2,
     SETTINGS_KEY_DIAG_PR_REJECTION_HOURS: 24,
