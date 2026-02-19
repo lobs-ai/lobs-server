@@ -280,7 +280,7 @@ class OrchestratorEngine:
                         sync_service = GitHubSyncService(db)
                         for project in github_projects:
                             try:
-                                result = await sync_service.sync_project(project, push=False)
+                                result = await sync_service.sync_project(project, push=True)
                                 if result.get("imported", 0) > 0 or result.get("updated", 0) > 0:
                                     activity = True
                             except Exception as project_err:
