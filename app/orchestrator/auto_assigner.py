@@ -105,16 +105,20 @@ class TaskAutoAssigner:
                 "agentId": agent_id,
                 "model": model,
                 "runTimeoutSeconds": 60,
+                # Important: give Gateway more time than the default 10s so we reliably
+                # receive the accepted response, especially on cold starts.
+                "timeoutSeconds": 30,
                 "cleanup": "delete",
                 "label": label,
             },
         )
 
-        if not spawn or spawn.get("status") != "accepted":
-            logger.warning("[AUTO_ASSIGN] sessions_spawn not accepted for task=%s: %s", task.id, spawn)
+        # If Gateway timed out but still returned a childSessionKey, we can still
+        # recover by reading history from that child session.
+        child_session_key = (spawn or {}).get("childSessionKey")
+        if not child_session_key:
+            logger.warning("[AUTO_ASSIGN] sessions_spawn missing childSessionKey for task=%s: %s", task.id, spawn)
             return None
-
-        child_session_key = spawn.get("childSessionKey")
         if not child_session_key:
             return None
 
@@ -125,7 +129,12 @@ class TaskAutoAssigner:
             hist = await _gateway_invoke(
                 tool="sessions_history",
                 session_key=f"{GATEWAY_SESSION_KEY}-autoassign-hist-{uuid.uuid4().hex[:8]}",
-                args={"sessionKey": child_session_key, "limit": 20, "includeTools": False},
+                args={
+                    "sessionKey": child_session_key,
+                    "limit": 20,
+                    "includeTools": False,
+                    "timeoutSeconds": 20,
+                },
             )
             chosen = _extract_choice_from_history(hist)
             if chosen:
