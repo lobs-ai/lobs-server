@@ -144,6 +144,10 @@ class WorkerManager:
 
         self.max_workers = MAX_WORKERS
 
+        # Signal to engine: set True when all reflection workers from a batch
+        # have completed, indicating the sweep arbitrator should run.
+        self.sweep_requested = False
+
     async def spawn_worker(
         self,
         task: dict[str, Any],
@@ -827,6 +831,18 @@ class WorkerManager:
                 summary=summary,
                 succeeded=succeeded,
             )
+
+            # If this was a strategic reflection, check whether all reflection
+            # workers from this batch have finished.  If so, signal the engine
+            # to run the initiative sweep immediately.
+            if reflection_type == "strategic":
+                remaining = any(
+                    w.label.startswith("reflection-")
+                    for w in self.active_workers.values()
+                )
+                if not remaining:
+                    self.sweep_requested = True
+                    logger.info("[WORKER] All reflection workers done — requesting initiative sweep")
 
         # Lobs-PM sweep review results: create tasks from approved initiatives
         if worker_info.label.startswith("sweep-review-") and summary and succeeded:

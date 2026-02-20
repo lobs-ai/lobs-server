@@ -338,7 +338,7 @@ class DiagnosticTriggerEngine:
             },
             purpose="diagnostic",
         )
-        result, error = await self.worker_manager._spawn_session(
+        result, error, _error_type = await self.worker_manager._spawn_session(
             task_prompt=prompt,
             agent_id=agent_type,
             model=choice.model,

@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Task
 from app.orchestrator.config import GATEWAY_SESSION_KEY, GATEWAY_TOKEN, GATEWAY_URL
+from app.orchestrator.model_chooser import ModelChooser
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,13 @@ class TaskAutoAssigner:
 
         # Use a non-programming agent persona for classification; we only need a short JSON.
         agent_id = "reviewer"
-        model = "anthropic/claude-haiku-4-5"
+        chooser = ModelChooser(self.db)
+        choice = await chooser.choose(
+            agent_type=agent_id,
+            task={"id": task.id, "title": task.title, "notes": task.notes, "status": "inbox"},
+            purpose="classification",
+        )
+        model = choice.model
         label = f"auto-assign-{task.id[:8].lower()}"
 
         spawn = await _gateway_invoke(

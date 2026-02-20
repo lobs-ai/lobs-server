@@ -41,7 +41,6 @@ from sqlalchemy import select
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
-    SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
     SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
     SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
@@ -86,13 +85,12 @@ class OrchestratorEngine:
         self._auto_assign_interval = 60  # Auto-assign unassigned tasks every 60 seconds
         self._last_auto_assign_check = 0.0
         self._last_reflection_check = 0.0
-        self._reflection_interval = 21600  # every 6 hours
+        self._reflection_interval = 10800  # every 3 hours
         self._daily_compression_hour_et = 3
         self._last_daily_compression_date_et: str | None = None
         self._last_capability_sync = 0.0
         self._capability_sync_interval = 3600  # every hour
-        self._last_sweep_check = 0.0
-        self._sweep_interval = 900  # every 15 minutes
+        # Sweep is now triggered by worker_manager.sweep_requested (no fixed timer)
         self._last_diagnostic_check = 0.0
         self._diagnostic_interval = 600  # every 10 minutes
         self._last_github_sync_check = 0.0
@@ -490,14 +488,15 @@ class OrchestratorEngine:
                     logger.error("[ENGINE] Lobs control loop failed: %s", e, exc_info=True)
                     await db.rollback()
 
-            # 5. Lobs sweep/arbitration (every 15 minutes)
-            if current_time - self._last_sweep_check >= self._sweep_interval:
+            # 5. Lobs sweep/arbitration — triggered after reflection batch completes
+            #    (no longer on a fixed timer; the worker manager signals readiness)
+            if worker_manager.sweep_requested:
+                worker_manager.sweep_requested = False
                 try:
                     sweep_result = await sweep_arbitrator.run_once()
-                    self._last_sweep_check = current_time
-                    if sweep_result.get("lobs_review", 0) > 0:
+                    if sweep_result.get("lobs_review", 0) > 0 or sweep_result.get("approved", 0) > 0:
                         activity = True
-                    logger.debug("[ENGINE] Initiative sweep: %s", sweep_result)
+                    logger.info("[ENGINE] Post-reflection initiative sweep: %s", sweep_result)
                 except Exception as e:
                     logger.error("[ENGINE] Initiative sweep failed: %s", e, exc_info=True)
                     await db.rollback()
@@ -683,7 +682,6 @@ class OrchestratorEngine:
         """Load runtime loop intervals from DB without restart."""
         keys = (
             SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
-            SETTINGS_KEY_SWEEP_INTERVAL_SECONDS,
             SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
             SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
             SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
@@ -704,7 +702,7 @@ class OrchestratorEngine:
                 return default
 
         self._reflection_interval = _as_int(SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS)
-        self._sweep_interval = _as_int(SETTINGS_KEY_SWEEP_INTERVAL_SECONDS)
+        # Sweep interval no longer used — sweep is triggered after reflections complete
         self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
         self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
         self._openclaw_model_sync_interval = _as_int(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS)

@@ -1,9 +1,11 @@
-"""Lobs sweep phase: wait for full agent proposal set, filter bad ideas, dedupe, and route.
+"""Lobs sweep phase: collect agent proposals, filter obvious junk, and use an LLM
+to intelligently review and decide on all remaining initiatives.
 
 Flow:
-1. Server-side first pass: quality filter, dedup, contradiction detection
-2. Spawn Lobs (main agent) session for remaining proposals (batch review)
-3. Only risk_tier C / truly high-risk items escalate to Rafe via inbox
+1. Server-side first pass: quality filter (too-short, junk), dedup by title+desc
+2. Spawn a single LLM session to review ALL remaining proposals as a batch
+3. Process LLM decisions: approve → create task, defer, reject
+4. Only risk_tier C / truly dangerous items also create Rafe inbox items
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ from app.models import (
     SystemSweep,
 )
 from app.orchestrator.config import CONTROL_PLANE_AGENTS
-from app.orchestrator.policy_engine import PolicyEngine
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator.registry import AgentRegistry
 
@@ -41,63 +42,49 @@ DEFAULT_DAILY_BUDGET = {
     "architect": 2,
 }
 
+# Categories that should never be auto-approved regardless of LLM recommendation
+HARD_GATE_CATEGORIES = {
+    "architecture_change",
+    "destructive_operation",
+    "cross_project_migration",
+    "agent_recruitment",
+}
+
 
 class SweepArbitrator:
-    """Global initiative arbitration with Lobs as final decision authority.
+    """Global initiative arbitration using LLM-based review.
 
-    After server-side first-pass filtering (quality, dedup, contradiction),
-    remaining proposals are batched and sent to a Lobs (main agent) session for review.
-    Only risk_tier C items escalate directly to Rafe's inbox.
+    After server-side prefiltering (quality, dedup), all remaining proposals
+    are sent to a single LLM session for intelligent batch review.
     """
 
     def __init__(self, db: AsyncSession, worker_manager: Any | None = None):
         self.db = db
         self.worker_manager = worker_manager
-        self.policy = PolicyEngine()
         self.decision_engine = InitiativeDecisionEngine(db)
         self.registry = AgentRegistry()
 
     async def run_once(self) -> dict[str, Any]:
-        batch_ready = await self._is_reflection_batch_ready()
-        if not batch_ready["ready"]:
-            return {
-                "proposed": 0,
-                "approved": 0,
-                "deferred": 0,
-                "lobs_review": 0,
-                "rejected": 0,
-                "waiting_for_agents": batch_ready.get("missing_agents", []),
-            }
-
         initiatives = await self._load_proposed_initiatives()
         if not initiatives:
-            return {
-                "proposed": 0,
-                "approved": 0,
-                "deferred": 0,
-                "lobs_review": 0,
-                "rejected": 0,
-            }
+            return {"proposed": 0, "approved": 0, "deferred": 0, "rejected": 0}
 
         start = datetime.now(timezone.utc)
         sweep_id = str(uuid.uuid4())
         budgets = await self._load_daily_budgets()
         usage = await self._daily_budget_usage()
-        overlap_map, contradiction_map = self._detect_relationships(initiatives)
-        capability_gap_map: dict[str, bool] = {}
 
-        lobs_review = 0
         rejected = 0
 
-        # First-pass quality filter: reject low-signal/bad ideas.
+        # --- Server-side prefilter: quality gate ---
         for initiative in initiatives:
             bad_reason = self._bad_idea_reason(initiative)
             if bad_reason:
                 initiative.status = "rejected"
-                initiative.rationale = (initiative.rationale or "") + f" | Rejected by quality gate: {bad_reason}"
+                initiative.rationale = (initiative.rationale or "") + f" | Quality gate: {bad_reason}"
                 rejected += 1
 
-        # Dedupe by normalized title+description signature. Keep newest.
+        # --- Server-side prefilter: dedup ---
         dedupe_map: dict[str, list[AgentInitiative]] = defaultdict(list)
         for i in initiatives:
             if i.status != "proposed":
@@ -114,219 +101,179 @@ class SweepArbitrator:
             )
             for dup in bucket_sorted[1:]:
                 dup.status = "rejected"
-                dup.rationale = (dup.rationale or "") + " | Rejected as duplicate initiative"
+                dup.rationale = (dup.rationale or "") + " | Duplicate initiative"
                 rejected += 1
 
+        # --- Collect remaining proposals for LLM review ---
+        remaining = [i for i in initiatives if i.status == "proposed"]
+
+        if not remaining:
+            sweep = self._create_sweep_record(
+                sweep_id, start, len(initiatives), 0, 0, rejected, budgets, usage
+            )
+            self.db.add(sweep)
+            await self.db.commit()
+            return {"proposed": len(initiatives), "approved": 0, "deferred": 0, "rejected": rejected}
+
+        # --- Spawn LLM to review all proposals ---
         approved = 0
         deferred = 0
 
-        for initiative in initiatives:
-            if initiative.status != "proposed":
-                continue
-
-            suggested_agent, has_capability_match = await self.decision_engine.suggest_agent_with_diagnostics(initiative)
-            capability_gap = not has_capability_match
-            capability_gap_map[initiative.id] = capability_gap
-            initiative.owner_agent = suggested_agent
-            owner = (suggested_agent or initiative.proposed_by_agent or "programmer").lower()
-            decision = self.policy.decide(
-                initiative.category,
-                estimated_effort=int(initiative.score) if initiative.score is not None else None,
-            )
-            initiative.risk_tier = decision.risk_tier
-            initiative.policy_lane = decision.lane
-            initiative.policy_reason = decision.reason
-
-            daily_limit = budgets.get(owner, 2)
-            used = usage.get(owner, 0)
-            budget_remaining = max(0, daily_limit - used)
-
-            size = self._size_bucket(initiative, decision.approval_mode)
-            recommendation = self._recommendation_for(size=size, budget_remaining=budget_remaining)
-            contradiction_ids = contradiction_map.get(initiative.id, [])
-            overlap_ids = overlap_map.get(initiative.id, [])
-
-            if contradiction_ids:
-                initiative.status = "lobs_review"
-                initiative.rationale = (
-                    (initiative.rationale or "")
-                    + f" | Contradiction detected with initiatives: {', '.join(contradiction_ids)}"
-                )
-                await self._create_lobs_decision_item(
-                    initiative,
-                    recommendation="review",
-                    budget=f"{used}/{daily_limit}",
-                    decision_reason="Contradictory initiatives detected in reflection sweep",
-                    approval_mode=decision.approval_mode,
-                    suggested_agent=suggested_agent,
-                    size=size,
-                )
-                await self.decision_engine.decide(
-                    initiative,
-                    decision="defer",
-                    selected_agent=suggested_agent,
-                    decision_summary="Deferred for human review due to contradiction detection.",
-                    decided_by="lobs",
-                    sweep_id=sweep_id,
-                    overlap_with_ids=overlap_ids,
-                    contradiction_with_ids=contradiction_ids,
-                    capability_gap=capability_gap,
-                )
-                lobs_review += 1
-                continue
-
-            if decision.lane == "blocked":
-                await self.decision_engine.decide(
-                    initiative,
-                    decision="reject",
-                    selected_agent=suggested_agent,
-                    decision_summary=(
-                        f"Rejected by policy lane. category={initiative.category}; "
-                        f"reason={decision.reason}; size={size}; budget={used}/{daily_limit}"
-                    ),
-                    decided_by="lobs",
-                    sweep_id=sweep_id,
-                    overlap_with_ids=overlap_ids,
-                    contradiction_with_ids=contradiction_ids,
-                    capability_gap=capability_gap,
-                )
-                rejected += 1
-                continue
-
-            if decision.lane == "auto_allowed":
-                if budget_remaining > 0:
-                    await self.decision_engine.decide(
-                        initiative,
-                        decision="approve",
-                        selected_agent=suggested_agent,
-                        decision_summary=(
-                            f"Auto-approved by Lobs sweep ({size}); lane={decision.lane}; "
-                            f"budget {used}/{daily_limit}; reason={decision.reason}"
-                        ),
-                        decided_by="lobs",
-                        sweep_id=sweep_id,
-                        overlap_with_ids=overlap_ids,
-                        contradiction_with_ids=contradiction_ids,
-                        capability_gap=capability_gap,
-                    )
-                    usage[owner] = used + 1
-                    approved += 1
-                else:
+        if self.worker_manager is not None:
+            try:
+                await self._spawn_llm_review(remaining, budgets, usage, sweep_id)
+                # Mark all remaining as "lobs_review" — the LLM session will
+                # process them asynchronously via _process_sweep_review_results
+                for initiative in remaining:
+                    initiative.status = "lobs_review"
+            except Exception as e:
+                logger.warning("[SWEEP] Failed to spawn LLM review: %s", e)
+                # Fallback: defer everything so nothing is lost
+                for initiative in remaining:
                     await self.decision_engine.decide(
                         initiative,
                         decision="defer",
-                        selected_agent=suggested_agent,
-                        decision_summary=(
-                            f"Deferred by Lobs sweep due to budget cap {used}/{daily_limit}; "
-                            f"lane={decision.lane}; size={size}"
-                        ),
+                        decision_summary=f"LLM review spawn failed: {e}",
                         decided_by="lobs",
                         sweep_id=sweep_id,
-                        overlap_with_ids=overlap_ids,
-                        contradiction_with_ids=contradiction_ids,
-                        capability_gap=capability_gap,
                     )
                     deferred += 1
-                continue
+        else:
+            # No worker manager — defer everything
+            for initiative in remaining:
+                await self.decision_engine.decide(
+                    initiative,
+                    decision="defer",
+                    decision_summary="No worker manager available for LLM review",
+                    decided_by="lobs",
+                    sweep_id=sweep_id,
+                )
+                deferred += 1
 
-            await self.decision_engine.decide(
-                initiative,
-                decision="defer",
-                selected_agent=suggested_agent,
-                decision_summary=(
-                    f"Deferred for Lobs review. Recommendation={recommendation}. "
-                    f"Lane={decision.lane}. Budget={used}/{daily_limit}. Reason={decision.reason}"
-                ),
-                decided_by="lobs",
-                sweep_id=sweep_id,
-                overlap_with_ids=overlap_ids,
-                contradiction_with_ids=contradiction_ids,
-                capability_gap=capability_gap,
-            )
+        # --- Create high-risk inbox items for Rafe ---
+        for initiative in remaining:
+            if (initiative.category or "").strip().lower() in HARD_GATE_CATEGORIES:
+                await self._create_rafe_inbox_item(initiative)
 
-            await self._create_lobs_decision_item(
-                initiative,
-                recommendation=recommendation,
-                budget=f"{used}/{daily_limit}",
-                decision_reason=decision.reason,
-                approval_mode=decision.approval_mode,
-                suggested_agent=suggested_agent,
-                size=size,
-            )
-            lobs_review += 1
-
-        # --- Lobs-PM batch review for non-auto items ---
-        lobs_review_initiatives = [
-            i for i in initiatives
-            if i.status == "lobs_review" or (i.status == "proposed" and i.risk_tier != "C")
-        ]
-        high_risk_for_rafe = [
-            i for i in initiatives
-            if i.status in ("proposed", "lobs_review") and i.risk_tier == "C"
-        ]
-
-        # Spawn Lobs (main agent) to review batch (if worker_manager available and items exist)
-        if lobs_review_initiatives and self.worker_manager is not None:
-            try:
-                await self._spawn_lobs_pm_review(lobs_review_initiatives)
-            except Exception as e:
-                logger.warning("[SWEEP] Failed to spawn Lobs (main agent) review: %s", e)
-                # Fall back to inbox items for these
-                for initiative in lobs_review_initiatives:
-                    await self._create_lobs_decision_item(
-                        initiative,
-                        recommendation="review",
-                        budget="n/a",
-                        decision_reason="Lobs sweep spawn failed, escalating to inbox",
-                        approval_mode="soft_gate",
-                        suggested_agent=initiative.owner_agent or initiative.proposed_by_agent or "programmer",
-                        size="medium",
-                    )
-
-        # Only truly high-risk items go directly to Rafe's inbox
-        for initiative in high_risk_for_rafe:
-            await self._create_lobs_decision_item(
-                initiative,
-                recommendation="review",
-                budget="n/a",
-                decision_reason=f"Risk tier C — requires human review. {initiative.policy_reason or ''}",
-                approval_mode="hard_gate",
-                suggested_agent=initiative.owner_agent or initiative.proposed_by_agent or "programmer",
-                size="large",
-            )
-
-        capability_gaps = [i.id for i, is_gap in capability_gap_map.items() if is_gap]
-
-        sweep = SystemSweep(
-            id=sweep_id,
-            sweep_type="initiative_sweep",
-            status="completed",
-            window_start=start,
-            window_end=datetime.now(timezone.utc),
-            summary={
-                "proposed": len(initiatives),
-                "approved": approved,
-                "deferred": deferred,
-                "lobs_review": lobs_review,
-                "rejected": rejected,
-                "contradictions": sum(1 for v in contradiction_map.values() if v),
-                "overlap_candidates": sum(1 for v in overlap_map.values() if v),
-                "capability_gaps": len(capability_gaps),
-            },
-            decisions={
-                "budgets": budgets,
-                "usage": usage,
-                "mode": "lobs_governed",
-                "overlap_map": {k: v for k, v in overlap_map.items() if v},
-                "contradiction_map": {k: v for k, v in contradiction_map.items() if v},
-                "capability_gaps": capability_gaps,
-            },
-            completed_at=datetime.now(timezone.utc),
+        sweep = self._create_sweep_record(
+            sweep_id, start, len(initiatives), approved, deferred, rejected, budgets, usage
         )
         self.db.add(sweep)
         await self.db.commit()
 
-        return sweep.summary or {}
+        return {
+            "proposed": len(initiatives),
+            "approved": approved,
+            "deferred": deferred,
+            "rejected": rejected,
+            "llm_review": len(remaining),
+        }
+
+    # ------------------------------------------------------------------
+    # LLM review
+    # ------------------------------------------------------------------
+
+    async def _spawn_llm_review(
+        self,
+        initiatives: list[AgentInitiative],
+        budgets: dict[str, int],
+        usage: dict[str, int],
+        sweep_id: str,
+    ) -> None:
+        """Spawn a single LLM session to review all proposals intelligently."""
+        batch = []
+        for i in initiatives:
+            batch.append({
+                "id": i.id,
+                "title": i.title,
+                "description": i.description,
+                "category": i.category,
+                "proposed_by": i.proposed_by_agent,
+                "suggested_owner": i.owner_agent,
+                "estimated_effort": int(i.score) if i.score is not None else None,
+            })
+
+        budget_summary = {
+            agent: f"{usage.get(agent, 0)}/{limit}"
+            for agent, limit in budgets.items()
+        }
+
+        prompt = f"""## Initiative Sweep Review — Lobs PM Decision
+
+You are Lobs, the main agent and project manager. You know Rafe's priorities, the active projects, and the system architecture. Use that context to make real decisions about these {len(batch)} initiative proposals from your agent team's reflections.
+
+### Context
+- These proposals come from agents reflecting on their recent work
+- Daily agent budgets (used/limit): {json.dumps(budget_summary)}
+- Sweep ID: {sweep_id}
+- Read your MEMORY.md and project context to inform decisions — you have full access to Rafe's priorities and system state
+
+### Your job
+1. Evaluate each proposal against what you know about current priorities, active work, and what Rafe actually cares about
+2. Check for overlapping or contradictory proposals across agents
+3. Decide: **approve** (create a task), **defer** (not now but maybe later), or **reject** (not worth doing)
+4. For approved items, assign the best agent and set priority
+
+### Decision guidelines
+- Be selective. Approve only proposals that deliver clear, concrete value aligned with current priorities.
+- Reject vague, speculative, or low-impact proposals. Reject things that duplicate existing work.
+- Defer things that are reasonable but not urgent or would exceed budget.
+- Respect daily budgets — don't approve more work for an agent than their remaining budget allows.
+- High-risk categories (architecture changes, destructive operations, cross-project migrations, agent recruitment) should be deferred for human review, not approved.
+- Think about what Rafe would want — he values correctness, leverage, and systems that work autonomously. Don't approve busywork.
+
+### Proposals
+{json.dumps(batch, indent=2)}
+
+### Output format
+Return STRICT JSON only (no prose outside JSON):
+```json
+{{
+  "decisions": [
+    {{
+      "initiative_id": "<id>",
+      "decision": "approve|defer|reject",
+      "reason": "brief rationale",
+      "owner_agent": "agent-type (for approved items)",
+      "task_title": "refined title (for approved items)",
+      "task_notes": "notes for task (for approved items)",
+      "priority": "low|medium|high",
+      "project_id": "optional project id"
+    }}
+  ],
+  "observations": ["any cross-cutting observations about the proposals"]
+}}
+```
+"""
+        # Use the main agent's standard-tier model — this is Lobs making real
+        # project decisions and needs full context awareness + reasoning quality.
+        from app.orchestrator.model_chooser import ModelChooser
+        chooser = ModelChooser(self.db)
+        choice = await chooser.choose(
+            agent_type="lobs",
+            task={"id": "sweep-review", "title": "Initiative sweep review", "notes": "Project management decisions requiring full context"},
+            purpose="execution",
+        )
+
+        result, error, _error_type = await self.worker_manager._spawn_session(
+            task_prompt=prompt,
+            agent_id="main",
+            model=choice.model,
+            label=f"sweep-review-{sweep_id[:8]}",
+        )
+        if not result:
+            raise RuntimeError(f"LLM sweep spawn failed: {error}")
+
+        logger.info(
+            "[SWEEP] Spawned LLM review for %d initiatives (model=%s, runId=%s)",
+            len(batch),
+            choice.model,
+            result.get("runId", "?")[:12],
+        )
+
+    # ------------------------------------------------------------------
+    # Data loading
+    # ------------------------------------------------------------------
 
     async def _load_proposed_initiatives(self) -> list[AgentInitiative]:
         result = await self.db.execute(
@@ -371,143 +318,9 @@ class SweepArbitrator:
             usage[owner] += 1
         return dict(usage)
 
-    async def _is_reflection_batch_ready(self) -> dict[str, Any]:
-        """Only sweep once every execution agent has completed a recent strategic reflection."""
-        execution_agents = [
-            a for a in self.registry.available_types() if a not in CONTROL_PLANE_AGENTS
-        ]
-        if not execution_agents:
-            return {"ready": True, "missing_agents": []}
-
-        since = datetime.now(timezone.utc) - timedelta(hours=8)
-        result = await self.db.execute(
-            select(AgentReflection).where(
-                AgentReflection.reflection_type == "strategic",
-                AgentReflection.created_at >= since,
-            )
-        )
-        rows = result.scalars().all()
-
-        # Backward-compatible fallback: if there are no recent strategic reflections,
-        # allow manual/testing initiative sweeps to proceed.
-        if not rows:
-            return {"ready": True, "missing_agents": []}
-
-        completed_agents = {
-            r.agent_type for r in rows if r.status == "completed" and (r.agent_type in execution_agents)
-        }
-
-        missing = [a for a in execution_agents if a not in completed_agents]
-        return {"ready": len(missing) == 0, "missing_agents": missing}
-
-    async def _create_lobs_decision_item(
-        self,
-        initiative: AgentInitiative,
-        *,
-        recommendation: str,
-        budget: str,
-        decision_reason: str,
-        approval_mode: str,
-        suggested_agent: str,
-        size: str,
-    ) -> None:
-        title = initiative.title or "Untitled initiative"
-        severity = "HIGH" if initiative.risk_tier == "C" else "MEDIUM"
-
-        content = (
-            "Rafe decision required for policy-gated initiative.\n\n"
-            f"Estimated size: {size}\n"
-            f"Recommendation: {recommendation}\n"
-            f"Policy mode: {approval_mode}\n"
-            f"Policy lane: {initiative.policy_lane or 'review_required'}\n"
-            f"Budget usage: {budget}\n"
-            f"Reason: {decision_reason}\n"
-            f"Suggested execution agent: {suggested_agent}\n\n"
-            f"Initiative ID: {initiative.id}\n"
-            f"Title: {title}\n"
-            f"Category: {initiative.category}\n"
-            f"Risk tier: {initiative.risk_tier}\n"
-            f"Proposed by: {initiative.proposed_by_agent}\n"
-            f"Owner agent: {initiative.owner_agent}\n\n"
-            f"Description:\n{initiative.description or '(none)'}\n\n"
-            "Expected decision by Rafe: approve / defer / reject"
-        )
-
-        self.db.add(
-            InboxItem(
-                id=str(uuid.uuid4()),
-                title=f"[{severity}] Rafe decision: {title[:80]}",
-                content=content,
-                is_read=False,
-                summary=f"Recommendation={recommendation} | {initiative.category}",
-                modified_at=datetime.now(timezone.utc),
-            )
-        )
-
-    @staticmethod
-    def _recommendation_for(*, size: str, budget_remaining: int) -> str:
-        if size == "large":
-            return "review"
-        if budget_remaining <= 0:
-            return "defer"
-        return "approve"
-
-    @staticmethod
-    def _size_bucket(initiative: AgentInitiative, approval_mode: str) -> str:
-        effort = int(initiative.score) if initiative.score is not None else None
-        if effort is not None:
-            if effort >= 7:
-                return "large"
-            if effort >= 4:
-                return "medium"
-            return "small"
-
-        if approval_mode == "hard_gate":
-            return "large"
-        if approval_mode == "soft_gate":
-            return "medium"
-        return "small"
-
-    def _detect_relationships(self, initiatives: list[AgentInitiative]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
-        overlap_map: dict[str, list[str]] = defaultdict(list)
-        contradiction_map: dict[str, list[str]] = defaultdict(list)
-
-        for i, left in enumerate(initiatives):
-            left_text = self._norm(f"{left.title or ''} {left.description or ''}")
-            left_tokens = set(tok for tok in left_text.split() if len(tok) > 3)
-            left_dir = self._direction(left_text)
-            for right in initiatives[i + 1 :]:
-                if left.id == right.id:
-                    continue
-                right_text = self._norm(f"{right.title or ''} {right.description or ''}")
-                right_tokens = set(tok for tok in right_text.split() if len(tok) > 3)
-                if not left_tokens or not right_tokens:
-                    continue
-
-                overlap = len(left_tokens & right_tokens) / max(1, min(len(left_tokens), len(right_tokens)))
-                same_category = self._norm(left.category) == self._norm(right.category)
-                if same_category and overlap >= 0.5:
-                    overlap_map[left.id].append(right.id)
-                    overlap_map[right.id].append(left.id)
-
-                right_dir = self._direction(right_text)
-                if same_category and overlap >= 0.3 and left_dir and right_dir and left_dir != right_dir:
-                    contradiction_map[left.id].append(right.id)
-                    contradiction_map[right.id].append(left.id)
-
-        return dict(overlap_map), dict(contradiction_map)
-
-    @staticmethod
-    def _direction(text: str) -> str | None:
-        positive = ["increase", "expand", "add", "enable", "raise", "more"]
-        negative = ["decrease", "reduce", "remove", "disable", "lower", "less"]
-        pos = any(tok in text for tok in positive)
-        neg = any(tok in text for tok in negative)
-        if pos and not neg:
-            return "up"
-        if neg and not pos:
-            return "down"
-        return None
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _bad_idea_reason(initiative: AgentInitiative) -> str | None:
@@ -540,67 +353,56 @@ class SweepArbitrator:
         category = " ".join((initiative.category or "").strip().lower().split())
         return f"{category}|{normalized[:220]}"
 
-    async def _spawn_lobs_pm_review(self, initiatives: list[AgentInitiative]) -> None:
-        """Spawn a Lobs (main agent) session to review a batch of initiatives."""
-        batch = []
-        for i in initiatives:
-            batch.append({
-                "id": i.id,
-                "title": i.title,
-                "description": i.description,
-                "category": i.category,
-                "risk_tier": i.risk_tier,
-                "policy_lane": i.policy_lane,
-                "proposed_by": i.proposed_by_agent,
-                "suggested_owner": i.owner_agent,
-                "score": i.score,
-            })
-
-        prompt = f"""## Lobs-PM Sweep Review
-
-You are reviewing {len(batch)} initiative proposals from agent reflections.
-
-Your job:
-1. Review each proposal for value, feasibility, and priority
-2. Check for duplicates or overlapping work across proposals
-3. Decide: approve (create task), defer (not now), or reject (bad idea)
-4. For approved items, confirm the owner agent assignment
-
-Return STRICT JSON (no prose outside JSON):
-{{
-  "decisions": [
-    {{
-      "initiative_id": "...",
-      "decision": "approve|defer|reject",
-      "reason": "brief rationale",
-      "owner_agent": "agent-type",
-      "task_title": "title for task if approved",
-      "task_notes": "notes for task if approved",
-      "priority": "low|medium|high"
-    }}
-  ],
-  "cross_cutting_observations": ["..."],
-  "system_improvements_suggested": ["..."]
-}}
-
-Proposals to review:
-{json.dumps(batch, indent=2)}
-"""
-        result, error = await self.worker_manager._spawn_session(
-            task_prompt=prompt,
-            agent_id="main",
-            model="anthropic/claude-haiku-4-5",
-            label=f"sweep-review-{uuid.uuid4().hex[:8]}",
-        )
-        if not result:
-            raise RuntimeError(f"Lobs sweep spawn failed: {error}")
-
-        logger.info(
-            "[SWEEP] Spawned Lobs (main agent) review for %d initiatives (runId=%s)",
-            len(batch),
-            result.get("runId", "?")[:12],
+    async def _create_rafe_inbox_item(self, initiative: AgentInitiative) -> None:
+        title = initiative.title or "Untitled initiative"
+        content = (
+            "High-risk initiative requires human review.\n\n"
+            f"Initiative ID: {initiative.id}\n"
+            f"Title: {title}\n"
+            f"Category: {initiative.category}\n"
+            f"Proposed by: {initiative.proposed_by_agent}\n\n"
+            f"Description:\n{initiative.description or '(none)'}\n\n"
+            "Action: approve / defer / reject"
         )
 
-    @staticmethod
-    def _norm(value: str | None) -> str:
-        return " ".join((value or "").strip().lower().split())
+        self.db.add(
+            InboxItem(
+                id=str(uuid.uuid4()),
+                title=f"[HIGH] Initiative review: {title[:80]}",
+                content=content,
+                is_read=False,
+                summary=f"High-risk category: {initiative.category}",
+                modified_at=datetime.now(timezone.utc),
+            )
+        )
+
+    def _create_sweep_record(
+        self,
+        sweep_id: str,
+        start: datetime,
+        total: int,
+        approved: int,
+        deferred: int,
+        rejected: int,
+        budgets: dict[str, int],
+        usage: dict[str, int],
+    ) -> SystemSweep:
+        return SystemSweep(
+            id=sweep_id,
+            sweep_type="initiative_sweep",
+            status="completed",
+            window_start=start,
+            window_end=datetime.now(timezone.utc),
+            summary={
+                "proposed": total,
+                "approved": approved,
+                "deferred": deferred,
+                "rejected": rejected,
+            },
+            decisions={
+                "budgets": budgets,
+                "usage": usage,
+                "mode": "llm_reviewed",
+            },
+            completed_at=datetime.now(timezone.utc),
+        )
