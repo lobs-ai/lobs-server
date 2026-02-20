@@ -94,8 +94,8 @@ async def test_worker_spawn_uses_fallback_chain(db_session, monkeypatch, tmp_pat
         calls["n"] += 1
         # fail first (cheap-a), succeed second (cheap-b)
         if calls["n"] == 1:
-            return None, "provider error"
-        return {"runId": "r1", "childSessionKey": "s1"}, None
+            return None, "provider error", "unknown"
+        return {"runId": "r1", "childSessionKey": "s1"}, None, ""
 
     monkeypatch.setattr(mgr, "_spawn_session", fake_spawn_session)
 

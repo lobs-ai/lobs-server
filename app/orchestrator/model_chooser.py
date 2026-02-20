@@ -4,6 +4,7 @@ Centralizes model selection using:
 - task difficulty/criticality (via model_router policy)
 - routing policy chain (subscription/API/provider preferences)
 - provider budget caps
+- provider health tracking (cooldowns, error rates, availability)
 - recent provider error rates
 - model pricing (when available)
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -49,8 +50,9 @@ class ModelChoice:
 class ModelChooser:
     """Shared chooser used by worker execution and reflection/diagnostic jobs."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, provider_health: Optional[Any] = None):
         self.db = db
+        self.provider_health = provider_health  # ProviderHealthRegistry instance
 
     async def choose(
         self,
@@ -349,8 +351,27 @@ class ModelChooser:
         subscription_providers = routing_policy.get("subscription_providers") if isinstance(routing_policy.get("subscription_providers"), list) else []
         now = datetime.now(timezone.utc)
 
+        # Filter out unavailable providers/models first (cooldowns, disabled)
+        available_candidates: list[str] = []
+        unavailable_candidates: list[str] = []
+        
+        if self.provider_health:
+            for model_name in candidates:
+                if self.provider_health.is_available(model_name):
+                    available_candidates.append(model_name)
+                else:
+                    unavailable_candidates.append(model_name)
+        else:
+            available_candidates = list(candidates)
+        
+        # If all candidates are unavailable, use them anyway as fallback
+        # (let worker handle the failure with proper error recording)
+        if not available_candidates:
+            available_candidates = list(candidates)
+
         provider_cost_cache: dict[str, float] = {}
         provider_err_cache: dict[str, float] = {}
+        provider_health_cache: dict[str, float] = {}
 
         async def provider_cost(provider: str) -> float:
             if provider not in provider_cost_cache:
@@ -362,8 +383,29 @@ class ModelChooser:
                 provider_err_cache[provider] = await self._provider_recent_error_rate(provider, minutes=30)
             return provider_err_cache[provider]
 
+        def model_health_score(model_name: str) -> float:
+            """Get health score from provider health registry."""
+            if not self.provider_health:
+                return 1.0
+            
+            if model_name not in provider_health_cache:
+                # Check model-specific health
+                if model_name in self.provider_health.model_health:
+                    stats = self.provider_health.model_health[model_name]
+                    provider_health_cache[model_name] = stats.get_health_score()
+                else:
+                    # Fall back to provider-level health
+                    provider = infer_provider(model_name)
+                    if provider in self.provider_health.provider_health:
+                        stats = self.provider_health.provider_health[provider]
+                        provider_health_cache[model_name] = stats.get_health_score()
+                    else:
+                        provider_health_cache[model_name] = 1.0  # Optimistic for new providers
+            
+            return provider_health_cache[model_name]
+
         # Priority model:
-        # 1) Reliability guard (high provider error rates demoted)
+        # 1) Health score (primary ranking signal - replaces error rate guard)
         # 2) Explicit provider preference (routing_policy.quality_preference)
         # 3) Candidate order from tier routing (user-controlled via tier lists)
         # 4) Cost/spend as tie-breakers only
@@ -371,13 +413,18 @@ class ModelChooser:
         quality_rank = {str(p).lower(): i for i, p in enumerate(quality_pref)}
 
         scored: list[tuple[tuple[float, ...], str]] = []
-        for idx, model_name in enumerate(candidates):
+        for idx, model_name in enumerate(available_candidates):
             provider = infer_provider(model_name)
             route_type = resolve_route_type(
                 model_name,
                 subscription_models=subscription_models,
                 subscription_providers=subscription_providers,
             )
+            
+            # Get health score (higher is better, so invert for sorting)
+            health_score = model_health_score(model_name)
+            health_penalty = 1.0 - health_score  # Convert to penalty (0.0 = best, 1.0 = worst)
+            
             err_rate = await provider_err(provider)
             spend = await provider_cost(provider)
             unit_price = await self._latest_unit_price(provider=provider, model=model_name, route_type=route_type)
@@ -389,7 +436,8 @@ class ModelChooser:
 
             score = (
                 high_error_penalty,
-                round(err_rate, 4),
+                round(health_penalty, 4),  # Use health score as primary signal
+                round(err_rate, 4),  # Keep err_rate as secondary signal
                 float(provider_pref),
                 float(idx),
                 round(spend, 4),

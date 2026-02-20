@@ -36,6 +36,11 @@ MODEL_ROUTER_SETTING_KEYS = (
 # - LOBS_MODEL_TIER_STANDARD
 # - LOBS_MODEL_TIER_STRONG
 # - LOBS_AVAILABLE_MODELS (optional allow-list)
+#
+# Updated for Rafe's provider setup:
+# - Gemini (free/OAuth) for cheap/lightweight
+# - OpenAI Codex for programming/standard
+# - Anthropic for strong/fallback
 DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
     "cheap": (
         "google-gemini-cli/gemini-3-pro-preview",
@@ -44,13 +49,10 @@ DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
     "standard": (
         "openai-codex/gpt-5.3-codex",
         "anthropic/claude-sonnet-4-5",
-        "moonshotai/kimi-k2.5",
-        "minimax/minimax-2.5",
     ),
     "strong": (
-        "anthropic/claude-opus-4-6",
         "openai-codex/gpt-5.3-codex",
-        "moonshotai/kimi-k2.5",
+        "anthropic/claude-opus-4-6",
     ),
 }
 
