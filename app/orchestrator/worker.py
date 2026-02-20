@@ -56,9 +56,45 @@ from app.orchestrator.runtime_settings import (
     SETTINGS_KEY_DIAG_AUTO_REMEDIATION,
     SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS,
 )
-from app.services.usage import log_usage_event, resolve_route_type
+from app.services.usage import log_usage_event, resolve_route_type, infer_provider
 
 logger = logging.getLogger(__name__)
+
+
+def classify_error_type(error_message: str, response_data: dict | None = None) -> str:
+    """
+    Classify error type for provider health tracking.
+    
+    Returns one of: rate_limit, auth_error, quota_exceeded, timeout, 
+                    server_error, unknown
+    """
+    error_lower = error_message.lower()
+    
+    # Check response data for specific error codes
+    if response_data:
+        error_code = str(response_data.get("error", "")).lower()
+        status = response_data.get("status")
+        
+        if status == 429 or "429" in error_code:
+            return "rate_limit"
+        if status in (401, 403) or any(k in error_code for k in ("unauthorized", "forbidden", "auth")):
+            return "auth_error"
+        if status >= 500 or any(k in error_code for k in ("server_error", "internal_error", "service_unavailable")):
+            return "server_error"
+    
+    # Pattern matching on error message
+    if any(k in error_lower for k in ("rate limit", "429", "too many requests", "rate_limit")):
+        return "rate_limit"
+    if any(k in error_lower for k in ("auth", "unauthorized", "forbidden", "401", "403", "api key")):
+        return "auth_error"
+    if any(k in error_lower for k in ("quota", "billing", "insufficient_quota", "limit exceeded")):
+        return "quota_exceeded"
+    if any(k in error_lower for k in ("timeout", "timed out", "etimedout", "deadline")):
+        return "timeout"
+    if any(k in error_lower for k in ("500", "502", "503", "server error", "internal error", "service unavailable")):
+        return "server_error"
+    
+    return "unknown"
 
 
 async def _safe_log_usage_event(db: AsyncSession, **kwargs: Any) -> None:
@@ -96,8 +132,9 @@ class WorkerManager:
     the same agent type can run concurrently on different projects.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, provider_health: Optional[Any] = None):
         self.db = db
+        self.provider_health = provider_health  # ProviderHealthRegistry instance
         
         # In-memory tracking: worker_id -> WorkerInfo
         self.active_workers: dict[str, WorkerInfo] = {}
@@ -201,7 +238,7 @@ class WorkerManager:
                 prompt_file.write_text(prompt_content, encoding="utf-8")
 
             # Select model preference list + audit
-            chooser = ModelChooser(self.db)
+            chooser = ModelChooser(self.db, provider_health=self.provider_health)
             choice = await chooser.choose(
                 agent_type=agent_type,
                 task=task,
@@ -218,7 +255,7 @@ class WorkerManager:
 
             # Call Gateway API: sessions_spawn with fallback chain
             for idx, candidate in enumerate(candidate_models):
-                spawn_result, err = await self._spawn_session(
+                spawn_result, err, err_type = await self._spawn_session(
                     task_prompt=prompt_content,
                     agent_id=agent_type,
                     model=candidate,
@@ -231,11 +268,32 @@ class WorkerManager:
                         "model": candidate,
                         "ok": bool(spawn_result),
                         "error": err,
+                        "error_type": err_type,
                     }
                 )
-                if spawn_result:
-                    chosen_model = candidate
-                    break
+                
+                # Record outcome in provider health
+                if self.provider_health:
+                    provider = infer_provider(candidate)
+                    if spawn_result:
+                        self.provider_health.record_outcome(
+                            provider=provider,
+                            model=candidate,
+                            success=True,
+                        )
+                        chosen_model = candidate
+                        break
+                    else:
+                        self.provider_health.record_outcome(
+                            provider=provider,
+                            model=candidate,
+                            success=False,
+                            error_type=err_type,
+                        )
+                else:
+                    if spawn_result:
+                        chosen_model = candidate
+                        break
 
             if not spawn_result or not chosen_model:
                 if agent_type == "programmer" and strict_coding_tier:
@@ -328,7 +386,7 @@ class WorkerManager:
         model: str,
         label: str,
         routing_policy: dict[str, Any] | None = None,
-    ) -> tuple[Optional[dict[str, str]], Optional[str]]:
+    ) -> tuple[Optional[dict[str, str]], Optional[str], str]:
         """
         Call Gateway API to spawn a new session.
         
@@ -337,7 +395,7 @@ class WorkerManager:
         not an execution agent.
         
         Returns:
-            (Dict with runId and childSessionKey, error_string)
+            (Dict with runId and childSessionKey, error_string, error_type)
         """
         try:
             async with aiohttp.ClientSession() as session:
@@ -363,6 +421,9 @@ class WorkerManager:
                 data = await resp.json()
                 
                 if not data.get("ok"):
+                    error_msg = f"sessions_spawn_failed: {data}"
+                    error_type = classify_error_type(error_msg, data)
+                    
                     await _safe_log_usage_event(
                         self.db,
                         source="orchestrator-spawn",
@@ -371,18 +432,21 @@ class WorkerManager:
                         task_type="inbox" if "inbox" in label else "task_execution",
                         status="error",
                         error_code="sessions_spawn_failed",
-                        metadata={"label": label, "agent_id": agent_id},
+                        metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
                     )
                     logger.error(
                         "[GATEWAY] sessions_spawn failed",
-                        extra={"gateway": {"model": model, "response": data}},
+                        extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
                     )
-                    return None, f"sessions_spawn_failed: {data}"
+                    return None, error_msg, error_type
                 
                 result = data.get("result", {})
                 # Gateway wraps tool results in {content, details}
                 details = result.get("details", result)
                 if details.get("status") != "accepted":
+                    error_msg = f"sessions_spawn_not_accepted: {result}"
+                    error_type = classify_error_type(error_msg, result)
+                    
                     await _safe_log_usage_event(
                         self.db,
                         source="orchestrator-spawn",
@@ -391,13 +455,13 @@ class WorkerManager:
                         task_type="inbox" if "inbox" in label else "task_execution",
                         status="error",
                         error_code="sessions_spawn_not_accepted",
-                        metadata={"label": label, "agent_id": agent_id, "details": details},
+                        metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
                     )
                     logger.error(
                         "[GATEWAY] sessions_spawn not accepted",
-                        extra={"gateway": {"model": model, "result": result}},
+                        extra={"gateway": {"model": model, "result": result, "error_type": error_type}},
                     )
-                    return None, f"sessions_spawn_not_accepted: {result}"
+                    return None, error_msg, error_type
 
                 await _safe_log_usage_event(
                     self.db,
@@ -415,15 +479,19 @@ class WorkerManager:
                         "childSessionKey": details["childSessionKey"],
                     },
                     None,
+                    "none",  # No error
                 )
 
         except Exception as e:
+            error_msg = str(e)
+            error_type = classify_error_type(error_msg)
+            
             logger.error(
                 "[GATEWAY] Error calling sessions_spawn",
-                extra={"gateway": {"model": model, "error": str(e)}},
+                extra={"gateway": {"model": model, "error": error_msg, "error_type": error_type}},
                 exc_info=True,
             )
-            return None, str(e)
+            return None, error_msg, error_type
 
     async def check_workers(self) -> None:
         """
@@ -654,6 +722,15 @@ class WorkerManager:
             # Record success in circuit breaker
             circuit_breaker = CircuitBreaker(self.db)
             await circuit_breaker.record_success(project_id, agent_type)
+            
+            # Record success in provider health
+            if self.provider_health:
+                provider = infer_provider(worker_info.model)
+                self.provider_health.record_outcome(
+                    provider=provider,
+                    model=worker_info.model,
+                    success=True,
+                )
 
             # Auto-push any commits the worker produced.
             #
@@ -684,6 +761,17 @@ class WorkerManager:
                 error_log=error_log,
                 failure_reason="worker_failed"
             )
+            
+            # Record failure in provider health
+            if self.provider_health:
+                provider = infer_provider(worker_info.model)
+                error_type = classify_error_type(error_log)
+                self.provider_health.record_outcome(
+                    provider=provider,
+                    model=worker_info.model,
+                    success=False,
+                    error_type=error_type,
+                )
             
             # Use enhanced escalation manager
             escalation_enhanced = EscalationManagerEnhanced(self.db)

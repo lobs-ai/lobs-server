@@ -32,6 +32,7 @@ from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.control_loop import LobsControlLoopService
+from app.orchestrator.provider_health import ProviderHealthRegistry
 from app.orchestrator.config import POLL_INTERVAL
 from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat
 from app.services.github_sync import GitHubSyncService
@@ -103,6 +104,8 @@ class OrchestratorEngine:
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
         self._reflection_anchor_loaded = False
+        # Provider health tracking (persistent across ticks)
+        self.provider_health: Optional[ProviderHealthRegistry] = None
 
     async def start(self) -> None:
         """Start the orchestrator engine as a background task."""
@@ -209,11 +212,22 @@ class OrchestratorEngine:
 
         async with self._session_factory() as db:
             scanner = Scanner(db)
+            
+            # Initialize provider health registry (persistent, shared across ticks)
+            if self.provider_health is None:
+                self.provider_health = ProviderHealthRegistry(db)
+                await self.provider_health.initialize()
+                logger.info("[ENGINE] Provider health registry initialized")
+            else:
+                # Update DB session reference
+                self.provider_health.db = db
+            
             # Reuse persistent worker manager, just update its db session
             if self._worker_manager is None:
-                self._worker_manager = WorkerManager(db)
+                self._worker_manager = WorkerManager(db, provider_health=self.provider_health)
             else:
                 self._worker_manager.db = db
+                self._worker_manager.provider_health = self.provider_health
             worker_manager = self._worker_manager
             monitor_enhanced = MonitorEnhanced(db)
             circuit_breaker = CircuitBreaker(db)
@@ -726,10 +740,18 @@ class OrchestratorEngine:
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
         async with self._session_factory() as db:
+            # Initialize provider health if needed
+            if self.provider_health is None:
+                self.provider_health = ProviderHealthRegistry(db)
+                await self.provider_health.initialize()
+            else:
+                self.provider_health.db = db
+            
             if self._worker_manager is None:
-                self._worker_manager = WorkerManager(db)
+                self._worker_manager = WorkerManager(db, provider_health=self.provider_health)
             else:
                 self._worker_manager.db = db
+                self._worker_manager.provider_health = self.provider_health
             agent_tracker = AgentTracker(db)
             
             worker_status = await self._worker_manager.get_worker_status()
@@ -757,10 +779,18 @@ class OrchestratorEngine:
     async def get_worker_details(self) -> list[dict[str, Any]]:
         """Get details of all active workers."""
         async with self._session_factory() as db:
+            # Initialize provider health if needed
+            if self.provider_health is None:
+                self.provider_health = ProviderHealthRegistry(db)
+                await self.provider_health.initialize()
+            else:
+                self.provider_health.db = db
+            
             if self._worker_manager is None:
-                self._worker_manager = WorkerManager(db)
+                self._worker_manager = WorkerManager(db, provider_health=self.provider_health)
             else:
                 self._worker_manager.db = db
+                self._worker_manager.provider_health = self.provider_health
             
             workers = []
             for worker_id, (process, task_id, project_id, agent_type, start_time, log_file) in self._worker_manager.active_workers.items():
