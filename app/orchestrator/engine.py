@@ -28,6 +28,7 @@ from app.orchestrator.scheduler import EventScheduler
 from app.orchestrator.routine_runner import RoutineRunner
 from app.orchestrator.inbox_processor import InboxProcessor
 from app.orchestrator.reflection_cycle import ReflectionCycleManager
+from app.orchestrator.memory_maintenance import run_memory_maintenance
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
 from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
@@ -88,6 +89,7 @@ class OrchestratorEngine:
         self._reflection_interval = 10800  # every 3 hours
         self._daily_compression_hour_et = 3
         self._last_daily_compression_date_et: str | None = None
+        self._last_memory_maintenance_date_et: str | None = None
         self._last_capability_sync = 0.0
         self._capability_sync_interval = 3600  # every hour
         # Sweep is now triggered by worker_manager.sweep_requested (no fixed timer)
@@ -265,6 +267,8 @@ class OrchestratorEngine:
                     runner = RoutineRunner(db, hooks={
                         # Built-in no-op hook for smoke tests and manual triggers.
                         "noop": (lambda _r: asyncio.sleep(0, result={"hook": "noop", "status": "ok"})),
+                        # Memory maintenance: audit and clean all agent workspaces.
+                        "memory_maintenance": (lambda _r: run_memory_maintenance(_r)),
                     })
                     routine_result = await runner.process_due_routines(limit=10)
                     if routine_result.executed or routine_result.notified or routine_result.confirmation_requested:
@@ -478,6 +482,34 @@ class OrchestratorEngine:
                     self._last_reflection_check = control_loop.reflection_last_run_at
                     self._last_daily_compression_date_et = control_loop.last_compression_date_et
 
+                    # Daily memory maintenance — runs once per day at same hour as compression.
+                    now_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
+                    today_key_et = now_et.date().isoformat()
+                    if (
+                        self._last_memory_maintenance_date_et != today_key_et
+                        and now_et.hour >= self._daily_compression_hour_et
+                    ):
+                        try:
+                            maint_result = await run_memory_maintenance()
+                            self._last_memory_maintenance_date_et = today_key_et
+                            summary = maint_result.get("summary", {})
+                            logger.info(
+                                "[ENGINE] Memory maintenance: consolidated=%s pruned=%s sessions=%s",
+                                summary.get("files_consolidated", 0),
+                                summary.get("files_pruned", 0),
+                                summary.get("sessions_removed", 0),
+                            )
+                            # Persist marker
+                            maint_marker_key = "memory_maintenance_last_date_et"
+                            maint_marker = await db.get(OrchestratorSetting, maint_marker_key)
+                            if maint_marker is None:
+                                maint_marker = OrchestratorSetting(key=maint_marker_key, value=today_key_et)
+                                db.add(maint_marker)
+                            else:
+                                maint_marker.value = today_key_et
+                        except Exception as e:
+                            logger.error("[ENGINE] Memory maintenance failed: %s", e, exc_info=True)
+
                     # Important: commit here so heartbeat + any control-plane settings (reflection anchor,
                     # daily compression marker) actually persist.
                     await db.commit()
@@ -680,6 +712,7 @@ class OrchestratorEngine:
 
     async def _refresh_runtime_settings(self, db: Any) -> None:
         """Load runtime loop intervals from DB without restart."""
+        SETTINGS_KEY_MEMORY_MAINTENANCE_LAST_DATE_ET = "memory_maintenance_last_date_et"
         keys = (
             SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
             SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
@@ -689,6 +722,7 @@ class OrchestratorEngine:
             SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
             SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
             SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET,
+            SETTINGS_KEY_MEMORY_MAINTENANCE_LAST_DATE_ET,
         )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
@@ -723,6 +757,11 @@ class OrchestratorEngine:
         raw_last_compression = rows.get(SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET)
         if isinstance(raw_last_compression, str) and raw_last_compression.strip():
             self._last_daily_compression_date_et = raw_last_compression.strip()
+
+        # Load persistent memory maintenance marker.
+        raw_maint = rows.get(SETTINGS_KEY_MEMORY_MAINTENANCE_LAST_DATE_ET)
+        if isinstance(raw_maint, str) and raw_maint.strip():
+            self._last_memory_maintenance_date_et = raw_maint.strip()
 
         # Load persistent reflection anchor so restarts don't reset the 6h cadence.
         if not self._reflection_anchor_loaded:
@@ -768,6 +807,7 @@ class OrchestratorEngine:
                     "daily_compression_hour_et": self._daily_compression_hour_et,
                     "last_reflection_check": datetime.fromtimestamp(self._last_reflection_check, tz=timezone.utc).isoformat() if self._last_reflection_check else None,
                     "last_daily_compression_date_et": self._last_daily_compression_date_et,
+                    "last_memory_maintenance_date_et": self._last_memory_maintenance_date_et,
                     "last_heartbeat": heartbeat.last_heartbeat_at.isoformat() if heartbeat else None,
                     "heartbeat_phase": heartbeat.phase if heartbeat else None,
                     "heartbeat_metadata": heartbeat.heartbeat_metadata if heartbeat else None,
