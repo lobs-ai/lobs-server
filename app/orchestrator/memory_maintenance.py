@@ -3,28 +3,28 @@
 Audits and cleans up agent memory files according to OpenClaw best practices:
 - memory/ files should be YYYY-MM-DD.md dated daily logs
 - Non-dated files in memory/ get consolidated into MEMORY.md
-- Daily files older than 30 days get pruned
-- MEMORY.md stays concise and curated
 - Stale spawn/autoassign sessions get cleaned up
+- Cross-agent memory propagation: important info from main workspace
+  gets injected into worker agent MEMORY.md files
 
-Runs as a hook in the RoutineRunner or as a daily phase in the control loop.
-Can also spawn an OpenClaw worker for deeper AI-assisted cleanup.
+Integrates with memory_sync.py for DB consistency after file changes.
+
+Runs as a daily phase in the control loop and as a RoutineRunner hook.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Agent workspace paths (relative to home)
+# Agent workspace paths
 HOME = Path.home()
 AGENT_WORKSPACES = {
     "main": HOME / ".openclaw" / "workspace",
@@ -35,12 +35,22 @@ AGENT_WORKSPACES = {
     "writer": HOME / ".openclaw" / "workspace-writer",
 }
 
+WORKER_AGENTS = [k for k in AGENT_WORKSPACES if k != "main"]
+
 SESSIONS_BASE = HOME / ".openclaw" / "agents"
 
 DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
-MAX_DAILY_AGE_DAYS = 30
 MAX_SESSION_AGE_HOURS = 1
-MAX_MEMORY_MD_LINES = 300
+
+# Sections in main MEMORY.md that should propagate to all worker agents.
+# These are headers whose content gets injected into worker MEMORY.md
+# under a "## Shared Context (from Lobs)" section.
+PROPAGATION_HEADERS = [
+    "## Architecture Overview",
+    "## Repos & Projects",
+    "## Key Decisions & Notes",
+    "## Rafe",
+]
 
 
 def _is_dated_file(filename: str) -> bool:
@@ -48,32 +58,13 @@ def _is_dated_file(filename: str) -> bool:
     return bool(DATE_PATTERN.match(filename))
 
 
-def _file_age_days(filepath: Path) -> float:
-    """Get age of file in days based on filename date or mtime."""
-    name = filepath.stem
-    match = DATE_PATTERN.match(name)
-    if match:
-        try:
-            file_date = datetime.strptime(match.group(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            now = datetime.now(timezone.utc)
-            return (now - file_date).total_seconds() / 86400
-        except ValueError:
-            pass
-    # Fallback to mtime
-    mtime = filepath.stat().st_mtime
-    return (time.time() - mtime) / 86400
-
-
 def audit_workspace(workspace_path: Path) -> dict[str, Any]:
-    """Audit a single workspace for memory best practices.
-    
-    Returns a report dict with findings and actions taken.
-    """
+    """Audit a single workspace for memory best practices."""
     report: dict[str, Any] = {
         "workspace": str(workspace_path),
         "exists": workspace_path.exists(),
         "non_dated_files": [],
-        "old_daily_files": [],
+        "daily_file_count": 0,
         "memory_md_lines": 0,
         "actions_taken": [],
     }
@@ -84,25 +75,58 @@ def audit_workspace(workspace_path: Path) -> dict[str, Any]:
     memory_dir = workspace_path / "memory"
     memory_md = workspace_path / "MEMORY.md"
 
-    # Check MEMORY.md
     if memory_md.exists():
         lines = memory_md.read_text().splitlines()
         report["memory_md_lines"] = len(lines)
 
-    # Audit memory/ directory
     if memory_dir.exists():
         for f in sorted(memory_dir.glob("*.md")):
             if not _is_dated_file(f.name):
                 report["non_dated_files"].append(f.name)
             else:
-                age = _file_age_days(f)
-                if age > MAX_DAILY_AGE_DAYS:
-                    report["old_daily_files"].append({
-                        "name": f.name,
-                        "age_days": round(age, 1),
-                    })
+                report["daily_file_count"] += 1
 
     return report
+
+
+def consolidate_non_dated_files(workspace_path: Path) -> list[str]:
+    """Move content from non-dated memory/ files into MEMORY.md, then delete them.
+
+    Returns list of files consolidated.
+    """
+    memory_dir = workspace_path / "memory"
+    memory_md = workspace_path / "MEMORY.md"
+    consolidated = []
+
+    if not memory_dir.exists():
+        return consolidated
+
+    non_dated = [f for f in sorted(memory_dir.glob("*.md")) if not _is_dated_file(f.name)]
+    if not non_dated:
+        return consolidated
+
+    existing_content = ""
+    if memory_md.exists():
+        existing_content = memory_md.read_text()
+
+    additions = []
+    for f in non_dated:
+        content = f.read_text().strip()
+        if not content:
+            f.unlink()
+            consolidated.append(f.name)
+            continue
+
+        section_name = f.stem.replace("-", " ").replace("_", " ").title()
+        additions.append(f"\n## {section_name}\n\n{content}\n")
+        consolidated.append(f.name)
+        f.unlink()
+
+    if additions:
+        new_content = existing_content.rstrip() + "\n" + "\n".join(additions)
+        memory_md.write_text(new_content)
+
+    return consolidated
 
 
 def cleanup_stale_sessions() -> dict[str, Any]:
@@ -129,7 +153,6 @@ def cleanup_stale_sessions() -> dict[str, Any]:
         if not isinstance(data, dict):
             continue
 
-        original_count = len(data)
         cleaned = {}
         removed = 0
 
@@ -140,7 +163,6 @@ def cleanup_stale_sessions() -> dict[str, Any]:
 
             if is_spawn and age_hours > MAX_SESSION_AGE_HOURS:
                 removed += 1
-                # Also remove transcript file
                 sid = val.get("sessionId", "")
                 if sid:
                     for transcript in (agent_dir / "sessions").glob(f"{sid}*.jsonl"):
@@ -159,124 +181,178 @@ def cleanup_stale_sessions() -> dict[str, Any]:
     return report
 
 
-def consolidate_non_dated_files(workspace_path: Path, *, dry_run: bool = False) -> list[str]:
-    """Move content from non-dated memory/ files into MEMORY.md, then delete them.
-    
-    Returns list of files consolidated.
+def _extract_sections(content: str, headers: list[str]) -> dict[str, str]:
+    """Extract named sections from markdown content.
+
+    Returns a dict of header -> section content (including the header line).
     """
-    memory_dir = workspace_path / "memory"
-    memory_md = workspace_path / "MEMORY.md"
-    consolidated = []
+    sections: dict[str, str] = {}
+    lines = content.splitlines()
 
-    if not memory_dir.exists():
-        return consolidated
+    for target_header in headers:
+        target_level = target_header.count("#")
+        in_section = False
+        section_lines: list[str] = []
 
-    non_dated = [f for f in sorted(memory_dir.glob("*.md")) if not _is_dated_file(f.name)]
-    if not non_dated:
-        return consolidated
+        for line in lines:
+            if line.strip().startswith("#"):
+                # Check if this is our target header
+                if line.strip() == target_header or line.strip().startswith(target_header):
+                    in_section = True
+                    section_lines = [line]
+                    continue
+                # Check if we hit another header at same or higher level
+                if in_section:
+                    level = len(line.strip()) - len(line.strip().lstrip("#"))
+                    if level <= target_level:
+                        in_section = False
+                        continue
+            if in_section:
+                section_lines.append(line)
 
-    # Read existing MEMORY.md
-    existing_content = ""
-    if memory_md.exists():
-        existing_content = memory_md.read_text()
+        if section_lines:
+            sections[target_header] = "\n".join(section_lines)
 
-    additions = []
-    for f in non_dated:
-        content = f.read_text().strip()
-        if not content:
-            if not dry_run:
-                f.unlink()
-            consolidated.append(f.name)
+    return sections
+
+
+def propagate_shared_context() -> dict[str, Any]:
+    """Propagate important sections from main MEMORY.md to worker agents.
+
+    Reads designated sections from the main workspace MEMORY.md and injects
+    them into each worker agent's MEMORY.md under a managed
+    "## Shared Context (from Lobs)" section.
+
+    This section is fully replaced on each run so it stays current.
+    """
+    report: dict[str, Any] = {"agents_updated": [], "skipped": [], "errors": []}
+
+    main_memory = AGENT_WORKSPACES["main"] / "MEMORY.md"
+    if not main_memory.exists():
+        report["skipped"].append("main MEMORY.md not found")
+        return report
+
+    main_content = main_memory.read_text()
+    sections = _extract_sections(main_content, PROPAGATION_HEADERS)
+
+    if not sections:
+        report["skipped"].append("no propagation sections found in main MEMORY.md")
+        return report
+
+    # Build the shared context block
+    shared_block_parts = [
+        "## Shared Context (from Lobs)",
+        "",
+        f"*Auto-propagated on {datetime.now(timezone.utc).strftime('%Y-%m-%d')}. "
+        "Do not edit — this section is overwritten daily by memory maintenance.*",
+        "",
+    ]
+    for header, content in sections.items():
+        shared_block_parts.append(content)
+        shared_block_parts.append("")
+
+    shared_block = "\n".join(shared_block_parts).rstrip() + "\n"
+
+    SHARED_MARKER_START = "## Shared Context (from Lobs)"
+    SHARED_MARKER_END_PATTERN = re.compile(
+        r"^## (?!Shared Context \(from Lobs\))", re.MULTILINE
+    )
+
+    for agent in WORKER_AGENTS:
+        ws = AGENT_WORKSPACES[agent]
+        if not ws.exists():
+            report["skipped"].append(agent)
             continue
 
-        # Add a section header from the filename
-        section_name = f.stem.replace("-", " ").replace("_", " ").title()
-        additions.append(f"\n## {section_name}\n\n{content}\n")
-        consolidated.append(f.name)
+        memory_md = ws / "MEMORY.md"
+        try:
+            existing = memory_md.read_text() if memory_md.exists() else ""
 
-        if not dry_run:
-            f.unlink()
+            # Remove old shared context section if present
+            if SHARED_MARKER_START in existing:
+                start_idx = existing.index(SHARED_MARKER_START)
+                # Find the next top-level header after our section
+                rest = existing[start_idx + len(SHARED_MARKER_START):]
+                match = SHARED_MARKER_END_PATTERN.search(rest)
+                if match:
+                    end_idx = start_idx + len(SHARED_MARKER_START) + match.start()
+                    existing = existing[:start_idx].rstrip() + "\n\n" + existing[end_idx:]
+                else:
+                    # Our section goes to end of file
+                    existing = existing[:start_idx].rstrip()
 
-    if additions and not dry_run:
-        # Append to MEMORY.md
-        new_content = existing_content.rstrip() + "\n" + "\n".join(additions)
-        memory_md.write_text(new_content)
+            # Append shared block at the end
+            new_content = existing.rstrip() + "\n\n" + shared_block
+            memory_md.write_text(new_content)
+            report["agents_updated"].append(agent)
 
-    return consolidated
+        except Exception as e:
+            report["errors"].append(f"{agent}: {e}")
+            logger.error("Failed to propagate to %s: %s", agent, e, exc_info=True)
 
-
-def prune_old_daily_files(workspace_path: Path, *, dry_run: bool = False) -> list[str]:
-    """Delete daily memory files older than MAX_DAILY_AGE_DAYS.
-    
-    Returns list of files pruned.
-    """
-    memory_dir = workspace_path / "memory"
-    pruned = []
-
-    if not memory_dir.exists():
-        return pruned
-
-    for f in sorted(memory_dir.glob("*.md")):
-        if _is_dated_file(f.name) and _file_age_days(f) > MAX_DAILY_AGE_DAYS:
-            pruned.append(f.name)
-            if not dry_run:
-                f.unlink()
-
-    return pruned
+    return report
 
 
 async def run_memory_maintenance(routine=None) -> dict[str, Any]:
     """Full memory maintenance pass across all agent workspaces.
-    
-    This is the main entry point, suitable as a RoutineRunner hook or
-    direct call from the control loop.
+
+    Entry point for RoutineRunner hook or direct call from control loop.
     """
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "workspaces": {},
+        "propagation": {},
         "sessions": {},
         "summary": {},
     }
 
     total_consolidated = 0
-    total_pruned = 0
 
     for agent_name, ws_path in AGENT_WORKSPACES.items():
         if not ws_path.exists():
             continue
 
-        # Audit
         audit = audit_workspace(ws_path)
-
-        # Consolidate non-dated files into MEMORY.md
         consolidated = consolidate_non_dated_files(ws_path)
         total_consolidated += len(consolidated)
-
-        # Prune old daily files
-        pruned = prune_old_daily_files(ws_path)
-        total_pruned += len(pruned)
 
         results["workspaces"][agent_name] = {
             "audit": audit,
             "consolidated": consolidated,
-            "pruned": pruned,
         }
+
+    # Propagate shared context from main to workers
+    prop_report = propagate_shared_context()
+    results["propagation"] = prop_report
 
     # Clean stale sessions
     session_report = cleanup_stale_sessions()
     results["sessions"] = session_report
 
+    # Trigger memory_sync if available (keeps DB in sync with filesystem)
+    try:
+        from app.database import AsyncSessionLocal
+        from app.services.memory_sync import sync_agent_memories
+
+        async with AsyncSessionLocal() as db:
+            sync_result = await sync_agent_memories(db)
+            await db.commit()
+            results["memory_sync"] = sync_result
+    except Exception as e:
+        logger.warning("Memory sync after maintenance failed (non-fatal): %s", e)
+        results["memory_sync"] = {"error": str(e)}
+
     results["summary"] = {
         "workspaces_audited": len([w for w in AGENT_WORKSPACES.values() if w.exists()]),
         "files_consolidated": total_consolidated,
-        "files_pruned": total_pruned,
+        "agents_propagated": len(prop_report.get("agents_updated", [])),
         "sessions_removed": session_report["total_removed"],
     }
 
     logger.info(
-        "[MEMORY_MAINTENANCE] Complete: consolidated=%d pruned=%d sessions_removed=%d",
+        "[MEMORY_MAINTENANCE] Complete: consolidated=%d propagated=%d sessions=%d",
         total_consolidated,
-        total_pruned,
+        len(prop_report.get("agents_updated", [])),
         session_report["total_removed"],
     )
 
