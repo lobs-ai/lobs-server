@@ -26,6 +26,8 @@ from typing import Any
 
 import aiohttp
 
+import subprocess
+
 from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,8 @@ AGENT_WORKSPACES = {
 WORKER_AGENTS = [k for k in AGENT_WORKSPACES if k != "main"]
 
 SESSIONS_BASE = HOME / ".openclaw" / "agents"
+
+SHARED_MEMORY_REPO = HOME / "lobs-shared-memory"
 
 MAX_SESSION_AGE_HOURS = 1
 
@@ -342,6 +346,58 @@ You are curating MEMORY.md for the **{agent_name}** agent workspace at `{workspa
         return {"status": "error", "error": str(e)}
 
 
+def auto_commit_shared_memory() -> dict[str, Any]:
+    """Auto-commit and push any changes in the shared memory repo."""
+    report: dict[str, Any] = {"status": "ok", "committed": False}
+
+    if not (SHARED_MEMORY_REPO / ".git").exists():
+        report["status"] = "no_repo"
+        return report
+
+    try:
+        # Check for changes
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=SHARED_MEMORY_REPO,
+            capture_output=True, text=True, timeout=10,
+        )
+        if not result.stdout.strip():
+            return report  # Nothing to commit
+
+        # Stage all changes
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=SHARED_MEMORY_REPO,
+            capture_output=True, text=True, timeout=10,
+        )
+
+        # Commit
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        subprocess.run(
+            ["git", "commit", "-m", f"auto: memory maintenance update ({now})"],
+            cwd=SHARED_MEMORY_REPO,
+            capture_output=True, text=True, timeout=10,
+        )
+        report["committed"] = True
+
+        # Push (best-effort, don't fail if no remote)
+        push_result = subprocess.run(
+            ["git", "push"],
+            cwd=SHARED_MEMORY_REPO,
+            capture_output=True, text=True, timeout=30,
+        )
+        report["pushed"] = push_result.returncode == 0
+        if push_result.returncode != 0:
+            report["push_error"] = push_result.stderr.strip()
+
+    except Exception as e:
+        report["status"] = "error"
+        report["error"] = str(e)
+        logger.error("Shared memory auto-commit failed: %s", e)
+
+    return report
+
+
 async def run_memory_maintenance(routine=None) -> dict[str, Any]:
     """Full memory maintenance pass.
 
@@ -402,10 +458,15 @@ async def run_memory_maintenance(routine=None) -> dict[str, Any]:
         logger.warning("Memory sync failed (non-fatal): %s", e)
         results["memory_sync"] = {"error": str(e)}
 
+    # Auto-commit shared memory repo
+    commit_report = auto_commit_shared_memory()
+    results["shared_memory_commit"] = commit_report
+
     results["summary"] = {
         "agents_propagated": len(prop_report.get("agents_updated", [])),
         "sessions_removed": session_report["total_removed"],
         "curators_spawned": curators_spawned,
+        "shared_memory_committed": commit_report.get("committed", False),
     }
 
     logger.info(
