@@ -234,11 +234,28 @@ Reflection record ID: {reflection_id}
 Context packet JSON:
 {packet}
 
-Governance constraints (mandatory):
-- You are in proposal mode only.
+## Instructions
+
+Analyze your recent work, the system state, and your own performance. Think about:
+1. What inefficiencies exist in your workflow or the broader system?
+2. What opportunities are being missed?
+3. What risks should the team be aware of?
+4. What proactive work would you like to do? (documentation, research, improvements, etc.)
+5. What about your own behavior should change based on recent experience?
+
+## Memory Updates
+
+Include any updates to your experience memory (observations, lessons learned, patterns noticed).
+These will be stored in your memory/ directory for future reference.
+
+## Governance Constraints (mandatory)
+
+- You are in PROPOSAL mode only.
 - Do NOT execute work, run migrations, edit code, or create tasks/issues/inbox items.
+- All proposals go to Lobs-PM for review. Nothing is auto-approved.
 - If a proposal requires action, put it only in `proposed_initiatives`.
-- Lobs is final decision authority; nothing is auto-approved.
+
+## Output Format
 
 Return STRICT JSON with this schema (no prose outside JSON):
 {{
@@ -254,7 +271,8 @@ Return STRICT JSON with this schema (no prose outside JSON):
       "suggested_owner_agent": "optional-agent-type"
     }}
   ],
-  "identity_adjustments": ["..."]
+  "identity_adjustments": ["..."],
+  "experience_notes": ["raw observations and lessons from this reflection window"]
 }}
 """
 

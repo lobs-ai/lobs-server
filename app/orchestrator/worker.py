@@ -739,6 +739,10 @@ class WorkerManager:
                 summary=summary,
                 succeeded=succeeded,
             )
+
+        # Lobs-PM sweep review results: create tasks from approved initiatives
+        if worker_info.label.startswith("sweep-review-") and summary and succeeded:
+            await self._process_sweep_review_results(summary)
         
         # Record worker run
         await self._record_worker_run(
@@ -1045,6 +1049,68 @@ class WorkerManager:
             created.append(task_id)
 
         return created
+
+    async def _process_sweep_review_results(self, summary: str) -> None:
+        """Process Lobs sweep review output: create tasks from approved initiatives."""
+        try:
+            payload = self._extract_json(summary)
+            decisions = payload.get("decisions", [])
+            if not isinstance(decisions, list):
+                return
+
+            created = 0
+            for d in decisions:
+                if not isinstance(d, dict):
+                    continue
+                initiative_id = d.get("initiative_id")
+                decision = d.get("decision", "").lower()
+
+                # Update initiative status in DB
+                if initiative_id:
+                    initiative = await self.db.get(AgentInitiative, initiative_id)
+                    if initiative:
+                        if decision == "approve":
+                            initiative.status = "approved"
+                        elif decision == "reject":
+                            initiative.status = "rejected"
+                        elif decision == "defer":
+                            initiative.status = "deferred"
+                        initiative.rationale = (initiative.rationale or "") + f" | Lobs: {d.get('reason', '')}"
+
+                # Create task for approved initiatives
+                if decision == "approve":
+                    task_title = d.get("task_title") or d.get("title", "Untitled")
+                    task_notes = d.get("task_notes") or d.get("reason", "")
+                    owner_agent = d.get("owner_agent", "programmer")
+                    priority = d.get("priority", "medium")
+                    # Try to get project_id from initiative
+                    project_id = d.get("project_id")
+                    if not project_id and initiative:
+                        # Use a default project or leave None
+                        project_id = None
+
+                    priority_map = {"high": 1, "medium": 2, "low": 3}
+
+                    self.db.add(Task(
+                        id=str(uuid.uuid4()),
+                        title=task_title[:200],
+                        notes=f"[Auto-created from initiative sweep]\n\nInitiative: {initiative_id or 'unknown'}\n\n{task_notes}",
+                        status="active",
+                        work_state="not_started",
+                        agent=owner_agent,
+                        project_id=project_id,
+                        priority=priority_map.get(priority, 2),
+                    ))
+                    created += 1
+
+            await self.db.commit()
+            logger.info(
+                "[SWEEP_REVIEW] Processed %d decisions, created %d tasks",
+                len(decisions), created,
+            )
+        except Exception as e:
+            logger.warning("[SWEEP_REVIEW] Failed to process results: %s", e, exc_info=True)
+            await self.db.rollback()
 
     @staticmethod
     def _json_list(value: Any) -> list[str]:

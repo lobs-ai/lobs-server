@@ -1,7 +1,15 @@
-"""Lobs sweep phase: wait for full agent proposal set, filter bad ideas, dedupe, and route."""
+"""Lobs sweep phase: wait for full agent proposal set, filter bad ideas, dedupe, and route.
+
+Flow:
+1. Server-side first pass: quality filter, dedup, contradiction detection
+2. Spawn Lobs (main agent) session for remaining proposals (batch review)
+3. Only risk_tier C / truly high-risk items escalate to Rafe via inbox
+"""
 
 from __future__ import annotations
 
+import json
+import logging
 import re
 import uuid
 from collections import defaultdict
@@ -23,6 +31,8 @@ from app.orchestrator.policy_engine import PolicyEngine
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator.registry import AgentRegistry
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_DAILY_BUDGET = {
     "writer": 4,
     "researcher": 4,
@@ -33,10 +43,16 @@ DEFAULT_DAILY_BUDGET = {
 
 
 class SweepArbitrator:
-    """Global initiative arbitration with Lobs as final decision authority."""
+    """Global initiative arbitration with Lobs as final decision authority.
 
-    def __init__(self, db: AsyncSession):
+    After server-side first-pass filtering (quality, dedup, contradiction),
+    remaining proposals are batched and sent to a Lobs (main agent) session for review.
+    Only risk_tier C items escalate directly to Rafe's inbox.
+    """
+
+    def __init__(self, db: AsyncSession, worker_manager: Any | None = None):
         self.db = db
+        self.worker_manager = worker_manager
         self.policy = PolicyEngine()
         self.decision_engine = InitiativeDecisionEngine(db)
         self.registry = AgentRegistry()
@@ -238,6 +254,46 @@ class SweepArbitrator:
                 size=size,
             )
             lobs_review += 1
+
+        # --- Lobs-PM batch review for non-auto items ---
+        lobs_review_initiatives = [
+            i for i in initiatives
+            if i.status == "lobs_review" or (i.status == "proposed" and i.risk_tier != "C")
+        ]
+        high_risk_for_rafe = [
+            i for i in initiatives
+            if i.status in ("proposed", "lobs_review") and i.risk_tier == "C"
+        ]
+
+        # Spawn Lobs (main agent) to review batch (if worker_manager available and items exist)
+        if lobs_review_initiatives and self.worker_manager is not None:
+            try:
+                await self._spawn_lobs_pm_review(lobs_review_initiatives)
+            except Exception as e:
+                logger.warning("[SWEEP] Failed to spawn Lobs (main agent) review: %s", e)
+                # Fall back to inbox items for these
+                for initiative in lobs_review_initiatives:
+                    await self._create_lobs_decision_item(
+                        initiative,
+                        recommendation="review",
+                        budget="n/a",
+                        decision_reason="Lobs sweep spawn failed, escalating to inbox",
+                        approval_mode="soft_gate",
+                        suggested_agent=initiative.owner_agent or initiative.proposed_by_agent or "programmer",
+                        size="medium",
+                    )
+
+        # Only truly high-risk items go directly to Rafe's inbox
+        for initiative in high_risk_for_rafe:
+            await self._create_lobs_decision_item(
+                initiative,
+                recommendation="review",
+                budget="n/a",
+                decision_reason=f"Risk tier C — requires human review. {initiative.policy_reason or ''}",
+                approval_mode="hard_gate",
+                suggested_agent=initiative.owner_agent or initiative.proposed_by_agent or "programmer",
+                size="large",
+            )
 
         capability_gaps = [i.id for i, is_gap in capability_gap_map.items() if is_gap]
 
@@ -483,6 +539,67 @@ class SweepArbitrator:
         )
         category = " ".join((initiative.category or "").strip().lower().split())
         return f"{category}|{normalized[:220]}"
+
+    async def _spawn_lobs_pm_review(self, initiatives: list[AgentInitiative]) -> None:
+        """Spawn a Lobs (main agent) session to review a batch of initiatives."""
+        batch = []
+        for i in initiatives:
+            batch.append({
+                "id": i.id,
+                "title": i.title,
+                "description": i.description,
+                "category": i.category,
+                "risk_tier": i.risk_tier,
+                "policy_lane": i.policy_lane,
+                "proposed_by": i.proposed_by_agent,
+                "suggested_owner": i.owner_agent,
+                "score": i.score,
+            })
+
+        prompt = f"""## Lobs-PM Sweep Review
+
+You are reviewing {len(batch)} initiative proposals from agent reflections.
+
+Your job:
+1. Review each proposal for value, feasibility, and priority
+2. Check for duplicates or overlapping work across proposals
+3. Decide: approve (create task), defer (not now), or reject (bad idea)
+4. For approved items, confirm the owner agent assignment
+
+Return STRICT JSON (no prose outside JSON):
+{{
+  "decisions": [
+    {{
+      "initiative_id": "...",
+      "decision": "approve|defer|reject",
+      "reason": "brief rationale",
+      "owner_agent": "agent-type",
+      "task_title": "title for task if approved",
+      "task_notes": "notes for task if approved",
+      "priority": "low|medium|high"
+    }}
+  ],
+  "cross_cutting_observations": ["..."],
+  "system_improvements_suggested": ["..."]
+}}
+
+Proposals to review:
+{json.dumps(batch, indent=2)}
+"""
+        result, error = await self.worker_manager._spawn_session(
+            task_prompt=prompt,
+            agent_id="main",
+            model="anthropic/claude-haiku-4-5",
+            label=f"sweep-review-{uuid.uuid4().hex[:8]}",
+        )
+        if not result:
+            raise RuntimeError(f"Lobs sweep spawn failed: {error}")
+
+        logger.info(
+            "[SWEEP] Spawned Lobs (main agent) review for %d initiatives (runId=%s)",
+            len(batch),
+            result.get("runId", "?")[:12],
+        )
 
     @staticmethod
     def _norm(value: str | None) -> str:

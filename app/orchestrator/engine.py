@@ -219,7 +219,7 @@ class OrchestratorEngine:
             circuit_breaker = CircuitBreaker(db)
             scheduler = EventScheduler(db)
             reflection_manager = ReflectionCycleManager(db, worker_manager)
-            sweep_arbitrator = SweepArbitrator(db)
+            sweep_arbitrator = SweepArbitrator(db, worker_manager=worker_manager)
             diagnostic_engine = DiagnosticTriggerEngine(db, worker_manager)
 
             # 1. Check scheduled events (every 60 seconds)
