@@ -5,28 +5,32 @@ Index of design documents, implementation notes, and research findings.
 ## Getting Started
 
 ### Core Documentation
-- **[QUICKSTART.md](../QUICKSTART.md)** ✨ **NEW 2026-02-14** — Get started in 5 minutes
-- **[ARCHITECTURE.md](../ARCHITECTURE.md)** — System architecture, data flow, components (comprehensive overview) ✨ **Updated 2026-02-14**
+- **[QUICKSTART.md](../QUICKSTART.md)** — Get started in 5 minutes (Added 2026-02-14)
+- **[ARCHITECTURE.md](../ARCHITECTURE.md)** — System architecture, data flow, components (Updated 2026-02-14)
 - **[AGENTS.md](../AGENTS.md)** — API reference, development guide, agent integration
-- **[CHANGELOG.md](../CHANGELOG.md)** ✨ **NEW 2026-02-14** — API changes and version history
+- **[CHANGELOG.md](../CHANGELOG.md)** — API changes and version history (Added 2026-02-14)
 - **[README.md](../README.md)** — Project overview, quick start, setup
-- **[.env.example](../.env.example)** ✨ **NEW 2026-02-14** — Environment configuration reference
+- **[.env.example](../.env.example)** — Environment configuration reference (Added 2026-02-14)
 
 ### Development Guides
-- **[BEST_PRACTICES.md](BEST_PRACTICES.md)** ✨ **NEW 2026-02-14** — N+1 prevention, SQLite optimization, Pydantic v2 patterns, code quality guidelines
+- **[coding-standards.md](coding-standards.md)** — Code quality, testing, and review standards (Added 2026-02-20)
+- **[git-workflow.md](git-workflow.md)** — Branch strategy, commit conventions, PR process (Added 2026-02-20)
+- **[BEST_PRACTICES.md](BEST_PRACTICES.md)** — N+1 prevention, SQLite optimization, Pydantic v2 patterns (Added 2026-02-14)
 - **[TESTING.md](TESTING.md)** — Complete testing guide (setup, running tests, adding new tests)
 - **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** — Known issues, limitations, and technical debt
-- **[task-improvements-roadmap-implementation.md](task-improvements-roadmap-implementation.md)** ✨ **NEW 2026-02-18** — Phase 0.5→4 implementation, migrations, APIs, follow-ups
+- **[task-improvements-roadmap-implementation.md](task-improvements-roadmap-implementation.md)** — Phase 0.5→4 implementation (Added 2026-02-18)
 
 ## Design Documents
 
 ### Agent Coordination & Orchestration
-- **[agent-lifecycle-architecture.md](agent-lifecycle-architecture.md)** ✨ **NEW 2026-02-18** — Canonical lifecycle architecture (recruitment, execution, reflection/compression, DB-mediated coordination)
-- **[agent-operations-playbook.md](agent-operations-playbook.md)** ✨ **NEW 2026-02-18** — Operator runbook for recruiting and managing agent types end-to-end
-- **[agent-api-contracts.md](agent-api-contracts.md)** ✨ **NEW 2026-02-18** — Implemented API and model contracts for agent lifecycle/control loops
-- **[project-manager-agent.md](project-manager-agent.md)** — Project manager agent design (task routing, delegation, approval workflows)
-- **[tiered-approval-system.md](tiered-approval-system.md)** — Three-tier approval workflow (auto-approve, human review, escalate)
-- **[orchestrator-model-routing.md](orchestrator-model-routing.md)** — First-pass model router policy (complexity/criticality, fallback chain, audit logging)
+- **[agent-lifecycle-architecture.md](agent-lifecycle-architecture.md)** — Canonical lifecycle architecture (Added 2026-02-18)
+- **[agent-operations-playbook.md](agent-operations-playbook.md)** — Operator runbook for agent management (Added 2026-02-18)
+- **[agent-api-contracts.md](agent-api-contracts.md)** — API and model contracts for agent lifecycle (Added 2026-02-18)
+- **[model-routing.md](model-routing.md)** — Model tier system, provider health tracking, fallback chains (Added 2026-02-20)
+- **[PROVIDER_HEALTH.md](PROVIDER_HEALTH.md)** — Provider health implementation details (Added 2026-02-20)
+- **[orchestrator-model-routing.md](orchestrator-model-routing.md)** — First-pass model router design (Added 2026-02-14)
+- **[project-manager-agent.md](project-manager-agent.md)** — Project manager agent design
+- **[tiered-approval-system.md](tiered-approval-system.md)** — Three-tier approval workflow
 
 ### Topics & Knowledge System
 - **[TOPICS_IMPLEMENTATION.md](TOPICS_IMPLEMENTATION.md)** — Topics feature implementation (auto-creation, researcher integration)
@@ -48,17 +52,21 @@ Index of design documents, implementation notes, and research findings.
 
 | Topic | Document |
 |-------|----------|
-| **Quick start** | [QUICKSTART.md](../QUICKSTART.md) ✨ |
+| **Quick start** | [QUICKSTART.md](../QUICKSTART.md) |
 | **System architecture** | [ARCHITECTURE.md](../ARCHITECTURE.md) |
 | **API reference** | [AGENTS.md](../AGENTS.md) |
-| **API changelog** | [CHANGELOG.md](../CHANGELOG.md) ✨ |
-| **Environment config** | [.env.example](../.env.example) ✨ |
-| **Best practices** | [BEST_PRACTICES.md](BEST_PRACTICES.md) ✨ |
+| **API changelog** | [CHANGELOG.md](../CHANGELOG.md) |
+| **Environment config** | [.env.example](../.env.example) |
+| **Coding standards** | [coding-standards.md](coding-standards.md) |
+| **Git workflow** | [git-workflow.md](git-workflow.md) |
+| **Best practices** | [BEST_PRACTICES.md](BEST_PRACTICES.md) |
+| **Model routing & provider health** | [model-routing.md](model-routing.md) |
 | **Testing** | [TESTING.md](TESTING.md) |
 | **Known issues & limitations** | [KNOWN_ISSUES.md](KNOWN_ISSUES.md) |
-| Agent lifecycle architecture | [agent-lifecycle-architecture.md](agent-lifecycle-architecture.md) ✨ |
-| Agent operations playbook | [agent-operations-playbook.md](agent-operations-playbook.md) ✨ |
-| Agent API contracts | [agent-api-contracts.md](agent-api-contracts.md) ✨ |
+| Agent lifecycle architecture | [agent-lifecycle-architecture.md](agent-lifecycle-architecture.md) |
+| Agent operations playbook | [agent-operations-playbook.md](agent-operations-playbook.md) |
+| Agent API contracts | [agent-api-contracts.md](agent-api-contracts.md) |
+| Provider health implementation | [PROVIDER_HEALTH.md](PROVIDER_HEALTH.md) |
 | Project manager workflow | [project-manager-agent.md](project-manager-agent.md) |
 | Approval system overview | [tiered-approval-system.md](tiered-approval-system.md) |
 | Creating topics from agents | [researcher-topic-creation-design.md](researcher-topic-creation-design.md) |
@@ -78,30 +86,31 @@ Index of design documents, implementation notes, and research findings.
 
 ## Recent Additions & Updates
 
+### 2026-02-20
+- ✅ **coding-standards.md** — Code quality, testing, and review standards
+- ✅ **git-workflow.md** — Branch strategy, commit conventions, PR process
+- ✅ **model-routing.md** — Model tier system, provider health tracking, fallback chains
+- ✅ **PROVIDER_HEALTH.md** — Provider health implementation details (moved from root to docs/)
+- ✅ Documentation cleanup — Removed "NEW" labels, standardized to "Added <date>" format
+
 ### 2026-02-18
-- ✅ **Agent lifecycle docs set** — Added canonical architecture, operations playbook, and API contracts for recruiting/managing agents and control-loop operations
+- ✅ **Agent lifecycle docs set** — Canonical architecture, operations playbook, API contracts
+- ✅ **Task improvements roadmap** — Phase 0.5→4 implementation documentation
 
-### 2026-02-14 (Latest)
-- ✅ **BEST_PRACTICES.md** — Comprehensive development guidelines: N+1 query prevention, SQLite WAL optimization, Pydantic v2 patterns, API design, testing standards
-- ✅ **Worker activity endpoint** — New `/api/worker/activity` API for activity feeds (AGENTS.md updated)
-- ✅ **Task state documentation** — Complete work_state vs. review_state vs. status explanation (ARCHITECTURE.md)
-- ✅ **inbox-responder removal** — Project-manager now handles all inbox processing (refactored)
-- ✅ **Agent summaries** — Worker runs now capture agent output summaries from session results
-- ✅ **work_state fixes** — Scanner accepts both 'not_started' and 'ready', scheduler defaults to 'not_started'
-
-### 2026-02-14 (Earlier)
-- **ARCHITECTURE.md** — Comprehensive system architecture overview (NEW!)
-- Testing guide (TESTING.md)
-- Known issues documentation (KNOWN_ISSUES.md)
-- Project manager agent documentation
-- Tiered approval system documentation
-- WebSocket reconnection research
+### 2026-02-14
+- ✅ **BEST_PRACTICES.md** — N+1 prevention, SQLite optimization, Pydantic v2 patterns
+- ✅ **QUICKSTART.md** — 5-minute getting started guide
+- ✅ **CHANGELOG.md** — API version history
+- ✅ **ARCHITECTURE.md** — Comprehensive system architecture overview
+- ✅ Worker activity endpoint — New `/api/worker/activity` API for activity feeds
+- ✅ Task state documentation — work_state vs. review_state vs. status
+- ✅ inbox-responder removal — Project-manager now handles all inbox processing
 
 ### 2026-02-13
-- Topics implementation and migration
-- Document lifecycle design
-- Work dump analysis design
-- Cron timeout investigation
+- ✅ Topics implementation and migration
+- ✅ Document lifecycle design
+- ✅ Work dump analysis design
+- ✅ Cron timeout investigation
 
 ## Contributing
 

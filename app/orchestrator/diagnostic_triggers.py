@@ -338,14 +338,21 @@ class DiagnosticTriggerEngine:
             },
             purpose="diagnostic",
         )
+        label = f"diagnostic-{agent_type}"
         result, error, _error_type = await self.worker_manager._spawn_session(
             task_prompt=prompt,
             agent_id=agent_type,
             model=choice.model,
-            label=f"diagnostic-{agent_type}",
+            label=label,
         )
 
         if result:
+            self.worker_manager.register_external_worker(
+                result,
+                agent_type=agent_type,
+                model=choice.model,
+                label=label,
+            )
             return True
 
         reflection.status = "failed"

@@ -394,9 +394,9 @@ class WorkerManager:
         """
         Call Gateway API to spawn a new session.
         
-        Uses cleanup=delete for auto-archival. Sessions are spawned from the
-        internal sink session key; sink is a control-plane routing identity,
-        not an execution agent.
+        Uses cleanup=keep so session history remains available for result
+        extraction. Sessions are spawned from the internal sink session key;
+        sink is a control-plane routing identity, not an execution agent.
         
         Returns:
             (Dict with runId and childSessionKey, error_string, error_type)
@@ -415,7 +415,7 @@ class WorkerManager:
                             "agentId": agent_id,
                             "model": model,
                             "runTimeoutSeconds": 900,
-                            "cleanup": "delete",
+                            "cleanup": "keep",
                             "label": label
                         }
                     },
@@ -497,6 +497,39 @@ class WorkerManager:
             )
             return None, error_msg, error_type
 
+    def register_external_worker(
+        self,
+        spawn_result: dict[str, str],
+        *,
+        agent_type: str,
+        model: str,
+        label: str,
+        task_id: str | None = None,
+        project_id: str | None = None,
+    ) -> str:
+        """Register a worker spawned outside of spawn_worker() (e.g. reflections, diagnostics).
+
+        This ensures check_workers() polls and handles completion for these sessions.
+        Returns the generated worker_id.
+        """
+        import time as _time
+
+        run_id = spawn_result["runId"]
+        child_session_key = spawn_result["childSessionKey"]
+        worker_id = f"ext_{int(_time.time())}_{label}"
+        self.active_workers[worker_id] = WorkerInfo(
+            run_id=run_id,
+            child_session_key=child_session_key,
+            task_id=task_id or label,
+            project_id=project_id or "",
+            agent_type=agent_type,
+            model=model,
+            start_time=_time.time(),
+            label=label,
+        )
+        logger.info("[WORKER] Registered external worker %s (label=%s, agent=%s)", worker_id, label, agent_type)
+        return worker_id
+
     async def check_workers(self) -> None:
         """
         Check all active workers and handle completed/failed ones.
@@ -564,76 +597,92 @@ class WorkerManager:
         self,
         session_key: str
     ) -> Optional[dict[str, Any]]:
+        """Check session status by reading the JSONL transcript file directly.
+
+        Gateway's sessions_list doesn't expose a "completed" status field, so we
+        detect completion by checking whether the transcript contains a final
+        assistant message and is no longer being written to (mtime > 15s ago).
         """
-        Check session status via Gateway API.
-        
-        Returns:
-            Dict with status info, or None on error
-        """
+        import pathlib
+
         try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_list",
-                        "args": {"activeMinutes": 120}
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10)
-                )
-                
-                data = await resp.json()
-                
-                if not data.get("ok"):
-                    logger.warning(f"[GATEWAY] sessions_list failed: {data}")
-                    return None
-                
-                # Gateway wraps tool results in {content, details}
-                result = data.get("result", {})
-                # Try to parse sessions from content text or details
-                sessions = []
-                if "details" in result:
-                    sessions = result["details"].get("sessions", [])
-                elif "content" in result:
-                    import json as _json
-                    for c in result["content"]:
-                        if c.get("type") == "text":
-                            try:
-                                parsed = _json.loads(c["text"])
-                                sessions = parsed.get("sessions", [])
-                            except (ValueError, KeyError):
-                                pass
-                else:
-                    sessions = result.get("sessions", [])
-                
-                # Find our session
-                for sess in sessions:
-                    if sess.get("key") == session_key or sess.get("sessionKey") == session_key:
-                        return {
-                            "completed": sess.get("status") in ["completed", "failed"],
-                            "success": sess.get("status") == "completed",
-                            "error": sess.get("error", "")
-                        }
-                
-                # Session not found in active list - assume completed
-                # (Gateway may have cleaned it up)
-                return {
-                    "completed": True,
-                    "success": True,  # Assume success if cleanly removed
-                    "error": ""
-                }
-                
+            # Extract agent ID from session key: "agent:<agentId>:subagent:<uuid>"
+            parts = session_key.split(":")
+            if len(parts) < 2:
+                return None
+            agent_id = parts[1]
+
+            # Find the session transcript
+            base = pathlib.Path.home() / ".openclaw" / "agents" / agent_id / "sessions"
+            if not base.exists():
+                # Might be under the workspace directory
+                return None
+
+            # Match by looking for the session UUID in the key
+            # Key format: agent:<agentId>:subagent:<uuid>
+            session_uuid = parts[3] if len(parts) >= 4 else None
+
+            transcript = None
+            if session_uuid:
+                # Try exact match first
+                candidate = base / f"{session_uuid}.jsonl"
+                if candidate.exists():
+                    transcript = candidate
+
+            if not transcript:
+                # Fall back to most recent transcript for this agent
+                transcripts = sorted(base.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+                transcript = transcripts[0] if transcripts else None
+
+            if not transcript:
+                # No transcript at all — session may have been cleaned up
+                return {"completed": True, "success": True, "error": ""}
+
+            # Check if file is still being written to
+            mtime = transcript.stat().st_mtime
+            age_seconds = time.time() - mtime
+            if age_seconds < 15:
+                # Still being written to — not done yet
+                return {"completed": False, "success": False, "error": ""}
+
+            # Check if there's an assistant message in the transcript
+            has_assistant = False
+            with open(transcript, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("type") == "message":
+                        msg = entry.get("message", {})
+                        if msg.get("role") == "assistant":
+                            has_assistant = True
+
+            if has_assistant:
+                return {"completed": True, "success": True, "error": ""}
+
+            # No assistant message but file is stale — might be stuck
+            if age_seconds > 300:  # 5 minutes with no activity
+                return {"completed": True, "success": False, "error": "Session stale (no assistant response)"}
+
+            return {"completed": False, "success": False, "error": ""}
+
         except Exception as e:
-            logger.warning(
-                f"[GATEWAY] Error checking session status: {e}",
-                exc_info=True
-            )
+            logger.warning("[WORKER] Error checking session status via transcript: %s", e)
             return None
 
     async def _fetch_session_summary(
         self, session_key: str
     ) -> Optional[str]:
-        """Fetch the last assistant message from a completed session as its summary."""
+        """Fetch the last assistant message from a completed session as its summary.
+
+        Tries Gateway sessions_history first, then falls back to reading the
+        JSONL transcript file directly (avoids cross-agent permission issues).
+        """
+        # --- Attempt 1: Gateway API ---
         try:
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
@@ -650,32 +699,98 @@ class WorkerManager:
                     timeout=aiohttp.ClientTimeout(total=10)
                 )
                 data = await resp.json()
-                if not data.get("ok"):
-                    return None
-                
-                result = data.get("result", {})
-                details = result.get("details", result)
-                messages = details.get("messages", [])
-                
-                # Find last assistant message
-                for msg in reversed(messages):
-                    role = msg.get("role", "")
-                    if role == "assistant":
-                        text = msg.get("content", "")
-                        if isinstance(text, list):
-                            # Extract text from content blocks
-                            text = " ".join(
-                                b.get("text", "") for b in text
-                                if b.get("type") == "text"
-                            )
-                        # Truncate to reasonable size
-                        if text and len(text) > 2000:
-                            text = text[:2000] + "..."
-                        return text if text else None
-                
-                return None
+                if data.get("ok"):
+                    result = data.get("result", {})
+                    details = result.get("details", result)
+                    messages = details.get("messages", [])
+
+                    for msg in reversed(messages):
+                        role = msg.get("role", "")
+                        if role == "assistant":
+                            text = msg.get("content", "")
+                            if isinstance(text, list):
+                                text = " ".join(
+                                    b.get("text", "") for b in text
+                                    if b.get("type") == "text"
+                                )
+                            if text and len(text) > 8000:
+                                text = text[:8000] + "..."
+                            if text:
+                                return text
         except Exception as e:
-            logger.debug(f"[WORKER] Failed to fetch session summary: {e}")
+            logger.debug("[WORKER] Gateway sessions_history failed: %s", e)
+
+        # --- Attempt 2: Read JSONL transcript directly ---
+        return await self._read_transcript_summary(session_key)
+
+    async def _read_transcript_summary(self, session_key: str) -> Optional[str]:
+        """Read the last assistant message from a session's JSONL transcript file.
+
+        Session keys follow the pattern: agent:<agentId>:<label>
+        Transcripts live at: ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
+        """
+        import glob
+        import pathlib
+
+        try:
+            # Extract agent ID from session key (e.g. "agent:architect:main-spawn-xxx")
+            parts = session_key.split(":")
+            if len(parts) < 2:
+                return None
+            agent_id = parts[1]
+
+            # Find the most recent transcript for this agent
+            base = pathlib.Path.home() / ".openclaw" / "agents" / agent_id / "sessions"
+            if not base.exists():
+                return None
+
+            # Get all transcript files sorted by modification time (newest first)
+            transcripts = sorted(base.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if not transcripts:
+                return None
+
+            # Read the newest transcript and find the last assistant message
+            transcript = transcripts[0]
+            last_assistant_text = None
+
+            with open(transcript, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if entry.get("type") != "message":
+                        continue
+                    msg = entry.get("message", {})
+                    if msg.get("role") != "assistant":
+                        continue
+
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        content = " ".join(
+                            b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    if content:
+                        last_assistant_text = content
+
+            if last_assistant_text and len(last_assistant_text) > 8000:
+                last_assistant_text = last_assistant_text[:8000] + "..."
+
+            if last_assistant_text:
+                logger.info(
+                    "[WORKER] Read transcript summary for %s (len=%d, file=%s)",
+                    session_key, len(last_assistant_text), transcript.name,
+                )
+
+            return last_assistant_text
+
+        except Exception as e:
+            logger.debug("[WORKER] Failed to read transcript: %s", e)
             return None
 
     async def _handle_worker_completion(
@@ -820,6 +935,14 @@ class WorkerManager:
         summary = result_summary
         if not summary and succeeded:
             summary = await self._read_work_summary(project_id)
+
+        if worker_info.label.startswith("reflection-") or worker_info.label.startswith("diagnostic-"):
+            logger.info(
+                "[WORKER] Reflection output for %s: summary_len=%s, succeeded=%s",
+                worker_info.label,
+                len(summary) if summary else 0,
+                succeeded,
+            )
 
         # Reflection/diagnostic runs return structured JSON; persist outputs
         if (worker_info.label.startswith("reflection-") or worker_info.label.startswith("diagnostic-")) and summary:

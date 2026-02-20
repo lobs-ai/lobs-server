@@ -69,14 +69,21 @@ class ReflectionCycleManager:
                 },
                 purpose="reflection",
             )
+            label = f"reflection-{agent}"
             result, error, _error_type = await self.worker_manager._spawn_session(
                 task_prompt=prompt,
                 agent_id=agent,
                 model=choice.model,
-                label=f"reflection-{agent}",
+                label=label,
             )
 
             if result:
+                self.worker_manager.register_external_worker(
+                    result,
+                    agent_type=agent,
+                    model=choice.model,
+                    label=label,
+                )
                 spawned += 1
             else:
                 logger.warning("Failed to spawn reflection for %s: %s", agent, error)
