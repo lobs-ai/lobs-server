@@ -655,6 +655,16 @@ class WorkerManager:
             circuit_breaker = CircuitBreaker(self.db)
             await circuit_breaker.record_success(project_id, agent_type)
 
+            # Auto-push any commits the worker produced.
+            #
+            # Sub-agents (OpenClaw sessions) generally commit directly in the repo,
+            # but the server used to *not* push those commits, leaving origin behind.
+            await self._push_project_repo_if_needed(
+                project_id=project_id,
+                task_id=task_id,
+                agent_type=agent_type,
+            )
+
         else:
             # Failure
             logger.warning(
@@ -1063,6 +1073,106 @@ class WorkerManager:
                 return {"raw": candidate}
 
         return {"raw": candidate}
+
+    async def _push_project_repo_if_needed(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        agent_type: str,
+    ) -> None:
+        """Push worker-produced commits to origin.
+
+        Workers operate in the project repo; they may commit changes, but without
+        an explicit push step the remote never updates.
+
+        Behavior:
+        - If there are uncommitted changes, we do nothing (don't guess).
+        - If HEAD is ahead of upstream, attempt `git pull --rebase` then push.
+        - On failure, create a simple alert so it shows up for the human.
+        """
+        try:
+            project = await self.db.get(Project, project_id)
+            if not project:
+                return
+
+            repo_path = Path(project.repo_path) if project.repo_path else (BASE_DIR / project_id)
+            if not repo_path.exists():
+                return
+
+            def run_git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+                return subprocess.run(
+                    ["git", "-C", str(repo_path), *args],
+                    capture_output=True,
+                    text=True,
+                    check=check,
+                )
+
+            inside = run_git("rev-parse", "--is-inside-work-tree")
+            if inside.returncode != 0 or inside.stdout.strip() != "true":
+                return
+
+            # Don't attempt to push if the repo is dirty.
+            dirty = run_git("status", "--porcelain")
+            if dirty.returncode == 0 and dirty.stdout.strip():
+                logger.info(
+                    "[WORKER] Repo has uncommitted changes; skipping auto-push (%s)",
+                    repo_path,
+                )
+                return
+
+            # Ensure upstream exists; if not, skip.
+            upstream = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+            if upstream.returncode != 0:
+                return
+
+            run_git("fetch", "--prune", "origin")
+
+            counts = run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
+            if counts.returncode != 0:
+                return
+
+            behind_str, ahead_str = (counts.stdout.strip().split() + ["0", "0"])[:2]
+            behind = int(behind_str)
+            ahead = int(ahead_str)
+
+            if ahead <= 0 and behind <= 0:
+                return
+
+            # If we're behind, try to rebase first.
+            if behind > 0:
+                pull = run_git("pull", "--rebase")
+                if pull.returncode != 0:
+                    raise RuntimeError(pull.stderr.strip() or pull.stdout.strip() or "git pull --rebase failed")
+
+            push = run_git("push")
+            if push.returncode != 0:
+                raise RuntimeError(push.stderr.strip() or push.stdout.strip() or "git push failed")
+
+            logger.info(
+                "[WORKER] Auto-pushed repo after completion (project=%s task=%s ahead=%s)",
+                project_id,
+                task_id[:8],
+                ahead,
+            )
+
+        except Exception as e:
+            logger.warning(
+                "[WORKER] Auto-push failed for project %s after task %s: %s",
+                project_id,
+                task_id[:8],
+                e,
+            )
+            try:
+                await EscalationManagerEnhanced(self.db).create_simple_alert(
+                    task_id=task_id,
+                    project_id=project_id,
+                    error_log=f"Auto-push failed: {e}",
+                    severity="medium",
+                )
+            except Exception:
+                # Never let alerting failures break completion handling.
+                logger.debug("[WORKER] Failed to create auto-push alert", exc_info=True)
 
     async def _read_work_summary(self, project_id: str) -> str | None:
         """Read .work-summary file from project directory."""
