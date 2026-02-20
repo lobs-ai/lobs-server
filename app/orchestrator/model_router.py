@@ -51,8 +51,9 @@ DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
         "anthropic/claude-sonnet-4-5",
     ),
     "strong": (
-        "openai-codex/gpt-5.3-codex",
         "anthropic/claude-opus-4-6",
+        "openai-codex/gpt-5.3-codex",
+        "anthropic/claude-sonnet-4-5",
     ),
 }
 

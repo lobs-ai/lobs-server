@@ -318,7 +318,7 @@ You are curating MEMORY.md for the **{agent_name}** agent workspace at `{workspa
                     "sessionKey": f"{GATEWAY_SESSION_KEY}-spawn-{uuid.uuid4().hex[:8]}",
                     "args": {
                         "task": prompt,
-                        "model": "sonnet",
+                        "model": "google-gemini-cli/gemini-3-pro-preview",
                         "runTimeoutSeconds": 300,
                         "cleanup": "delete",
                         "label": f"memory-curator-{agent_name}",
