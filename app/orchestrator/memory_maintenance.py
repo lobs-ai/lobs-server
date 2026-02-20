@@ -1,15 +1,17 @@
 """Daily memory maintenance for all OpenClaw agent workspaces.
 
-Audits and cleans up agent memory files according to OpenClaw best practices:
-- memory/ files should be YYYY-MM-DD.md dated daily logs
-- Non-dated files in memory/ get consolidated into MEMORY.md
-- Stale spawn/autoassign sessions get cleaned up
-- Cross-agent memory propagation: important info from main workspace
-  gets injected into worker agent MEMORY.md files
+Two-phase approach:
+1. **Deterministic cleanup** (no LLM): session cleanup, propagate shared context
+2. **Intelligent curation** (LLM worker): review each agent's memory files,
+   curate MEMORY.md to be light and high-signal, leave source files intact
+
+Philosophy:
+- MEMORY.md should be small, curated, high-signal — it loads every session
+- memory/*.md files (dated or not) are source material — never deleted
+- Important info gets extracted INTO MEMORY.md; originals stay as-is
+- Cross-agent propagation: main workspace shares key context with workers
 
 Integrates with memory_sync.py for DB consistency after file changes.
-
-Runs as a daily phase in the control loop and as a RoutineRunner hook.
 """
 
 from __future__ import annotations
@@ -22,9 +24,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import aiohttp
+
+from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
+
 logger = logging.getLogger(__name__)
 
-# Agent workspace paths
 HOME = Path.home()
 AGENT_WORKSPACES = {
     "main": HOME / ".openclaw" / "workspace",
@@ -39,12 +44,9 @@ WORKER_AGENTS = [k for k in AGENT_WORKSPACES if k != "main"]
 
 SESSIONS_BASE = HOME / ".openclaw" / "agents"
 
-DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}")
 MAX_SESSION_AGE_HOURS = 1
 
-# Sections in main MEMORY.md that should propagate to all worker agents.
-# These are headers whose content gets injected into worker MEMORY.md
-# under a "## Shared Context (from Lobs)" section.
+# Sections in main MEMORY.md to propagate to all worker agents.
 PROPAGATION_HEADERS = [
     "## Architecture Overview",
     "## Repos & Projects",
@@ -52,81 +54,8 @@ PROPAGATION_HEADERS = [
     "## Rafe",
 ]
 
-
-def _is_dated_file(filename: str) -> bool:
-    """Check if a filename starts with YYYY-MM-DD."""
-    return bool(DATE_PATTERN.match(filename))
-
-
-def audit_workspace(workspace_path: Path) -> dict[str, Any]:
-    """Audit a single workspace for memory best practices."""
-    report: dict[str, Any] = {
-        "workspace": str(workspace_path),
-        "exists": workspace_path.exists(),
-        "non_dated_files": [],
-        "daily_file_count": 0,
-        "memory_md_lines": 0,
-        "actions_taken": [],
-    }
-
-    if not workspace_path.exists():
-        return report
-
-    memory_dir = workspace_path / "memory"
-    memory_md = workspace_path / "MEMORY.md"
-
-    if memory_md.exists():
-        lines = memory_md.read_text().splitlines()
-        report["memory_md_lines"] = len(lines)
-
-    if memory_dir.exists():
-        for f in sorted(memory_dir.glob("*.md")):
-            if not _is_dated_file(f.name):
-                report["non_dated_files"].append(f.name)
-            else:
-                report["daily_file_count"] += 1
-
-    return report
-
-
-def consolidate_non_dated_files(workspace_path: Path) -> list[str]:
-    """Move content from non-dated memory/ files into MEMORY.md, then delete them.
-
-    Returns list of files consolidated.
-    """
-    memory_dir = workspace_path / "memory"
-    memory_md = workspace_path / "MEMORY.md"
-    consolidated = []
-
-    if not memory_dir.exists():
-        return consolidated
-
-    non_dated = [f for f in sorted(memory_dir.glob("*.md")) if not _is_dated_file(f.name)]
-    if not non_dated:
-        return consolidated
-
-    existing_content = ""
-    if memory_md.exists():
-        existing_content = memory_md.read_text()
-
-    additions = []
-    for f in non_dated:
-        content = f.read_text().strip()
-        if not content:
-            f.unlink()
-            consolidated.append(f.name)
-            continue
-
-        section_name = f.stem.replace("-", " ").replace("_", " ").title()
-        additions.append(f"\n## {section_name}\n\n{content}\n")
-        consolidated.append(f.name)
-        f.unlink()
-
-    if additions:
-        new_content = existing_content.rstrip() + "\n" + "\n".join(additions)
-        memory_md.write_text(new_content)
-
-    return consolidated
+# Target max lines for MEMORY.md (guidance for the LLM curator)
+TARGET_MEMORY_MD_LINES = 200
 
 
 def cleanup_stale_sessions() -> dict[str, Any]:
@@ -182,10 +111,7 @@ def cleanup_stale_sessions() -> dict[str, Any]:
 
 
 def _extract_sections(content: str, headers: list[str]) -> dict[str, str]:
-    """Extract named sections from markdown content.
-
-    Returns a dict of header -> section content (including the header line).
-    """
+    """Extract named sections from markdown content."""
     sections: dict[str, str] = {}
     lines = content.splitlines()
 
@@ -195,15 +121,14 @@ def _extract_sections(content: str, headers: list[str]) -> dict[str, str]:
         section_lines: list[str] = []
 
         for line in lines:
-            if line.strip().startswith("#"):
-                # Check if this is our target header
-                if line.strip() == target_header or line.strip().startswith(target_header):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                if stripped == target_header or stripped.startswith(target_header):
                     in_section = True
                     section_lines = [line]
                     continue
-                # Check if we hit another header at same or higher level
                 if in_section:
-                    level = len(line.strip()) - len(line.strip().lstrip("#"))
+                    level = len(stripped) - len(stripped.lstrip("#"))
                     if level <= target_level:
                         in_section = False
                         continue
@@ -219,11 +144,8 @@ def _extract_sections(content: str, headers: list[str]) -> dict[str, str]:
 def propagate_shared_context() -> dict[str, Any]:
     """Propagate important sections from main MEMORY.md to worker agents.
 
-    Reads designated sections from the main workspace MEMORY.md and injects
-    them into each worker agent's MEMORY.md under a managed
-    "## Shared Context (from Lobs)" section.
-
-    This section is fully replaced on each run so it stays current.
+    Injects under a managed "## Shared Context (from Lobs)" section
+    that is fully replaced on each run.
     """
     report: dict[str, Any] = {"agents_updated": [], "skipped": [], "errors": []}
 
@@ -236,18 +158,17 @@ def propagate_shared_context() -> dict[str, Any]:
     sections = _extract_sections(main_content, PROPAGATION_HEADERS)
 
     if not sections:
-        report["skipped"].append("no propagation sections found in main MEMORY.md")
+        report["skipped"].append("no propagation sections found")
         return report
 
-    # Build the shared context block
     shared_block_parts = [
         "## Shared Context (from Lobs)",
         "",
         f"*Auto-propagated on {datetime.now(timezone.utc).strftime('%Y-%m-%d')}. "
-        "Do not edit — this section is overwritten daily by memory maintenance.*",
+        "Do not edit — overwritten daily by memory maintenance.*",
         "",
     ]
-    for header, content in sections.items():
+    for _header, content in sections.items():
         shared_block_parts.append(content)
         shared_block_parts.append("")
 
@@ -268,20 +189,16 @@ def propagate_shared_context() -> dict[str, Any]:
         try:
             existing = memory_md.read_text() if memory_md.exists() else ""
 
-            # Remove old shared context section if present
             if SHARED_MARKER_START in existing:
                 start_idx = existing.index(SHARED_MARKER_START)
-                # Find the next top-level header after our section
                 rest = existing[start_idx + len(SHARED_MARKER_START):]
                 match = SHARED_MARKER_END_PATTERN.search(rest)
                 if match:
                     end_idx = start_idx + len(SHARED_MARKER_START) + match.start()
                     existing = existing[:start_idx].rstrip() + "\n\n" + existing[end_idx:]
                 else:
-                    # Our section goes to end of file
                     existing = existing[:start_idx].rstrip()
 
-            # Append shared block at the end
             new_content = existing.rstrip() + "\n\n" + shared_block
             memory_md.write_text(new_content)
             report["agents_updated"].append(agent)
@@ -293,43 +210,185 @@ def propagate_shared_context() -> dict[str, Any]:
     return report
 
 
-async def run_memory_maintenance(routine=None) -> dict[str, Any]:
-    """Full memory maintenance pass across all agent workspaces.
+def _gather_memory_inventory(workspace_path: Path) -> dict[str, Any]:
+    """Gather inventory of all memory files in a workspace for the curator."""
+    inventory: dict[str, Any] = {"memory_md": None, "memory_files": []}
 
-    Entry point for RoutineRunner hook or direct call from control loop.
+    memory_md = workspace_path / "MEMORY.md"
+    if memory_md.exists():
+        content = memory_md.read_text()
+        inventory["memory_md"] = {
+            "lines": len(content.splitlines()),
+            "chars": len(content),
+            "content": content,
+        }
+
+    memory_dir = workspace_path / "memory"
+    if memory_dir.exists():
+        for f in sorted(memory_dir.glob("*.md")):
+            content = f.read_text()
+            inventory["memory_files"].append({
+                "name": f.name,
+                "lines": len(content.splitlines()),
+                "chars": len(content),
+                "content": content[:3000],  # truncate for prompt size
+            })
+
+    return inventory
+
+
+async def _spawn_curator_worker(
+    agent_name: str,
+    workspace_path: Path,
+    inventory: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Spawn an OpenClaw worker to intelligently curate an agent's MEMORY.md.
+
+    The worker reads all memory files, decides what's important, and rewrites
+    MEMORY.md to be concise and high-signal. Source files are never modified.
+    """
+    memory_md_content = inventory["memory_md"]["content"] if inventory["memory_md"] else ""
+    memory_md_lines = inventory["memory_md"]["lines"] if inventory["memory_md"] else 0
+
+    # Build file listing for prompt
+    file_summaries = []
+    for mf in inventory["memory_files"]:
+        file_summaries.append(f"- {mf['name']} ({mf['lines']} lines): {mf['content'][:500]}")
+
+    file_listing = "\n".join(file_summaries) if file_summaries else "(no memory files)"
+
+    prompt = f"""## Memory Curation Task: {agent_name}
+
+You are curating MEMORY.md for the **{agent_name}** agent workspace at `{workspace_path}`.
+
+### Current state:
+- MEMORY.md: {memory_md_lines} lines
+- Target: ~{TARGET_MEMORY_MD_LINES} lines max (currently {'over' if memory_md_lines > TARGET_MEMORY_MD_LINES else 'under'} target)
+- Memory files in memory/: {len(inventory['memory_files'])} files
+
+### Memory files (source material, DO NOT modify these):
+{file_listing}
+
+### Current MEMORY.md:
+```
+{memory_md_content[:8000]}
+```
+
+### Instructions:
+
+1. **Read** the current MEMORY.md and all memory/ files
+2. **Identify** what information is truly important and durable:
+   - Architecture decisions, patterns, and conventions the agent needs every session
+   - Key lessons learned and gotchas
+   - Project structure and important paths
+   - User preferences and working style
+   - Active context that affects daily work
+3. **Remove** from MEMORY.md:
+   - Stale/outdated information
+   - Overly verbose pattern docs (keep 2-3 sentence summaries, not full tutorials)
+   - Duplicate information
+   - Low-signal noise
+   - Anything already captured well in the "Shared Context (from Lobs)" section
+4. **Write** the curated MEMORY.md to `{workspace_path}/MEMORY.md`
+   - Keep it under {TARGET_MEMORY_MD_LINES} lines
+   - Use concise bullet points over paragraphs
+   - Structure with clear headers
+   - Preserve the "## Shared Context (from Lobs)" section exactly as-is (it's managed separately)
+5. **Do NOT** modify any files in memory/ — those are source material
+
+### Important:
+- The "## Shared Context (from Lobs)" section is auto-managed. Keep it verbatim.
+- Be aggressive about cutting. MEMORY.md loads every session — bloat wastes tokens.
+- If in doubt, cut it. The original info is still in the memory/ files for search.
+"""
+
+    try:
+        import uuid
+
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={
+                    "tool": "sessions_spawn",
+                    "sessionKey": f"{GATEWAY_SESSION_KEY}-spawn-{uuid.uuid4().hex[:8]}",
+                    "args": {
+                        "task": prompt,
+                        "model": "sonnet",
+                        "runTimeoutSeconds": 300,
+                        "cleanup": "delete",
+                        "label": f"memory-curator-{agent_name}",
+                    },
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            data = await resp.json()
+
+            if data.get("ok") and data.get("result", {}).get("accepted"):
+                return {
+                    "status": "spawned",
+                    "run_id": data["result"].get("runId"),
+                    "session_key": data["result"].get("childSessionKey"),
+                }
+            else:
+                logger.warning(
+                    "Failed to spawn curator for %s: %s", agent_name, data
+                )
+                return {"status": "failed", "error": str(data)}
+
+    except Exception as e:
+        logger.error("Error spawning curator for %s: %s", agent_name, e, exc_info=True)
+        return {"status": "error", "error": str(e)}
+
+
+async def run_memory_maintenance(routine=None) -> dict[str, Any]:
+    """Full memory maintenance pass.
+
+    Phase 1 (deterministic): session cleanup + context propagation
+    Phase 2 (intelligent): spawn curator workers for bloated MEMORY.md files
     """
     results: dict[str, Any] = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "workspaces": {},
         "propagation": {},
         "sessions": {},
+        "curation": {},
         "summary": {},
     }
 
-    total_consolidated = 0
+    # Phase 1: Deterministic cleanup
+    prop_report = propagate_shared_context()
+    results["propagation"] = prop_report
 
+    session_report = cleanup_stale_sessions()
+    results["sessions"] = session_report
+
+    # Phase 2: Spawn curator workers for agents with bloated MEMORY.md
+    curators_spawned = 0
     for agent_name, ws_path in AGENT_WORKSPACES.items():
         if not ws_path.exists():
             continue
 
-        audit = audit_workspace(ws_path)
-        consolidated = consolidate_non_dated_files(ws_path)
-        total_consolidated += len(consolidated)
+        inventory = _gather_memory_inventory(ws_path)
+        if not inventory["memory_md"]:
+            continue
 
-        results["workspaces"][agent_name] = {
-            "audit": audit,
-            "consolidated": consolidated,
-        }
+        md_lines = inventory["memory_md"]["lines"]
+        # Only curate if over target or if there are non-dated source files
+        # that might contain useful info not yet in MEMORY.md
+        has_source_material = any(
+            not re.match(r"^\d{4}-\d{2}-\d{2}", mf["name"])
+            for mf in inventory["memory_files"]
+        )
 
-    # Propagate shared context from main to workers
-    prop_report = propagate_shared_context()
-    results["propagation"] = prop_report
+        if md_lines > TARGET_MEMORY_MD_LINES or has_source_material:
+            spawn_result = await _spawn_curator_worker(agent_name, ws_path, inventory)
+            results["curation"][agent_name] = spawn_result
+            if spawn_result and spawn_result.get("status") == "spawned":
+                curators_spawned += 1
+        else:
+            results["curation"][agent_name] = {"status": "ok", "lines": md_lines}
 
-    # Clean stale sessions
-    session_report = cleanup_stale_sessions()
-    results["sessions"] = session_report
-
-    # Trigger memory_sync if available (keeps DB in sync with filesystem)
+    # Trigger memory_sync to keep DB consistent
     try:
         from app.database import AsyncSessionLocal
         from app.services.memory_sync import sync_agent_memories
@@ -339,21 +398,20 @@ async def run_memory_maintenance(routine=None) -> dict[str, Any]:
             await db.commit()
             results["memory_sync"] = sync_result
     except Exception as e:
-        logger.warning("Memory sync after maintenance failed (non-fatal): %s", e)
+        logger.warning("Memory sync failed (non-fatal): %s", e)
         results["memory_sync"] = {"error": str(e)}
 
     results["summary"] = {
-        "workspaces_audited": len([w for w in AGENT_WORKSPACES.values() if w.exists()]),
-        "files_consolidated": total_consolidated,
         "agents_propagated": len(prop_report.get("agents_updated", [])),
         "sessions_removed": session_report["total_removed"],
+        "curators_spawned": curators_spawned,
     }
 
     logger.info(
-        "[MEMORY_MAINTENANCE] Complete: consolidated=%d propagated=%d sessions=%d",
-        total_consolidated,
+        "[MEMORY_MAINTENANCE] Complete: propagated=%d sessions=%d curators=%d",
         len(prop_report.get("agents_updated", [])),
         session_report["total_removed"],
+        curators_spawned,
     )
 
     return results
