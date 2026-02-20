@@ -54,8 +54,9 @@ PROPAGATION_HEADERS = [
     "## Rafe",
 ]
 
-# Target max lines for MEMORY.md (guidance for the LLM curator)
-TARGET_MEMORY_MD_LINES = 200
+# Threshold above which we consider MEMORY.md potentially bloated and worth curating.
+# This is NOT a target — the curator keeps all important info regardless of length.
+CURATION_THRESHOLD_LINES = 500
 
 
 def cleanup_stale_sessions() -> dict[str, Any]:
@@ -263,7 +264,6 @@ You are curating MEMORY.md for the **{agent_name}** agent workspace at `{workspa
 
 ### Current state:
 - MEMORY.md: {memory_md_lines} lines
-- Target: ~{TARGET_MEMORY_MD_LINES} lines max (currently {'over' if memory_md_lines > TARGET_MEMORY_MD_LINES else 'under'} target)
 - Memory files in memory/: {len(inventory['memory_files'])} files
 
 ### Memory files (source material, DO NOT modify these):
@@ -276,30 +276,30 @@ You are curating MEMORY.md for the **{agent_name}** agent workspace at `{workspa
 
 ### Instructions:
 
-1. **Read** the current MEMORY.md and all memory/ files
-2. **Identify** what information is truly important and durable:
-   - Architecture decisions, patterns, and conventions the agent needs every session
-   - Key lessons learned and gotchas
+1. **Read** the current MEMORY.md (the full file at `{workspace_path}/MEMORY.md`) and all files in `{workspace_path}/memory/`
+2. **Keep** everything that's genuinely important and useful:
+   - Architecture decisions, patterns, and conventions
+   - Key lessons learned and real gotchas that prevent bugs
    - Project structure and important paths
    - User preferences and working style
    - Active context that affects daily work
-3. **Remove** from MEMORY.md:
-   - Stale/outdated information
-   - Overly verbose pattern docs (keep 2-3 sentence summaries, not full tutorials)
-   - Duplicate information
-   - Low-signal noise
-   - Anything already captured well in the "Shared Context (from Lobs)" section
+3. **Remove only** clear bloat:
+   - Stale/outdated information that's no longer true
+   - Verbose tutorials or step-by-step examples (summarize to a few sentences — the detail is still in the memory/ source files)
+   - Duplicate information (same thing said multiple ways)
+   - Low-signal noise that doesn't help with real work
+   - Information already in the "Shared Context (from Lobs)" section (no need to duplicate)
 4. **Write** the curated MEMORY.md to `{workspace_path}/MEMORY.md`
-   - Keep it under {TARGET_MEMORY_MD_LINES} lines
-   - Use concise bullet points over paragraphs
+   - Use concise bullet points over long paragraphs
    - Structure with clear headers
    - Preserve the "## Shared Context (from Lobs)" section exactly as-is (it's managed separately)
-5. **Do NOT** modify any files in memory/ — those are source material
+   - Length doesn't matter — keep all important info. Just don't keep junk.
+5. **Do NOT** modify any files in memory/ — those are source material and must stay intact
 
 ### Important:
-- The "## Shared Context (from Lobs)" section is auto-managed. Keep it verbatim.
-- Be aggressive about cutting. MEMORY.md loads every session — bloat wastes tokens.
-- If in doubt, cut it. The original info is still in the memory/ files for search.
+- The "## Shared Context (from Lobs)" section is auto-managed. Copy it verbatim.
+- When in doubt, keep it. Err on the side of preserving useful information.
+- The original detailed info remains in the memory/ files for semantic search.
 """
 
     try:
@@ -324,11 +324,12 @@ You are curating MEMORY.md for the **{agent_name}** agent workspace at `{workspa
             )
             data = await resp.json()
 
-            if data.get("ok") and data.get("result", {}).get("accepted"):
+            details = data.get("result", {}).get("details", {})
+            if data.get("ok") and details.get("status") == "accepted":
                 return {
                     "status": "spawned",
-                    "run_id": data["result"].get("runId"),
-                    "session_key": data["result"].get("childSessionKey"),
+                    "run_id": details.get("runId"),
+                    "session_key": details.get("childSessionKey"),
                 }
             else:
                 logger.warning(
@@ -380,7 +381,7 @@ async def run_memory_maintenance(routine=None) -> dict[str, Any]:
             for mf in inventory["memory_files"]
         )
 
-        if md_lines > TARGET_MEMORY_MD_LINES or has_source_material:
+        if md_lines > CURATION_THRESHOLD_LINES or has_source_material:
             spawn_result = await _spawn_curator_worker(agent_name, ws_path, inventory)
             results["curation"][agent_name] = spawn_result
             if spawn_result and spawn_result.get("status") == "spawned":
