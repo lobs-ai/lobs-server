@@ -363,19 +363,18 @@ async def update_model_policy(
 @router.post("/reflection/trigger")
 async def trigger_reflection_cycle(
     request: Request,
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Manually trigger a strategic reflection cycle."""
+    """Manually trigger a strategic reflection cycle.
+    
+    Signals the engine to run reflections on its next tick (avoids DB lock
+    contention by letting the engine's own session handle the work).
+    """
     engine: OrchestratorEngine | None = getattr(request.app.state, "orchestrator", None)
-    if not engine or not engine._worker_manager:
+    if not engine:
         raise HTTPException(status_code=503, detail="Orchestrator not running")
 
-    from app.orchestrator.reflection_cycle import ReflectionCycleManager
-
-    manager = ReflectionCycleManager(db, engine._worker_manager)
-    result = await manager.run_strategic_reflection_cycle()
-    await db.commit()
-    return {"ok": True, "result": result}
+    engine._force_reflection = True
+    return {"ok": True, "message": "Reflection cycle will run on next engine tick (within ~10s)"}
 
 
 @router.get("/intelligence/summary")

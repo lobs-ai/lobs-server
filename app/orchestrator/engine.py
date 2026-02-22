@@ -105,6 +105,8 @@ class OrchestratorEngine:
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
         self._reflection_anchor_loaded = False
+        # API-triggered reflection flag
+        self._force_reflection = False
         # Provider health tracking (persistent across ticks)
         self.provider_health: Optional[ProviderHealthRegistry] = None
 
@@ -424,6 +426,12 @@ class OrchestratorEngine:
 
             # 4. Lobs-as-PM control loop phases (event handling + reflection + daily compression)
             if not self._paused:
+                # API-triggered reflection: reset timer so the control loop runs it
+                if self._force_reflection:
+                    self._last_reflection_check = 0.0
+                    self._force_reflection = False
+                    logger.info("[ENGINE] Force-reflection triggered via API")
+
                 try:
                     async def _run_reflection() -> dict[str, Any]:
                         reflection_result = await reflection_manager.run_strategic_reflection_cycle()
