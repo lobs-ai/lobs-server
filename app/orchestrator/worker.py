@@ -600,11 +600,10 @@ class WorkerManager:
         session_key: str,
         spawn_time: Optional[float] = None
     ) -> Optional[dict[str, Any]]:
-        """Check session status by reading the JSONL transcript file directly.
+        """Check session status via Gateway sessions_list then transcript file.
 
-        Gateway's sessions_list doesn't expose a "completed" status field, so we
-        detect completion by checking whether the transcript contains a final
-        assistant message and is no longer being written to (mtime > 15s ago).
+        1. Query Gateway for the session's transcript path
+        2. Check transcript file for completion (assistant message + file staleness)
         
         Args:
             session_key: The session key to check
@@ -613,57 +612,36 @@ class WorkerManager:
         import pathlib
 
         try:
-            # Extract agent ID from session key: "agent:<agentId>:subagent:<uuid>"
-            parts = session_key.split(":")
-            if len(parts) < 2:
-                return None
-            agent_id = parts[1]
-
-            # Find the session transcript
-            base = pathlib.Path.home() / ".openclaw" / "agents" / agent_id / "sessions"
-            if not base.exists():
-                # Might be under the workspace directory
-                return None
-
-            # Match by looking for the session UUID in the key
-            # Key format: agent:<agentId>:subagent:<uuid>
-            session_uuid = parts[3] if len(parts) >= 4 else None
-
-            transcript = None
-            if session_uuid:
-                # Try exact match first
-                candidate = base / f"{session_uuid}.jsonl"
-                if candidate.exists():
-                    transcript = candidate
-
-            if not transcript and not session_uuid:
-                # Only fall back to most recent transcript if we don't have a UUID
-                # (with a UUID, falling back picks up unrelated sessions)
-                transcripts = sorted(base.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-                transcript = transcripts[0] if transcripts else None
-
-            if not transcript:
-                # No transcript found - check how long ago the session was spawned
+            # Step 1: Get transcript path from Gateway
+            transcript_path = await self._get_transcript_path(session_key)
+            
+            if not transcript_path:
+                # Session not found in Gateway
                 if spawn_time is not None:
                     age_minutes = (time.time() - spawn_time) / 60
-                    if age_minutes < 15:
-                        # Session is recent, transcript might not be created yet
+                    if age_minutes < 2:
                         return {"completed": False, "success": False, "error": ""}
                     else:
-                        # Session is stale and transcript is missing - mark as failed
-                        return {"completed": True, "success": False, "error": "Session stale (no transcript found)"}
-                
-                # No spawn time provided, can't determine - mark as failed
+                        return {"completed": True, "success": False, "error": "Session not found in Gateway"}
+                return {"completed": True, "success": False, "error": "Session not found"}
+            
+            transcript = pathlib.Path(transcript_path)
+            if not transcript.exists():
+                if spawn_time is not None:
+                    age_minutes = (time.time() - spawn_time) / 60
+                    if age_minutes < 5:
+                        return {"completed": False, "success": False, "error": ""}
+                    else:
+                        return {"completed": True, "success": False, "error": "Transcript file missing"}
                 return {"completed": True, "success": False, "error": "Transcript not found"}
 
-            # Check if file is still being written to
+            # Step 2: Check if file is still being written to
             mtime = transcript.stat().st_mtime
             age_seconds = time.time() - mtime
             if age_seconds < 15:
-                # Still being written to — not done yet
                 return {"completed": False, "success": False, "error": ""}
 
-            # Check if there's an assistant message in the transcript
+            # Step 3: Check for assistant message
             has_assistant = False
             with open(transcript, "r") as f:
                 for line in f:
@@ -682,14 +660,47 @@ class WorkerManager:
             if has_assistant:
                 return {"completed": True, "success": True, "error": ""}
 
-            # No assistant message but file is stale — might be stuck
-            if age_seconds > 300:  # 5 minutes with no activity
+            if age_seconds > 300:
                 return {"completed": True, "success": False, "error": "Session stale (no assistant response)"}
 
             return {"completed": False, "success": False, "error": ""}
 
         except Exception as e:
-            logger.warning("[WORKER] Error checking session status via transcript: %s", e)
+            logger.warning("[WORKER] Error checking session status: %s", e)
+            return None
+
+    async def _get_transcript_path(self, session_key: str) -> Optional[str]:
+        """Get transcript file path for a session via Gateway sessions_list API."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_list",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-status-check",
+                        "args": {
+                            "limit": 50,
+                            "messageLimit": 0,
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                data = await resp.json()
+                if not data.get("ok"):
+                    return None
+                
+                result = data.get("result", {})
+                details = result.get("details", result)
+                sessions = details.get("sessions", [])
+                
+                for s in sessions:
+                    if s.get("key") == session_key:
+                        return s.get("transcriptPath")
+                
+                return None
+        except Exception as e:
+            logger.warning("[WORKER] Error querying Gateway for session transcript: %s", e)
             return None
 
     async def _fetch_session_summary(
@@ -738,37 +749,25 @@ class WorkerManager:
         except Exception as e:
             logger.debug("[WORKER] Gateway sessions_history failed: %s", e)
 
-        # --- Attempt 2: Read JSONL transcript directly ---
+        # --- Attempt 2: Read JSONL transcript directly via Gateway-resolved path ---
         return await self._read_transcript_summary(session_key)
 
     async def _read_transcript_summary(self, session_key: str) -> Optional[str]:
         """Read the last assistant message from a session's JSONL transcript file.
 
-        Session keys follow the pattern: agent:<agentId>:<label>
-        Transcripts live at: ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl
+        Uses Gateway API to find the actual transcript path.
         """
-        import glob
         import pathlib
 
         try:
-            # Extract agent ID from session key (e.g. "agent:architect:main-spawn-xxx")
-            parts = session_key.split(":")
-            if len(parts) < 2:
+            transcript_path = await self._get_transcript_path(session_key)
+            if not transcript_path:
                 return None
-            agent_id = parts[1]
-
-            # Find the most recent transcript for this agent
-            base = pathlib.Path.home() / ".openclaw" / "agents" / agent_id / "sessions"
-            if not base.exists():
+            
+            transcript = pathlib.Path(transcript_path)
+            if not transcript.exists():
                 return None
 
-            # Get all transcript files sorted by modification time (newest first)
-            transcripts = sorted(base.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if not transcripts:
-                return None
-
-            # Read the newest transcript and find the last assistant message
-            transcript = transcripts[0]
             last_assistant_text = None
 
             with open(transcript, "r") as f:
