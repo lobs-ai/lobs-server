@@ -600,73 +600,105 @@ class WorkerManager:
         session_key: str,
         spawn_time: Optional[float] = None
     ) -> Optional[dict[str, Any]]:
-        """Check session status via Gateway sessions_list then transcript file.
+        """Check session status via Gateway sessions_history API.
 
-        1. Query Gateway for the session's transcript path
-        2. Check transcript file for completion (assistant message + file staleness)
+        Uses sessions_history to check if the session has an assistant response.
+        If the session exists and has an assistant message, it's completed.
+        Falls back to transcript file if sessions_history fails.
         
         Args:
             session_key: The session key to check
             spawn_time: Unix timestamp when the worker was spawned (for timeout handling)
         """
-        import pathlib
-
         try:
-            # Step 1: Get transcript path from Gateway
-            transcript_path = await self._get_transcript_path(session_key)
+            # Try Gateway sessions_history — works even after session cleanup
+            history = await self._get_session_history(session_key)
             
-            if not transcript_path:
-                # Session not found in Gateway
+            if history is not None:
+                # Got history — check for assistant messages
+                has_assistant = any(
+                    msg.get("role") == "assistant"
+                    for msg in history
+                )
+                if has_assistant:
+                    return {"completed": True, "success": True, "error": ""}
+                # No assistant message yet
                 if spawn_time is not None:
                     age_minutes = (time.time() - spawn_time) / 60
-                    if age_minutes < 2:
-                        return {"completed": False, "success": False, "error": ""}
-                    else:
-                        return {"completed": True, "success": False, "error": "Session not found in Gateway"}
-                return {"completed": True, "success": False, "error": "Session not found"}
-            
-            transcript = pathlib.Path(transcript_path)
-            if not transcript.exists():
-                if spawn_time is not None:
-                    age_minutes = (time.time() - spawn_time) / 60
-                    if age_minutes < 5:
-                        return {"completed": False, "success": False, "error": ""}
-                    else:
-                        return {"completed": True, "success": False, "error": "Transcript file missing"}
-                return {"completed": True, "success": False, "error": "Transcript not found"}
-
-            # Step 2: Check if file is still being written to
-            mtime = transcript.stat().st_mtime
-            age_seconds = time.time() - mtime
-            if age_seconds < 15:
+                    if age_minutes > 15:
+                        return {"completed": True, "success": False, "error": "Session stale (no assistant response)"}
                 return {"completed": False, "success": False, "error": ""}
+            
+            # sessions_history failed — fall back to transcript file
+            transcript_path = await self._get_transcript_path(session_key)
+            if transcript_path:
+                import pathlib
+                transcript = pathlib.Path(transcript_path)
+                if transcript.exists():
+                    mtime = transcript.stat().st_mtime
+                    age_seconds = time.time() - mtime
+                    if age_seconds < 15:
+                        return {"completed": False, "success": False, "error": ""}
+                    
+                    has_assistant = False
+                    with open(transcript, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if entry.get("type") == "message":
+                                msg = entry.get("message", {})
+                                if msg.get("role") == "assistant":
+                                    has_assistant = True
+                    
+                    if has_assistant:
+                        return {"completed": True, "success": True, "error": ""}
+                    if age_seconds > 300:
+                        return {"completed": True, "success": False, "error": "Session stale"}
+                    return {"completed": False, "success": False, "error": ""}
 
-            # Step 3: Check for assistant message
-            has_assistant = False
-            with open(transcript, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if entry.get("type") == "message":
-                        msg = entry.get("message", {})
-                        if msg.get("role") == "assistant":
-                            has_assistant = True
-
-            if has_assistant:
-                return {"completed": True, "success": True, "error": ""}
-
-            if age_seconds > 300:
-                return {"completed": True, "success": False, "error": "Session stale (no assistant response)"}
-
-            return {"completed": False, "success": False, "error": ""}
+            # No transcript, no history — check age
+            if spawn_time is not None:
+                age_minutes = (time.time() - spawn_time) / 60
+                if age_minutes < 5:
+                    return {"completed": False, "success": False, "error": ""}
+                return {"completed": True, "success": False, "error": "Session not found"}
+            return {"completed": True, "success": False, "error": "Session not found"}
 
         except Exception as e:
             logger.warning("[WORKER] Error checking session status: %s", e)
+            return None
+
+    async def _get_session_history(self, session_key: str) -> Optional[list[dict]]:
+        """Get session message history via Gateway sessions_history API."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_history",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-status-check",
+                        "args": {
+                            "sessionKey": session_key,
+                            "limit": 3,
+                            "includeTools": False,
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                data = await resp.json()
+                if data.get("ok"):
+                    result = data.get("result", {})
+                    details = result.get("details", result)
+                    return details.get("messages", [])
+                return None
+        except Exception as e:
+            logger.debug("[WORKER] Error querying Gateway sessions_history: %s", e)
             return None
 
     async def _get_transcript_path(self, session_key: str) -> Optional[str]:
@@ -719,6 +751,7 @@ class WorkerManager:
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
                         "tool": "sessions_history",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-fetch-summary",
                         "args": {
                             "sessionKey": session_key,
                             "limit": 3,
@@ -1272,11 +1305,11 @@ class WorkerManager:
                         )
                     )
 
-            await self.db.commit()
+            # Don't commit here — the engine's main loop handles the commit
+            await self.db.flush()
 
         except Exception as e:
             logger.warning("[WORKER] Failed to persist reflection output: %s", e, exc_info=True)
-            await self.db.rollback()
 
     async def _persist_diagnostic_event_outcome(
         self,
