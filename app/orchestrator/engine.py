@@ -825,19 +825,30 @@ class OrchestratorEngine:
             
             summary_text = "\n".join(summary_lines)
             
-            # Send to main session via Gateway API
+            # Spawn a session for the main agent to process reflection results
+            task_prompt = (
+                "## Reflection Cycle Results\n\n"
+                "The orchestrator just completed a strategic reflection cycle. "
+                "Review the findings below and take appropriate action — create tasks, "
+                "update priorities, fix routing issues, or dismiss findings as needed.\n\n"
+                + summary_text
+            )
+            
             async with aiohttp.ClientSession() as session:
-                # Use a unique caller session key for this notification
-                caller_key = f"orchestrator:reflection-summary:{uuid.uuid4().hex[:8]}"
+                caller_key = f"{GATEWAY_SESSION_KEY}-reflection-summary-{uuid.uuid4().hex[:8]}"
                 resp = await session.post(
                     f"{GATEWAY_URL}/tools/invoke",
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
-                        "tool": "sessions_send",
+                        "tool": "sessions_spawn",
                         "sessionKey": caller_key,
                         "args": {
-                            "sessionKey": "agent:main:main",
-                            "message": summary_text
+                            "task": task_prompt,
+                            "agentId": "main",
+                            "model": "sonnet",
+                            "runTimeoutSeconds": 300,
+                            "cleanup": "delete",
+                            "label": "reflection-review",
                         }
                     },
                     timeout=aiohttp.ClientTimeout(total=30)
@@ -847,13 +858,13 @@ class OrchestratorEngine:
                 
                 if data.get("ok"):
                     logger.info(
-                        "[ENGINE] Sent reflection summary to Lobs: %d reflections, %d initiatives",
+                        "[ENGINE] Spawned reflection review session for Lobs: %d reflections, %d initiatives",
                         len(reflections),
                         len(initiatives)
                     )
                 else:
                     logger.warning(
-                        "[ENGINE] Failed to send reflection summary to Lobs: %s",
+                        "[ENGINE] Failed to spawn reflection review session: %s",
                         data
                     )
         
