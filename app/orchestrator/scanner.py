@@ -99,6 +99,7 @@ class Scanner:
             "notes": task.notes,
             "owner": task.owner,
             "agent": task.agent,
+            "model_tier": task.model_tier,
             "external_source": task.external_source,
             "sync_state": task.sync_state,
             "github_issue_number": task.github_issue_number,

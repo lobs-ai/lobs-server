@@ -61,6 +61,7 @@ class TaskBase(BaseModel):
     shape: Optional[str] = None
     github_issue_number: Optional[int] = None
     agent: Optional[str] = None
+    model_tier: Optional[str] = None  # local/cheap/standard/strong (NULL = auto)
     external_source: Optional[str] = None
     external_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None
@@ -90,6 +91,7 @@ class TaskUpdate(BaseModel):
     shape: Optional[str] = None
     github_issue_number: Optional[int] = None
     agent: Optional[str] = None
+    model_tier: Optional[str] = None  # local/cheap/standard/strong (NULL = auto)
     external_source: Optional[str] = None
     external_id: Optional[str] = None
     external_updated_at: Optional[datetime] = None

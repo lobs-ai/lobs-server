@@ -274,10 +274,21 @@ def decide_models(
     # - default non-programming: standard (+ strong for very_complex)
     policy = "default"
 
-    # Local-eligible purpose override (highest priority after criticality)
-    if local_available and purpose in LOCAL_ELIGIBLE_PURPOSES and criticality != "high":
+    # Explicit model_tier override on the task (highest priority)
+    explicit_tier = (task.get("model_tier") or "").strip().lower()
+    if explicit_tier in ("local", "cheap", "standard", "strong"):
+        policy = f"explicit_{explicit_tier}"
+        # Build plan starting from the requested tier, with fallbacks upward
+        tier_order: list[ModelTier] = ["local", "cheap", "standard", "strong"]
+        start_idx = tier_order.index(explicit_tier)  # type: ignore[arg-type]
+        plan: list[ModelTier] = list(tier_order[start_idx:])
+        # If local requested but not available, skip it
+        if not local_available and "local" in plan:
+            plan = [t for t in plan if t != "local"]
+    # Local-eligible purpose override (next priority after explicit)
+    elif local_available and purpose in LOCAL_ELIGIBLE_PURPOSES and criticality != "high":
         policy = f"local_{purpose}"
-        plan: list[ModelTier] = ["local", "cheap", "standard"]
+        plan = ["local", "cheap", "standard"]
     elif agent_type == "programmer":
         policy = "programmer_default"
         plan = ["standard", "strong"]
@@ -321,6 +332,7 @@ def decide_models(
         "agent_type": agent_type,
         "task_id": task.get("id"),
         "task_status": task.get("status"),
+        "task_model_tier": explicit_tier or None,
         "purpose": purpose,
         "complexity": complexity,
         "criticality": criticality,
