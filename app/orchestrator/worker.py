@@ -636,8 +636,9 @@ class WorkerManager:
                 if candidate.exists():
                     transcript = candidate
 
-            if not transcript:
-                # Fall back to most recent transcript for this agent
+            if not transcript and not session_uuid:
+                # Only fall back to most recent transcript if we don't have a UUID
+                # (with a UUID, falling back picks up unrelated sessions)
                 transcripts = sorted(base.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
                 transcript = transcripts[0] if transcripts else None
 
