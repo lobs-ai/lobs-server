@@ -133,9 +133,10 @@ class WorkerManager:
     the same agent type can run concurrently on different projects.
     """
 
-    def __init__(self, db: AsyncSession, provider_health: Optional[Any] = None):
+    def __init__(self, db: AsyncSession, provider_health: Optional[Any] = None, session_factory: Optional[Any] = None):
         self.db = db
         self.provider_health = provider_health  # ProviderHealthRegistry instance
+        self._session_factory = session_factory  # Override for independent DB sessions (testing)
         
         # In-memory tracking: worker_id -> WorkerInfo
         self.active_workers: dict[str, WorkerInfo] = {}
@@ -148,6 +149,13 @@ class WorkerManager:
         # Signal to engine: set True when all reflection workers from a batch
         # have completed, indicating the sweep arbitrator should run.
         self.sweep_requested = False
+
+    def _get_independent_session(self):
+        """Get an independent DB session for operations that must not conflict with the engine's session."""
+        if self._session_factory:
+            return self._session_factory()
+        from app.database import AsyncSessionLocal
+        return AsyncSessionLocal()
 
     async def spawn_worker(
         self,
@@ -1161,44 +1169,44 @@ class WorkerManager:
                 files_modified=files_modified,
             )
 
-            self.db.add(run)
+            async with self._get_independent_session() as db:
+                db.add(run)
 
-            if model:
-                route_type = resolve_route_type(
-                    model,
-                    subscription_models=(model_audit or {}).get("subscription_models", []),
-                    subscription_providers=(model_audit or {}).get("subscription_providers", []),
-                )
-                # Use actual token counts if available
-                input_tokens = token_usage.input_tokens if token_usage else 0
-                output_tokens = token_usage.output_tokens if token_usage else 0
-                cached_tokens = token_usage.cache_read_tokens if token_usage else 0
-                cost = token_usage.estimated_cost_usd if token_usage else 0.0
+                if model:
+                    route_type = resolve_route_type(
+                        model,
+                        subscription_models=(model_audit or {}).get("subscription_models", []),
+                        subscription_providers=(model_audit or {}).get("subscription_providers", []),
+                    )
+                    input_tokens = token_usage.input_tokens if token_usage else 0
+                    output_tokens = token_usage.output_tokens if token_usage else 0
+                    cached_tokens = token_usage.cache_read_tokens if token_usage else 0
+                    cost = token_usage.estimated_cost_usd if token_usage else 0.0
 
-                await _safe_log_usage_event(
-                    self.db,
-                    source="orchestrator-worker",
-                    model=token_usage.model or model if token_usage else model,
-                    provider=token_usage.provider if token_usage and token_usage.provider else None,
-                    route_type=route_type,
-                    task_type="task_execution",
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cached_tokens=cached_tokens,
-                    requests=token_usage.message_count if token_usage and token_usage.message_count else 1,
-                    status="success" if succeeded else "error",
-                    estimated_cost_usd=cost,
-                    error_code=None if succeeded else f"exit_code_{exit_code}",
-                    metadata={
-                        "task_id": task_id,
-                        "worker_id": worker_id,
-                        "model_router": model_audit,
-                        "duration_seconds": duration,
-                        "session_key": session_key,
-                    },
-                )
+                    await _safe_log_usage_event(
+                        db,
+                        source="orchestrator-worker",
+                        model=token_usage.model or model if token_usage else model,
+                        provider=token_usage.provider if token_usage and token_usage.provider else None,
+                        route_type=route_type,
+                        task_type="task_execution",
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        cached_tokens=cached_tokens,
+                        requests=token_usage.message_count if token_usage and token_usage.message_count else 1,
+                        status="success" if succeeded else "error",
+                        estimated_cost_usd=cost,
+                        error_code=None if succeeded else f"exit_code_{exit_code}",
+                        metadata={
+                            "task_id": task_id,
+                            "worker_id": worker_id,
+                            "model_router": model_audit,
+                            "duration_seconds": duration,
+                            "session_key": session_key,
+                        },
+                    )
 
-            await self.db.commit()
+                await db.commit()
 
         except Exception as e:
             logger.error(f"Failed to record worker run: {e}", exc_info=True)
@@ -1213,103 +1221,121 @@ class WorkerManager:
         summary: str,
         succeeded: bool,
     ) -> None:
-        """Persist strategic/diagnostic outputs and derive initiatives for strategic runs."""
+        """Persist strategic/diagnostic outputs and derive initiatives for strategic runs.
+        
+        Uses an independent DB session to avoid conflicts with the engine's session
+        (which may be in a 'prepared' state during concurrent worker completions).
+        """
         try:
-            reflection_result = await self.db.execute(
-                select(AgentReflection)
-                .where(
-                    AgentReflection.agent_type == agent_type,
-                    AgentReflection.status == "pending",
-                    AgentReflection.reflection_type == reflection_type,
-                )
-                .order_by(AgentReflection.created_at.desc())
-                .limit(1)
-            )
-            reflection = reflection_result.scalar_one_or_none()
-            if reflection is None:
-                return
-
-            payload = self._extract_json(summary)
-            
-            # Map alternative field names from different worker response formats
-            # Some workers return diagnostic-style schemas, normalize them
-            if isinstance(payload, dict) and "raw" not in payload:
-                # Map: issue_summary/summary → inefficiencies_detected
-                if "inefficiencies_detected" not in payload:
-                    issue_summary = payload.get("issue_summary") or payload.get("summary")
-                    if issue_summary:
-                        payload["inefficiencies_detected"] = [issue_summary] if isinstance(issue_summary, str) else issue_summary
-                
-                # Map: root_causes → inefficiencies_detected (append)
-                root_causes = payload.get("root_causes")
-                if root_causes:
-                    existing = payload.get("inefficiencies_detected", [])
-                    if not isinstance(existing, list):
-                        existing = [existing] if existing else []
-                    if isinstance(root_causes, list):
-                        payload["inefficiencies_detected"] = existing + root_causes
-                    elif isinstance(root_causes, str):
-                        payload["inefficiencies_detected"] = existing + [root_causes]
-                
-                # Map: recommended_actions → missed_opportunities
-                if "missed_opportunities" not in payload:
-                    recommended = payload.get("recommended_actions")
-                    if recommended:
-                        payload["missed_opportunities"] = recommended if isinstance(recommended, list) else [recommended]
-            
-            reflection.status = "completed" if succeeded else "failed"
-            reflection.result = payload
-            reflection.inefficiencies = self._json_list(payload.get("inefficiencies_detected"))
-            reflection.system_risks = self._json_list(payload.get("system_risks"))
-            reflection.missed_opportunities = self._json_list(payload.get("missed_opportunities"))
-            reflection.identity_adjustments = self._json_list(payload.get("identity_adjustments"))
-            reflection.completed_at = datetime.now(timezone.utc)
-
-            if reflection_type == "diagnostic":
-                await self._persist_diagnostic_event_outcome(
-                    reflection=reflection,
-                    payload=payload,
+            async with self._get_independent_session() as db:
+                await self._persist_reflection_output_impl(
+                    db=db,
+                    agent_type=agent_type,
+                    reflection_label=reflection_label,
+                    reflection_type=reflection_type,
+                    summary=summary,
                     succeeded=succeeded,
                 )
-
-            if reflection_type == "strategic" and succeeded and isinstance(payload, dict):
-                initiatives = payload.get("proposed_initiatives") or []
-                policy = PolicyEngine()
-                for raw in initiatives:
-                    if not isinstance(raw, dict):
-                        continue
-                    category = str(raw.get("category", "")).strip().lower()
-                    effort = raw.get("estimated_effort")
-                    effort_int = int(effort) if isinstance(effort, (int, float)) else None
-                    decision = policy.decide(category, estimated_effort=effort_int)
-
-                    proposed_owner = raw.get("owner_agent") or raw.get("suggested_owner_agent")
-                    self.db.add(
-                        AgentInitiative(
-                            id=str(uuid.uuid4()),
-                            proposed_by_agent=agent_type,
-                            source_reflection_id=reflection.id,
-                            owner_agent=(str(proposed_owner).strip().lower() if proposed_owner else None),
-                            title=str(raw.get("title") or "Untitled initiative"),
-                            description=str(raw.get("description") or ""),
-                            category=category or "unknown",
-                            risk_tier=decision.risk_tier,
-                            policy_lane=decision.lane,
-                            policy_reason=decision.reason,
-                            status="proposed",
-                            score=float(effort_int) if effort_int is not None else None,
-                            rationale=(
-                                f"Proposed by {agent_type}. Initial policy lane={decision.lane} "
-                                f"(mode={decision.approval_mode}). Reason={decision.reason}"
-                            ),
-                        )
-                    )
-
-            # Don't commit here — the engine's main loop handles the commit
-            await self.db.flush()
-
+                await db.commit()
         except Exception as e:
             logger.warning("[WORKER] Failed to persist reflection output: %s", e, exc_info=True)
+
+    async def _persist_reflection_output_impl(
+        self,
+        *,
+        db: AsyncSession,
+        agent_type: str,
+        reflection_label: str,
+        reflection_type: str,
+        summary: str,
+        succeeded: bool,
+    ) -> None:
+        """Inner implementation using the provided DB session."""
+        reflection_result = await db.execute(
+            select(AgentReflection)
+            .where(
+                AgentReflection.agent_type == agent_type,
+                AgentReflection.status == "pending",
+                AgentReflection.reflection_type == reflection_type,
+            )
+            .order_by(AgentReflection.created_at.desc())
+            .limit(1)
+        )
+        reflection = reflection_result.scalar_one_or_none()
+        if reflection is None:
+            return
+
+        payload = self._extract_json(summary)
+
+        # Map alternative field names from different worker response formats
+        if isinstance(payload, dict) and "raw" not in payload:
+            if "inefficiencies_detected" not in payload:
+                issue_summary = payload.get("issue_summary") or payload.get("summary")
+                if issue_summary:
+                    payload["inefficiencies_detected"] = [issue_summary] if isinstance(issue_summary, str) else issue_summary
+
+            root_causes = payload.get("root_causes")
+            if root_causes:
+                existing = payload.get("inefficiencies_detected", [])
+                if not isinstance(existing, list):
+                    existing = [existing] if existing else []
+                if isinstance(root_causes, list):
+                    payload["inefficiencies_detected"] = existing + root_causes
+                elif isinstance(root_causes, str):
+                    payload["inefficiencies_detected"] = existing + [root_causes]
+
+            if "missed_opportunities" not in payload:
+                recommended = payload.get("recommended_actions")
+                if recommended:
+                    payload["missed_opportunities"] = recommended if isinstance(recommended, list) else [recommended]
+
+        reflection.status = "completed" if succeeded else "failed"
+        reflection.result = payload
+        reflection.inefficiencies = self._json_list(payload.get("inefficiencies_detected"))
+        reflection.system_risks = self._json_list(payload.get("system_risks"))
+        reflection.missed_opportunities = self._json_list(payload.get("missed_opportunities"))
+        reflection.identity_adjustments = self._json_list(payload.get("identity_adjustments"))
+        reflection.completed_at = datetime.now(timezone.utc)
+
+        if reflection_type == "diagnostic":
+            await self._persist_diagnostic_event_outcome(
+                reflection=reflection,
+                payload=payload,
+                succeeded=succeeded,
+            )
+
+        if reflection_type == "strategic" and succeeded and isinstance(payload, dict):
+            initiatives = payload.get("proposed_initiatives") or []
+            policy = PolicyEngine()
+            for raw in initiatives:
+                if not isinstance(raw, dict):
+                    continue
+                category = str(raw.get("category", "")).strip().lower()
+                effort = raw.get("estimated_effort")
+                effort_int = int(effort) if isinstance(effort, (int, float)) else None
+                decision = policy.decide(category, estimated_effort=effort_int)
+
+                proposed_owner = raw.get("owner_agent") or raw.get("suggested_owner_agent")
+                db.add(
+                    AgentInitiative(
+                        id=str(uuid.uuid4()),
+                        proposed_by_agent=agent_type,
+                        source_reflection_id=reflection.id,
+                        owner_agent=(str(proposed_owner).strip().lower() if proposed_owner else None),
+                        title=str(raw.get("title") or "Untitled initiative"),
+                        description=str(raw.get("description") or ""),
+                        category=category or "unknown",
+                        risk_tier=decision.risk_tier,
+                        policy_lane=decision.lane,
+                        policy_reason=decision.reason,
+                        status="proposed",
+                        score=float(effort_int) if effort_int is not None else None,
+                        rationale=(
+                            f"Proposed by {agent_type}. Initial policy lane={decision.lane} "
+                            f"(mode={decision.approval_mode}). Reason={decision.reason}"
+                        ),
+                    )
+                )
 
     async def _persist_diagnostic_event_outcome(
         self,

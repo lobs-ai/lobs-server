@@ -2,7 +2,14 @@
 
 High-level overview of the backend system design, data flow, and key components.
 
-**Last Updated:** 2026-02-14
+**Last Updated:** 2026-02-22
+
+**Recent Architectural Changes (Feb 21-22):**
+- **5-tier model routing** — Upgraded to micro/small/medium/standard/strong tier system with Ollama auto-discovery
+- **Reflection system improvements** — Domain-specific prompts, isolated sessions, manual trigger endpoint
+- **Token usage tracking** — Extract and track token usage from session transcripts
+
+See [~/lobs-shared-memory/docs/server/](../lobs-shared-memory/docs/server/) for detailed documentation.
 
 ---
 

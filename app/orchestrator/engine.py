@@ -35,7 +35,7 @@ from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.control_loop import LobsControlLoopService
 from app.orchestrator.provider_health import ProviderHealthRegistry
-from app.orchestrator.config import POLL_INTERVAL, GATEWAY_URL, GATEWAY_TOKEN
+from app.orchestrator.config import POLL_INTERVAL, GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
 from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat, AgentReflection, AgentInitiative
 from app.services.github_sync import GitHubSyncService
 from app.services.openclaw_models import fetch_openclaw_model_catalog

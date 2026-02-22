@@ -8,7 +8,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Added
+### Added (2026-02-21 to 2026-02-22)
+- **5-Tier Model Hierarchy** — Expanded from 3 tiers (cheap/standard/strong) to 5 tiers (micro/small/medium/standard/strong) for better cost control and local model support
+- **Ollama Auto-Discovery** — System automatically detects and injects Ollama models into micro/small/medium tiers based on parameter count
+- **Model Tier Field on Tasks** — Added `model_tier` field to Task model for explicit tier control (overrides auto-selection)
+- **Token Usage Extraction** — Extract and track token usage from session transcripts via new dashboard endpoint
+- **Reflection System Endpoint** — Added `POST /orchestrator/reflection/trigger` for manual reflection cycle triggering
+- **Domain-Specific Reflection Prompts** — Custom reflection prompts for programmer, researcher, specialist, and writer agents (targeted insights per agent type)
+- **Isolated Reflection Sessions** — Reflection results now sent to isolated Lobs session (not main agent session) to prevent context pollution
+- **Broader Proposal Scope** — Reflection system now encourages feature proposals and new project ideas (not just maintenance/fixes)
+
+### Changed (2026-02-21 to 2026-02-22)
+- **Model Tier Refactoring** — Migrated all model routing from 3-tier to 5-tier system
+- **Model Hierarchy** — Codex 5.3 now primary model, Sonnet 4.5 fallback, with Gemini/Haiku for cheap tier
+- **Local Model Tier** — Removed dedicated "local" tier; local models now auto-injected into micro/small/medium based on size
+- **Reflection Isolation** — Reflection cycle spawns isolated session for Lobs review instead of using main session
+- **Transcript Path Resolution** — Reflection system uses Gateway API to resolve transcript paths (not hardcoded directories)
+- **Reflection Engine** — Uses engine flag instead of sharing DB session (prevents commit conflicts)
+- **JSON Extraction** — Improved reflection JSON extraction, field mapping, and validation gate
+- **Reflection Summary Delivery** — Sends summaries to `agent:main:main` (not `agent:main`)
+- **Session History** — Status checks now use `sessions_history` (fixed DB commit conflict in persist)
+- **Transcript Glob** — Prevented transcript glob fallback from matching unrelated sessions
+
+### Fixed (2026-02-21 to 2026-02-22)
+- **Reflection System** — Fixed JSON extraction, field mapping, validation gate, and Lobs summary delivery
+- **Session Isolation** — Reflection results no longer pollute main agent context
+- **DB Commit Conflict** — Fixed `persist()` method to avoid DB session conflicts
+- **Transcript Matching** — Prevented unrelated session transcripts from being matched by glob patterns
+
+### Earlier (Before 2026-02-21)
 - **Agent Lifecycle Documentation Set** — Added canonical docs for agent lifecycle architecture, operator recruitment/management playbook, and API contracts (`docs/agent-lifecycle-architecture.md`, `docs/agent-operations-playbook.md`, `docs/agent-api-contracts.md`)
 - **Task Improvements Roadmap (Phase 0.5–4 core)** — GitHub two-way sync metadata/conflict support, default inbox assignment for project-optional tasks, Intent Router v1, workspace tenancy/files/link graph APIs, governance registries (agent profiles + routines), and knowledge request model/backfill path
 - **Concurrent Agent Execution** — Removed agent locks; can now run up to 5 concurrent workers (multiple programmers/writers/etc in parallel on different projects)
@@ -16,8 +44,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Notification Deduplication** — Tracker reminder notifications now deduplicate to prevent spam
 - **Task Creation Deduplication** — Server-side enforcement prevents duplicate task creation via API (removed from PM agent logic)
 - Task `work_state` field now accepts 'not_started' as initial state (in addition to 'ready')
-
-### Changed
 - **Agent Concurrency** — Project locks (not agent locks) prevent repo conflicts; MAX_WORKERS=5 allows parallel execution
 - **Session Result Capture** — Worker runs now store summary from session history (prefers session result over .work-summary file), truncated to 2000 chars
 - **Task Deduplication** — Moved from PM agent prompt logic to server-side API enforcement
@@ -27,8 +53,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Scanner accepts both 'ready' and 'not_started' for eligible task states
 - Scheduler defaults new tasks to `work_state='not_started'`
 - Orchestrator no longer creates orchestrator-sink session (lean heartbeats)
-
-### Fixed
 - SQLite WAL mode enabled to prevent "database is locked" errors
 - Recurring events now properly expand in calendar range endpoint
 

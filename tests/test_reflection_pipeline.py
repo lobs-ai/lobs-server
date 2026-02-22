@@ -109,7 +109,8 @@ async def test_reflection_output_persists_structured_fields(db_session):
     )
     await db_session.commit()
 
-    manager = WorkerManager(db_session)
+    from tests.conftest import TestSessionLocal
+    manager = WorkerManager(db_session, session_factory=TestSessionLocal)
     await manager._persist_reflection_output(
         agent_type="programmer",
         reflection_label="reflection-programmer",
@@ -334,7 +335,8 @@ async def test_diagnostic_output_can_auto_create_remediation_tasks(db_session):
     db_session.add(OrchestratorSetting(key=SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS, value=2))
     await db_session.commit()
 
-    manager = WorkerManager(db_session)
+    from tests.conftest import TestSessionLocal
+    manager = WorkerManager(db_session, session_factory=TestSessionLocal)
     await manager._persist_reflection_output(
         agent_type="programmer",
         reflection_label="diagnostic-programmer",
