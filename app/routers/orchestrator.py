@@ -360,6 +360,24 @@ async def update_model_policy(
     return await get_runtime_settings(db)
 
 
+@router.post("/reflection/trigger")
+async def trigger_reflection_cycle(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Manually trigger a strategic reflection cycle."""
+    engine: OrchestratorEngine | None = getattr(request.app.state, "orchestrator", None)
+    if not engine or not engine._worker_manager:
+        raise HTTPException(status_code=503, detail="Orchestrator not running")
+
+    from app.orchestrator.reflection_cycle import ReflectionCycleManager
+
+    manager = ReflectionCycleManager(db, engine._worker_manager)
+    result = await manager.run_strategic_reflection_cycle()
+    await db.commit()
+    return {"ok": True, "result": result}
+
+
 @router.get("/intelligence/summary")
 async def get_intelligence_summary(
     db: AsyncSession = Depends(get_db),
