@@ -12,10 +12,13 @@ from app.orchestrator.sweep_arbitrator import DEFAULT_DAILY_BUDGET
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator import OrchestratorEngine
 from app.orchestrator.model_router import (
-    MODEL_ROUTER_TIER_CHEAP_KEY,
+    MODEL_ROUTER_TIER_MICRO_KEY,
+    MODEL_ROUTER_TIER_SMALL_KEY,
+    MODEL_ROUTER_TIER_MEDIUM_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
+    TIER_ORDER,
 )
 from app.orchestrator.model_chooser import discover_ollama_models
 from app.orchestrator.runtime_settings import (
@@ -36,7 +39,9 @@ PROVIDER_CONFIG_KEY = "provider_config"
 
 
 class ModelTierConfig(BaseModel):
-    cheap: list[str] | None = Field(default=None)
+    micro: list[str] | None = Field(default=None)
+    small: list[str] | None = Field(default=None)
+    medium: list[str] | None = Field(default=None)
     standard: list[str] | None = Field(default=None)
     strong: list[str] | None = Field(default=None)
 
@@ -220,14 +225,16 @@ async def get_model_router_config(
 ) -> dict[str, Any]:
     """Get runtime model-router config stored in DB."""
 
-    keys = (
-        MODEL_ROUTER_TIER_CHEAP_KEY,
-        MODEL_ROUTER_TIER_STANDARD_KEY,
-        MODEL_ROUTER_TIER_STRONG_KEY,
-        MODEL_ROUTER_AVAILABLE_MODELS_KEY,
-    )
+    tier_keys = {
+        "micro": MODEL_ROUTER_TIER_MICRO_KEY,
+        "small": MODEL_ROUTER_TIER_SMALL_KEY,
+        "medium": MODEL_ROUTER_TIER_MEDIUM_KEY,
+        "standard": MODEL_ROUTER_TIER_STANDARD_KEY,
+        "strong": MODEL_ROUTER_TIER_STRONG_KEY,
+    }
+    all_keys = list(tier_keys.values()) + [MODEL_ROUTER_AVAILABLE_MODELS_KEY]
     result = await db.execute(
-        select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys))
+        select(OrchestratorSetting).where(OrchestratorSetting.key.in_(all_keys))
     )
     rows = {row.key: row.value for row in result.scalars().all()}
 
@@ -235,13 +242,10 @@ async def get_model_router_config(
     ollama_tiers = await discover_ollama_models()
 
     return {
-        "tiers": {
-            "cheap": rows.get(MODEL_ROUTER_TIER_CHEAP_KEY),
-            "standard": rows.get(MODEL_ROUTER_TIER_STANDARD_KEY),
-            "strong": rows.get(MODEL_ROUTER_TIER_STRONG_KEY),
-        },
+        "tiers": {name: rows.get(key) for name, key in tier_keys.items()},
         "available_models": rows.get(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
         "ollama_models": ollama_tiers if ollama_tiers else None,
+        "tier_order": TIER_ORDER,
     }
 
 
@@ -259,7 +263,9 @@ async def update_model_router_config(
     updates: dict[str, list[str] | None] = {}
 
     if payload.tiers is not None:
-        updates[MODEL_ROUTER_TIER_CHEAP_KEY] = payload.tiers.cheap
+        updates[MODEL_ROUTER_TIER_MICRO_KEY] = payload.tiers.micro
+        updates[MODEL_ROUTER_TIER_SMALL_KEY] = payload.tiers.small
+        updates[MODEL_ROUTER_TIER_MEDIUM_KEY] = payload.tiers.medium
         updates[MODEL_ROUTER_TIER_STANDARD_KEY] = payload.tiers.standard
         updates[MODEL_ROUTER_TIER_STRONG_KEY] = payload.tiers.strong
 

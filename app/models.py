@@ -56,7 +56,7 @@ class Task(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
     
     # Model routing
-    model_tier = Column(String)  # Optional override: cheap/standard/strong (NULL = auto)
+    model_tier = Column(String)  # Optional override: micro/small/medium/standard/strong (NULL = auto)
     
     # Escalation fields
     escalation_tier = Column(Integer, default=0)  # 0=none, 1=retry, 2=agent_switch, 3=diagnostic, 4=human

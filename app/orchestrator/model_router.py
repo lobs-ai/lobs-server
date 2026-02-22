@@ -18,31 +18,39 @@ from typing import Any, Literal
 
 Complexity = Literal["light", "standard", "very_complex"]
 Criticality = Literal["low", "normal", "high"]
-ModelTier = Literal["cheap", "standard", "strong"]
+ModelTier = Literal["micro", "small", "medium", "standard", "strong"]
 
-MODEL_ROUTER_TIER_CHEAP_KEY = "model_router.tier.cheap"
+# 5-tier model hierarchy:
+#   micro    — tiny local models ≤15B (routing, classification, quick JSON)
+#   small    — medium local ≤40B (Qwen 30B — summaries, light review, drafts)
+#   medium   — large local ≤80B + cheap cloud (Llama 70B, Haiku, Gemini)
+#   standard — Sonnet, Codex (quality floor for real work)
+#   strong   — Opus, GPT-5 (complex reasoning, architecture)
+#
+# Ollama models are auto-discovered and injected into micro/small/medium
+# based on parameter count. Standard and strong are always cloud-quality.
+
+MODEL_ROUTER_TIER_MICRO_KEY = "model_router.tier.micro"
+MODEL_ROUTER_TIER_SMALL_KEY = "model_router.tier.small"
+MODEL_ROUTER_TIER_MEDIUM_KEY = "model_router.tier.medium"
 MODEL_ROUTER_TIER_STANDARD_KEY = "model_router.tier.standard"
 MODEL_ROUTER_TIER_STRONG_KEY = "model_router.tier.strong"
 MODEL_ROUTER_AVAILABLE_MODELS_KEY = "model_router.available_models"
 MODEL_ROUTER_SETTING_KEYS = (
-    MODEL_ROUTER_TIER_CHEAP_KEY,
+    MODEL_ROUTER_TIER_MICRO_KEY,
+    MODEL_ROUTER_TIER_SMALL_KEY,
+    MODEL_ROUTER_TIER_MEDIUM_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
 )
 
-# Tier defaults (override with env vars in deployment):
-# - LOBS_MODEL_TIER_CHEAP
-# - LOBS_MODEL_TIER_STANDARD
-# - LOBS_MODEL_TIER_STRONG
-# - LOBS_AVAILABLE_MODELS (optional allow-list)
-#
-# Updated for Rafe's provider setup:
-# - Gemini (free/OAuth) for cheap/lightweight
-# - OpenAI Codex for programming/standard
-# - Anthropic for strong/fallback
+# Tier defaults (cloud models only — local models injected at runtime).
+# micro/small default empty: only populated when Ollama models are discovered.
 DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
-    "cheap": (
+    "micro": (),
+    "small": (),
+    "medium": (
         "google-gemini-cli/gemini-3-pro-preview",
         "anthropic/claude-haiku-4-5",
     ),
@@ -56,6 +64,9 @@ DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
         "anthropic/claude-sonnet-4-5",
     ),
 }
+
+# Ordered list for fallback chains and explicit tier overrides.
+TIER_ORDER: list[ModelTier] = ["micro", "small", "medium", "standard", "strong"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +143,9 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
 
 def _tier_models_from_env_or_default(tier: ModelTier) -> list[str]:
     env_name = {
-        "cheap": "LOBS_MODEL_TIER_CHEAP",
+        "micro": "LOBS_MODEL_TIER_MICRO",
+        "small": "LOBS_MODEL_TIER_SMALL",
+        "medium": "LOBS_MODEL_TIER_MEDIUM",
         "standard": "LOBS_MODEL_TIER_STANDARD",
         "strong": "LOBS_MODEL_TIER_STRONG",
     }[tier]
@@ -153,15 +166,13 @@ def _effective_tier_models(
     """Resolve tier models with precedence DB overrides > env > defaults."""
 
     tier_map: dict[ModelTier, list[str]] = {
-        "cheap": _tier_models_from_env_or_default("cheap"),
-        "standard": _tier_models_from_env_or_default("standard"),
-        "strong": _tier_models_from_env_or_default("strong"),
+        tier: _tier_models_from_env_or_default(tier) for tier in TIER_ORDER
     }
     source = "env_or_default"
 
     if tier_overrides:
         changed = False
-        for tier in ("cheap", "standard", "strong"):
+        for tier in TIER_ORDER:
             vals = tier_overrides.get(tier)
             if vals:
                 tier_map[tier] = vals
@@ -240,38 +251,40 @@ def decide_models(
 
     complexity, criticality = classify_task(task, agent_type=agent_type)
 
-    # Policy table by tiers:
-    # - programming: standard -> strong
-    # - writer (non-complex): cheap -> standard
-    # - reviewer (light): cheap -> standard
-    # - light inbox: cheap -> standard -> strong
-    # - default non-programming: standard (+ strong for very_complex)
+    # 5-tier policy table:
+    #   micro/small  — local models (auto-discovered from Ollama)
+    #   medium       — cheap cloud (Haiku, Gemini) + large local (70B)
+    #   standard     — Sonnet, Codex (quality floor for real work)
+    #   strong       — Opus, GPT-5 (complex reasoning)
     #
-    # Local Ollama models are auto-injected into tiers by the ModelChooser
-    # based on their parameter count, so a 30B local model in "cheap" tier
-    # gets preferred over cloud cheap models (because it's free).
+    # Local Ollama models are auto-injected into micro/small/medium by
+    # the ModelChooser based on parameter count. A 30B model lands in
+    # "small", so writer/reviewer tasks naturally prefer it (free).
     policy = "default"
 
     # Explicit model_tier override on the task (highest priority)
     explicit_tier = (task.get("model_tier") or "").strip().lower()
-    if explicit_tier in ("cheap", "standard", "strong"):
+    if explicit_tier in TIER_ORDER:
         policy = f"explicit_{explicit_tier}"
-        tier_order: list[ModelTier] = ["cheap", "standard", "strong"]
-        start_idx = tier_order.index(explicit_tier)  # type: ignore[arg-type]
-        plan: list[ModelTier] = list(tier_order[start_idx:])
+        start_idx = TIER_ORDER.index(explicit_tier)  # type: ignore[arg-type]
+        plan: list[ModelTier] = list(TIER_ORDER[start_idx:])
     elif agent_type == "programmer":
         policy = "programmer_default"
         plan = ["standard", "strong"]
     elif agent_type == "writer" and complexity != "very_complex":
+        # Writer: try small local first, then medium cloud, then standard
         policy = "writer_default"
-        plan = ["cheap", "standard"]
+        plan = ["small", "medium", "standard"]
     elif agent_type == "reviewer" and complexity == "light":
+        # Light review: small local → medium cloud
         policy = "reviewer_light"
-        plan = ["cheap", "standard"]
+        plan = ["small", "medium", "standard"]
     elif complexity == "light" and (task.get("status") or "").lower() == "inbox":
+        # Light inbox (classification, triage): micro → small → medium
         policy = "light_inbox"
-        plan = ["cheap", "standard", "strong"]
+        plan = ["micro", "small", "medium", "standard"]
     else:
+        # Default: standard cloud (+ strong for complex)
         policy = "non_programming_default"
         plan = ["standard"] + (["strong"] if complexity == "very_complex" else [])
 
@@ -290,7 +303,7 @@ def decide_models(
     # to avoid empty model selection. Worker layer will still handle failures.
     if not models:
         fallback_models = _dedupe_keep_order(
-            list(DEFAULT_TIER_MODELS["standard"]) + list(DEFAULT_TIER_MODELS["cheap"]) + list(DEFAULT_TIER_MODELS["strong"])
+            list(DEFAULT_TIER_MODELS["standard"]) + list(DEFAULT_TIER_MODELS["medium"]) + list(DEFAULT_TIER_MODELS["strong"])
         )
         models = fallback_models
         policy = f"{policy}+empty_allowlist_fallback"

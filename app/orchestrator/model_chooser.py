@@ -40,10 +40,10 @@ _OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 # Models are inserted at the FRONT of their tier (preferred because free).
 _PARAM_TIER_THRESHOLDS: list[tuple[float, str]] = [
     # (max_billions, tier)
-    (15.0, "cheap"),      # ≤15B → cheap
-    (40.0, "cheap"),      # ≤40B → cheap  (Qwen 30B, Mistral 22B, etc.)
-    (80.0, "standard"),   # ≤80B → standard (Llama 70B, Qwen 72B, etc.)
-    (float("inf"), "strong"),  # >80B → strong (Llama 405B, etc.)
+    # Local models NEVER go into standard or strong — those are cloud-quality.
+    (15.0, "micro"),      # ≤15B → micro (Phi, Qwen 7B, routing/classification)
+    (40.0, "small"),      # ≤40B → small (Qwen 30B, Mistral 22B, summaries/drafts)
+    (float("inf"), "medium"),  # >40B → medium (Llama 70B+, alongside cheap cloud)
 ]
 
 # Override specific model families to tiers regardless of param count.
@@ -146,9 +146,12 @@ async def discover_ollama_models() -> dict[str, list[str]]:
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
 from app.orchestrator.model_router import (
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
-    MODEL_ROUTER_TIER_CHEAP_KEY,
+    MODEL_ROUTER_TIER_MICRO_KEY,
+    MODEL_ROUTER_TIER_SMALL_KEY,
+    MODEL_ROUTER_TIER_MEDIUM_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
+    TIER_ORDER,
     decide_models,
 )
 from app.orchestrator.runtime_settings import (
@@ -243,7 +246,9 @@ class ModelChooser:
 
     async def _load_runtime_config(self) -> dict[str, Any]:
         keys = (
-            MODEL_ROUTER_TIER_CHEAP_KEY,
+            MODEL_ROUTER_TIER_MICRO_KEY,
+            MODEL_ROUTER_TIER_SMALL_KEY,
+            MODEL_ROUTER_TIER_MEDIUM_KEY,
             MODEL_ROUTER_TIER_STANDARD_KEY,
             MODEL_ROUTER_TIER_STRONG_KEY,
             MODEL_ROUTER_AVAILABLE_MODELS_KEY,
@@ -265,7 +270,9 @@ class ModelChooser:
             return None
 
         explicit_tiers = {
-            "cheap": _list_value(MODEL_ROUTER_TIER_CHEAP_KEY),
+            "micro": _list_value(MODEL_ROUTER_TIER_MICRO_KEY),
+            "small": _list_value(MODEL_ROUTER_TIER_SMALL_KEY),
+            "medium": _list_value(MODEL_ROUTER_TIER_MEDIUM_KEY),
             "standard": _list_value(MODEL_ROUTER_TIER_STANDARD_KEY),
             "strong": _list_value(MODEL_ROUTER_TIER_STRONG_KEY),
         }
@@ -273,9 +280,8 @@ class ModelChooser:
         catalog_raw = rows.get(OPENCLAW_MODEL_CATALOG_KEY)
         derived = self._derive_tiers_from_catalog(catalog_raw if isinstance(catalog_raw, dict) else {})
         tiers = {
-            "cheap": explicit_tiers["cheap"] or derived["cheap"],
-            "standard": explicit_tiers["standard"] or derived["standard"],
-            "strong": explicit_tiers["strong"] or derived["strong"],
+            tier: explicit_tiers[tier] or derived.get(tier)
+            for tier in TIER_ORDER
         }
         available_models = explicit_available_models or derived["available_models"]
 
@@ -292,10 +298,10 @@ class ModelChooser:
     def _derive_tiers_from_catalog(catalog: dict[str, Any]) -> dict[str, list[str] | None]:
         models = catalog.get("models") if isinstance(catalog.get("models"), list) else []
         if not models:
-            return {"cheap": None, "standard": None, "strong": None, "available_models": None}
+            return {tier: None for tier in TIER_ORDER} | {"available_models": None}
 
         available: list[str] = []
-        cheap: list[str] = []
+        medium: list[str] = []
         standard: list[str] = []
         strong: list[str] = []
 
@@ -311,12 +317,14 @@ class ModelChooser:
             billing = str(item.get("billing_type", "")).lower()
 
             if billing == "subscription":
-                cheap.append(name)
+                medium.append(name)
 
-            if any(k in lower for k in ("opus", "gpt-5", "o3", "sonnet-4-5", "claude-4-6", "ultra")):
+            if any(k in lower for k in ("opus", "gpt-5", "o3", "claude-4-6", "ultra")):
                 strong.append(name)
-            else:
+            elif any(k in lower for k in ("sonnet", "codex", "gpt-4")):
                 standard.append(name)
+            else:
+                medium.append(name)
 
         # Keep order, remove duplicates.
         def _dedupe(values: list[str]) -> list[str]:
@@ -330,7 +338,7 @@ class ModelChooser:
             return out
 
         available = _dedupe(available)
-        cheap = _dedupe(cheap)
+        medium = _dedupe(medium)
         standard = _dedupe(standard)
         strong = _dedupe(strong)
 
@@ -338,11 +346,13 @@ class ModelChooser:
             standard = available[:]
         if not strong:
             strong = standard[:]
-        if not cheap:
-            cheap = standard[:]
+        if not medium:
+            medium = standard[:]
 
         return {
-            "cheap": cheap or None,
+            "micro": None,   # Only populated by Ollama auto-discovery
+            "small": None,   # Only populated by Ollama auto-discovery
+            "medium": medium or None,
             "standard": standard or None,
             "strong": strong or None,
             "available_models": available or None,
