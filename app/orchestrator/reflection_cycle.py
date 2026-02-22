@@ -150,11 +150,18 @@ class ReflectionCycleManager:
             compressed = self._compress_reflections(agent, reflections)
             changed_heuristics = compressed["changed_heuristics"]
             removed_rules = compressed["removed_rules"]
+            
+            # Check if any reflections had meaningful result data
+            reflections_with_data = sum(
+                1 for r in reflections
+                if r.status == "completed" and r.result and isinstance(r.result, dict) and "raw" not in r.result
+            )
 
             validation_ok, validation_reason = self._run_lobs_validation_gate(
                 identity_text=compressed["identity_text"],
                 changed_heuristics=changed_heuristics,
                 removed_rules=removed_rules,
+                reflections_with_data=reflections_with_data,
             )
 
             candidate = AgentIdentityVersion(
@@ -356,11 +363,14 @@ Return STRICT JSON with this schema (no prose outside JSON):
         identity_text: str,
         changed_heuristics: list[str],
         removed_rules: list[str],
+        reflections_with_data: int = 0,
     ) -> tuple[bool, str | None]:
         if not identity_text.strip():
             return False, "identity artifact is empty"
         if "## Behavioral directives" not in identity_text:
             return False, "missing behavioral directives section"
-        if len(changed_heuristics) == 0 and len(removed_rules) == 0:
+        # Pass if EITHER changed_heuristics OR removed_rules has content,
+        # OR if there are completed reflections with result data (relaxed validation)
+        if len(changed_heuristics) == 0 and len(removed_rules) == 0 and reflections_with_data == 0:
             return False, "no meaningful identity deltas detected"
         return True, None

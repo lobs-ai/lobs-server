@@ -152,7 +152,10 @@ class _StubWorkerManager:
 
     async def _spawn_session(self, **kwargs):
         self.calls.append(kwargs)
-        return {"run_id": str(uuid.uuid4())}, None
+        return {"runId": str(uuid.uuid4()), "childSessionKey": "stub-session-key"}, None, "none"
+    
+    def register_external_worker(self, *args, **kwargs):
+        pass
 
 
 @pytest.mark.asyncio
@@ -285,7 +288,10 @@ async def test_diagnostic_triggers_are_auditable_with_debounce(db_session):
 
     class _SpawnOkWorker:
         async def _spawn_session(self, **kwargs):
-            return {"run_id": "abc"}, None
+            return {"runId": "abc", "childSessionKey": "stub-session-key"}, None, "none"
+        
+        def register_external_worker(self, *args, **kwargs):
+            pass
 
     engine = DiagnosticTriggerEngine(db_session, _SpawnOkWorker())  # type: ignore[arg-type]
     first = await engine.run_once()

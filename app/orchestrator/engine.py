@@ -10,6 +10,7 @@ Key changes:
 """
 
 import asyncio
+import aiohttp
 import logging
 import shutil
 import uuid
@@ -34,8 +35,8 @@ from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.control_loop import LobsControlLoopService
 from app.orchestrator.provider_health import ProviderHealthRegistry
-from app.orchestrator.config import POLL_INTERVAL
-from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat
+from app.orchestrator.config import POLL_INTERVAL, GATEWAY_URL, GATEWAY_TOKEN
+from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat, AgentReflection, AgentInitiative
 from app.services.github_sync import GitHubSyncService
 from app.services.openclaw_models import fetch_openclaw_model_catalog
 from sqlalchemy import select
@@ -529,6 +530,13 @@ class OrchestratorEngine:
                     if sweep_result.get("lobs_review", 0) > 0 or sweep_result.get("approved", 0) > 0:
                         activity = True
                     logger.info("[ENGINE] Post-reflection initiative sweep: %s", sweep_result)
+                    
+                    # Send reflection summary to Lobs for decision-making
+                    try:
+                        await self._send_reflection_summary_to_lobs(db)
+                    except Exception as summary_err:
+                        logger.warning("[ENGINE] Failed to send reflection summary to Lobs: %s", summary_err)
+                        
                 except Exception as e:
                     logger.error("[ENGINE] Initiative sweep failed: %s", e, exc_info=True)
                     await db.rollback()
@@ -709,6 +717,140 @@ class OrchestratorEngine:
         )
         await db.commit()
         return True
+
+    async def _send_reflection_summary_to_lobs(self, db: Any) -> None:
+        """Send consolidated reflection summary to Lobs main session for decision-making.
+        
+        Queries recent completed reflections (last 6 hours) and any initiatives created
+        from those reflections, then formats and sends a concise summary via Gateway API.
+        """
+        try:
+            # Query recent completed reflections (last 6 hours)
+            window_start = datetime.now(timezone.utc) - timedelta(hours=6)
+            reflections_result = await db.execute(
+                select(AgentReflection)
+                .where(
+                    AgentReflection.completed_at >= window_start,
+                    AgentReflection.status == "completed",
+                    AgentReflection.reflection_type == "strategic",
+                )
+                .order_by(AgentReflection.completed_at.desc())
+            )
+            reflections = reflections_result.scalars().all()
+            
+            if not reflections:
+                logger.debug("[ENGINE] No completed reflections to summarize")
+                return
+            
+            # Query initiatives created from these reflections
+            reflection_ids = [r.id for r in reflections]
+            initiatives_result = await db.execute(
+                select(AgentInitiative)
+                .where(AgentInitiative.source_reflection_id.in_(reflection_ids))
+                .order_by(AgentInitiative.created_at.desc())
+            )
+            initiatives = initiatives_result.scalars().all()
+            
+            # Format summary message
+            summary_lines = [
+                "## Reflection Cycle Complete",
+                "",
+                f"Completed {len(reflections)} strategic reflection(s) across the team.",
+                ""
+            ]
+            
+            # Group reflections by agent
+            agent_findings = {}
+            for reflection in reflections:
+                agent = reflection.agent_type
+                if agent not in agent_findings:
+                    agent_findings[agent] = {
+                        "inefficiencies": [],
+                        "opportunities": [],
+                        "risks": [],
+                    }
+                
+                if reflection.inefficiencies:
+                    agent_findings[agent]["inefficiencies"].extend(reflection.inefficiencies[:3])
+                if reflection.missed_opportunities:
+                    agent_findings[agent]["opportunities"].extend(reflection.missed_opportunities[:3])
+                if reflection.system_risks:
+                    agent_findings[agent]["risks"].extend(reflection.system_risks[:2])
+            
+            # Add agent findings
+            if agent_findings:
+                summary_lines.append("### Key Findings by Agent")
+                summary_lines.append("")
+                for agent, findings in sorted(agent_findings.items()):
+                    summary_lines.append(f"**{agent.title()}:**")
+                    if findings["inefficiencies"]:
+                        summary_lines.append(f"  - Inefficiencies: {', '.join(findings['inefficiencies'][:2])}")
+                    if findings["opportunities"]:
+                        summary_lines.append(f"  - Opportunities: {', '.join(findings['opportunities'][:2])}")
+                    if findings["risks"]:
+                        summary_lines.append(f"  - Risks: {', '.join(findings['risks'][:1])}")
+                    summary_lines.append("")
+            
+            # Add initiative summary
+            if initiatives:
+                summary_lines.append("### Proposed Initiatives")
+                summary_lines.append(f"{len(initiatives)} initiative(s) proposed:")
+                summary_lines.append("")
+                
+                # Group by status/policy lane
+                proposed = [i for i in initiatives if i.status == "proposed"]
+                approved = [i for i in initiatives if i.status == "approved"]
+                needs_review = [i for i in initiatives if i.policy_lane == "lobs-pm-review"]
+                
+                if approved:
+                    summary_lines.append(f"- **Auto-approved:** {len(approved)} low-risk initiatives")
+                if proposed and needs_review:
+                    summary_lines.append(f"- **Pending review:** {len(needs_review)} initiatives need PM decision")
+                    for initiative in needs_review[:5]:  # Show first 5
+                        summary_lines.append(f"  - {initiative.title} (category: {initiative.category}, risk: {initiative.risk_tier})")
+                
+                summary_lines.append("")
+                summary_lines.append("Use the dashboard or API to review and approve/defer/reject initiatives.")
+            else:
+                summary_lines.append("### Proposed Initiatives")
+                summary_lines.append("No new initiatives proposed in this cycle.")
+            
+            summary_text = "\n".join(summary_lines)
+            
+            # Send to main session via Gateway API
+            async with aiohttp.ClientSession() as session:
+                # Use a unique caller session key for this notification
+                caller_key = f"orchestrator:reflection-summary:{uuid.uuid4().hex[:8]}"
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_send",
+                        "sessionKey": caller_key,
+                        "args": {
+                            "sessionKey": "agent:main",
+                            "message": summary_text
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=30)
+                )
+                
+                data = await resp.json()
+                
+                if data.get("ok"):
+                    logger.info(
+                        "[ENGINE] Sent reflection summary to Lobs: %d reflections, %d initiatives",
+                        len(reflections),
+                        len(initiatives)
+                    )
+                else:
+                    logger.warning(
+                        "[ENGINE] Failed to send reflection summary to Lobs: %s",
+                        data
+                    )
+        
+        except Exception as e:
+            logger.error("[ENGINE] Error sending reflection summary to Lobs: %s", e, exc_info=True)
 
     async def _refresh_runtime_settings(self, db: Any) -> None:
         """Load runtime loop intervals from DB without restart."""

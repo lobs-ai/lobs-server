@@ -570,7 +570,8 @@ class WorkerManager:
 
         # Check session status via Gateway API
         session_status = await self._check_session_status(
-            worker_info.child_session_key
+            worker_info.child_session_key,
+            spawn_time=worker_info.start_time
         )
         
         if not session_status:
@@ -596,13 +597,18 @@ class WorkerManager:
 
     async def _check_session_status(
         self,
-        session_key: str
+        session_key: str,
+        spawn_time: Optional[float] = None
     ) -> Optional[dict[str, Any]]:
         """Check session status by reading the JSONL transcript file directly.
 
         Gateway's sessions_list doesn't expose a "completed" status field, so we
         detect completion by checking whether the transcript contains a final
         assistant message and is no longer being written to (mtime > 15s ago).
+        
+        Args:
+            session_key: The session key to check
+            spawn_time: Unix timestamp when the worker was spawned (for timeout handling)
         """
         import pathlib
 
@@ -636,8 +642,18 @@ class WorkerManager:
                 transcript = transcripts[0] if transcripts else None
 
             if not transcript:
-                # No transcript at all — session may have been cleaned up
-                return {"completed": True, "success": True, "error": ""}
+                # No transcript found - check how long ago the session was spawned
+                if spawn_time is not None:
+                    age_minutes = (time.time() - spawn_time) / 60
+                    if age_minutes < 15:
+                        # Session is recent, transcript might not be created yet
+                        return {"completed": False, "success": False, "error": ""}
+                    else:
+                        # Session is stale and transcript is missing - mark as failed
+                        return {"completed": True, "success": False, "error": "Session stale (no transcript found)"}
+                
+                # No spawn time provided, can't determine - mark as failed
+                return {"completed": True, "success": False, "error": "Transcript not found"}
 
             # Check if file is still being written to
             mtime = transcript.stat().st_mtime
@@ -1181,6 +1197,33 @@ class WorkerManager:
                 return
 
             payload = self._extract_json(summary)
+            
+            # Map alternative field names from different worker response formats
+            # Some workers return diagnostic-style schemas, normalize them
+            if isinstance(payload, dict) and "raw" not in payload:
+                # Map: issue_summary/summary → inefficiencies_detected
+                if "inefficiencies_detected" not in payload:
+                    issue_summary = payload.get("issue_summary") or payload.get("summary")
+                    if issue_summary:
+                        payload["inefficiencies_detected"] = [issue_summary] if isinstance(issue_summary, str) else issue_summary
+                
+                # Map: root_causes → inefficiencies_detected (append)
+                root_causes = payload.get("root_causes")
+                if root_causes:
+                    existing = payload.get("inefficiencies_detected", [])
+                    if not isinstance(existing, list):
+                        existing = [existing] if existing else []
+                    if isinstance(root_causes, list):
+                        payload["inefficiencies_detected"] = existing + root_causes
+                    elif isinstance(root_causes, str):
+                        payload["inefficiencies_detected"] = existing + [root_causes]
+                
+                # Map: recommended_actions → missed_opportunities
+                if "missed_opportunities" not in payload:
+                    recommended = payload.get("recommended_actions")
+                    if recommended:
+                        payload["missed_opportunities"] = recommended if isinstance(recommended, list) else [recommended]
+            
             reflection.status = "completed" if succeeded else "failed"
             reflection.result = payload
             reflection.inefficiencies = self._json_list(payload.get("inefficiencies_detected"))
@@ -1413,14 +1456,35 @@ class WorkerManager:
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
-        """Best-effort extraction of JSON object from assistant summary text."""
+        """Best-effort extraction of JSON object from assistant summary text.
+        
+        Handles:
+        - Plain JSON objects
+        - JSON wrapped in markdown code blocks (```json ... ```)
+        - Nested braces
+        """
         candidate = text.strip()
+        
+        # Try direct JSON parse first
         try:
             parsed = json.loads(candidate)
             return parsed if isinstance(parsed, dict) else {"raw": candidate}
         except json.JSONDecodeError:
             pass
 
+        # Try extracting from markdown code blocks (```json ... ```)
+        import re
+        json_block_pattern = r"```(?:json)?\s*\n(.*?)\n```"
+        matches = re.findall(json_block_pattern, candidate, re.DOTALL | re.IGNORECASE)
+        for match in matches:
+            try:
+                parsed = json.loads(match.strip())
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+
+        # Try finding JSON object boundaries
         start = candidate.find("{")
         end = candidate.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -1429,7 +1493,7 @@ class WorkerManager:
                 parsed = json.loads(snippet)
                 return parsed if isinstance(parsed, dict) else {"raw": candidate}
             except json.JSONDecodeError:
-                return {"raw": candidate}
+                pass
 
         return {"raw": candidate}
 
