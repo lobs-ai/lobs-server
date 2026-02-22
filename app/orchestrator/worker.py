@@ -826,7 +826,8 @@ class WorkerManager:
         if transcript:
             messages = self._read_transcript_assistant_messages(transcript)
             if messages:
-                text = messages[-1]  # Last assistant message
+                # Use the longest assistant message (the actual output, not preamble)
+                text = max(messages, key=len)
                 if len(text) > 16000:
                     text = text[:16000] + "..."
                 logger.info(
