@@ -759,90 +759,94 @@ class OrchestratorEngine:
             )
             initiatives = initiatives_result.scalars().all()
             
-            # Format summary message
+            # Build full reflection data for the review session
             summary_lines = [
-                "## Reflection Cycle Complete",
-                "",
-                f"Completed {len(reflections)} strategic reflection(s) across the team.",
+                f"Completed {len(reflections)} strategic reflection(s). {len(initiatives)} initiative(s) proposed.",
                 ""
             ]
             
-            # Group reflections by agent
-            agent_findings = {}
+            # Include FULL reflection output from each agent
             for reflection in reflections:
-                agent = reflection.agent_type
-                if agent not in agent_findings:
-                    agent_findings[agent] = {
-                        "inefficiencies": [],
-                        "opportunities": [],
-                        "risks": [],
-                    }
-                
-                if reflection.inefficiencies:
-                    agent_findings[agent]["inefficiencies"].extend(reflection.inefficiencies[:3])
-                if reflection.missed_opportunities:
-                    agent_findings[agent]["opportunities"].extend(reflection.missed_opportunities[:3])
-                if reflection.system_risks:
-                    agent_findings[agent]["risks"].extend(reflection.system_risks[:2])
-            
-            # Add agent findings
-            if agent_findings:
-                summary_lines.append("### Key Findings by Agent")
+                summary_lines.append(f"---")
+                summary_lines.append(f"## {reflection.agent_type.upper()} Reflection")
+                summary_lines.append(f"Status: {reflection.status} | Completed: {reflection.completed_at}")
                 summary_lines.append("")
-                for agent, findings in sorted(agent_findings.items()):
-                    summary_lines.append(f"**{agent.title()}:**")
-                    if findings["inefficiencies"]:
-                        summary_lines.append(f"  - Inefficiencies: {', '.join(findings['inefficiencies'][:2])}")
-                    if findings["opportunities"]:
-                        summary_lines.append(f"  - Opportunities: {', '.join(findings['opportunities'][:2])}")
-                    if findings["risks"]:
-                        summary_lines.append(f"  - Risks: {', '.join(findings['risks'][:1])}")
-                    summary_lines.append("")
+                
+                if reflection.result:
+                    result = reflection.result if isinstance(reflection.result, dict) else {}
+                    raw = result.get("raw")
+                    if raw:
+                        summary_lines.append(raw)
+                    else:
+                        # Structured result — include all fields
+                        for key in ["inefficiencies_detected", "missed_opportunities", "system_risks", 
+                                    "identity_adjustments", "experience_notes"]:
+                            items = result.get(key, [])
+                            if items and isinstance(items, list):
+                                summary_lines.append(f"**{key.replace('_', ' ').title()}:**")
+                                for item in items:
+                                    summary_lines.append(f"  - {item}")
+                                summary_lines.append("")
+                        
+                        # Include proposed initiatives inline
+                        pi = result.get("proposed_initiatives", [])
+                        if pi:
+                            summary_lines.append(f"**Proposed Initiatives ({len(pi)}):**")
+                            for p in pi:
+                                if isinstance(p, dict):
+                                    summary_lines.append(f"  - **{p.get('title', 'Untitled')}** [{p.get('category', '?')}] → {p.get('suggested_owner_agent', '?')}")
+                                    if p.get("description"):
+                                        summary_lines.append(f"    {p['description']}")
+                            summary_lines.append("")
+                else:
+                    summary_lines.append("(No result data)")
+                summary_lines.append("")
             
-            # Add full initiative details
+            # Also list all initiatives from the DB with their policy status
             if initiatives:
-                summary_lines.append("### Proposed Initiatives")
-                summary_lines.append(f"{len(initiatives)} initiative(s) proposed:")
+                summary_lines.append("---")
+                summary_lines.append("## All Initiatives (from policy engine)")
                 summary_lines.append("")
-                
-                for i, initiative in enumerate(initiatives, 1):
-                    summary_lines.append(f"**{i}. {initiative.title}**")
-                    summary_lines.append(f"  - Proposed by: {initiative.proposed_by_agent}")
-                    summary_lines.append(f"  - Category: {initiative.category}")
-                    summary_lines.append(f"  - Risk tier: {initiative.risk_tier}")
-                    summary_lines.append(f"  - Status: {initiative.status}")
-                    if initiative.owner_agent:
-                        summary_lines.append(f"  - Suggested owner: {initiative.owner_agent}")
-                    if initiative.description:
-                        summary_lines.append(f"  - Description: {initiative.description}")
+                for i, init in enumerate(initiatives, 1):
+                    status_icon = {"proposed": "⏳", "approved": "✅", "rejected": "❌", "lobs_review": "🔍"}.get(init.status, "?")
+                    summary_lines.append(f"{i}. {status_icon} **{init.title}**")
+                    summary_lines.append(f"   By: {init.proposed_by_agent} | Category: {init.category} | Risk: {init.risk_tier} | Status: {init.status}")
+                    if init.owner_agent:
+                        summary_lines.append(f"   Suggested owner: {init.owner_agent}")
+                    if init.description:
+                        summary_lines.append(f"   {init.description}")
                     summary_lines.append("")
-            else:
-                summary_lines.append("### Proposed Initiatives")
-                summary_lines.append("No new initiatives proposed in this cycle.")
             
             summary_text = "\n".join(summary_lines)
             
             # Spawn a session for the main agent to process reflection results
-            task_prompt = f"""## Reflection Cycle Results
+            task_prompt = f"""## Reflection Cycle Results — Action Required
 
-The orchestrator just completed a strategic reflection cycle. Review the findings below and decide what to act on.
+The orchestrator completed a strategic reflection cycle. Below are the FULL reflection outputs from every agent and all proposed initiatives.
 
 **Your job:**
-1. Review each proposed initiative
-2. For initiatives worth pursuing, create tasks via the lobs-server API:
+1. Read each agent's full reflection carefully
+2. Decide which initiatives to act on — approve, reject, or defer each one
+3. For approved initiatives, create tasks:
    ```bash
    ~/.openclaw/workspace/scripts/lobs-api.sh create-task "title" --project <project-id> --agent <agent-type> --notes "description"
    ```
-3. Skip or note any initiatives that are low-value, duplicates, or premature
-4. If any findings reveal urgent issues, flag them
+   Use `lobs-api.sh projects` to see available projects.
+4. Group related initiatives into single tasks where it makes sense
+5. For findings that don't need tasks but are important, update relevant docs or memory
 
-**Guidelines:**
-- Not every initiative needs a task — use judgment on what's actually valuable
-- Group related initiatives into single tasks where it makes sense
-- Assign to the right agent type (programmer, researcher, writer, reviewer, architect)
-- For research initiatives, assign to researcher
-- For code changes, assign to programmer
-- Don't create tasks for things that are already in progress
+**Decision criteria:**
+- Does this provide real value or is it busywork?
+- Is this already being worked on or recently completed?
+- Does the effort justify the outcome?
+- Is the timing right (vs. deferring to later)?
+
+**Agent assignment:**
+- Code changes/fixes/refactors → programmer
+- Research/investigation/analysis → researcher  
+- Documentation/writing → writer
+- Code review/quality audits → reviewer
+- System design/architecture → architect
 
 {summary_text}"""
             
