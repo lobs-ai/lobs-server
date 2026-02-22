@@ -375,6 +375,8 @@ For each proposed initiative:
 - Include concrete first steps, not just goals
 - You can recommend work for other agents, but frame it from your expertise
 
+**Beyond maintenance — think bigger too.** You're not limited to fixing problems. If you have well-thought-out ideas for new features, new projects, new capabilities, or new directions — propose them. The bar is that the idea should be specific enough to act on, with a clear "why" and "what first." Half-baked shower thoughts don't qualify; a concrete vision with first steps does.
+
 ## Governance Constraints (mandatory)
 
 - You are in PROPOSAL mode only.
@@ -394,7 +396,7 @@ Return STRICT JSON only (no prose outside the JSON block):
     {{
       "title": "Short, actionable title",
       "description": "What to do, why it matters, and concrete first steps",
-      "category": "docs_sync|test_hygiene|stale_triage|light_research|backlog_reprioritization|automation_proposal|moderate_refactor|architecture_change|destructive_operation|cross_project_migration|agent_recruitment",
+      "category": "docs_sync|test_hygiene|stale_triage|light_research|backlog_reprioritization|automation_proposal|moderate_refactor|architecture_change|destructive_operation|cross_project_migration|agent_recruitment|feature_proposal|new_project",
       "estimated_effort": 1,
       "suggested_owner_agent": "agent-type"
     }}
