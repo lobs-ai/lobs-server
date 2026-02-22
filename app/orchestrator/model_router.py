@@ -18,15 +18,13 @@ from typing import Any, Literal
 
 Complexity = Literal["light", "standard", "very_complex"]
 Criticality = Literal["low", "normal", "high"]
-ModelTier = Literal["local", "cheap", "standard", "strong"]
+ModelTier = Literal["cheap", "standard", "strong"]
 
-MODEL_ROUTER_TIER_LOCAL_KEY = "model_router.tier.local"
 MODEL_ROUTER_TIER_CHEAP_KEY = "model_router.tier.cheap"
 MODEL_ROUTER_TIER_STANDARD_KEY = "model_router.tier.standard"
 MODEL_ROUTER_TIER_STRONG_KEY = "model_router.tier.strong"
 MODEL_ROUTER_AVAILABLE_MODELS_KEY = "model_router.available_models"
 MODEL_ROUTER_SETTING_KEYS = (
-    MODEL_ROUTER_TIER_LOCAL_KEY,
     MODEL_ROUTER_TIER_CHEAP_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
@@ -44,11 +42,6 @@ MODEL_ROUTER_SETTING_KEYS = (
 # - OpenAI Codex for programming/standard
 # - Anthropic for strong/fallback
 DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
-    "local": (
-        # Local models (e.g. Qwen 3 30B via Ollama/vLLM) — free, fast, good
-        # for routing, summaries, error propagation, light review.
-        # Configure via LOBS_MODEL_TIER_LOCAL or DB setting.
-    ),
     "cheap": (
         "google-gemini-cli/gemini-3-pro-preview",
         "anthropic/claude-haiku-4-5",
@@ -139,7 +132,6 @@ def _dedupe_keep_order(items: list[str]) -> list[str]:
 
 def _tier_models_from_env_or_default(tier: ModelTier) -> list[str]:
     env_name = {
-        "local": "LOBS_MODEL_TIER_LOCAL",
         "cheap": "LOBS_MODEL_TIER_CHEAP",
         "standard": "LOBS_MODEL_TIER_STANDARD",
         "strong": "LOBS_MODEL_TIER_STRONG",
@@ -161,7 +153,6 @@ def _effective_tier_models(
     """Resolve tier models with precedence DB overrides > env > defaults."""
 
     tier_map: dict[ModelTier, list[str]] = {
-        "local": _tier_models_from_env_or_default("local"),
         "cheap": _tier_models_from_env_or_default("cheap"),
         "standard": _tier_models_from_env_or_default("standard"),
         "strong": _tier_models_from_env_or_default("strong"),
@@ -170,7 +161,7 @@ def _effective_tier_models(
 
     if tier_overrides:
         changed = False
-        for tier in ("local", "cheap", "standard", "strong"):
+        for tier in ("cheap", "standard", "strong"):
             vals = tier_overrides.get(tier)
             if vals:
                 tier_map[tier] = vals
@@ -237,17 +228,6 @@ def classify_task(task: dict[str, Any], *, agent_type: str) -> tuple[Complexity,
     return complexity, criticality
 
 
-# Purposes that can run on local models (free, fast, lower capability).
-# These are tasks where a 30B-class local model is sufficient.
-LOCAL_ELIGIBLE_PURPOSES = frozenset({
-    "routing",            # Task routing / agent selection
-    "classification",     # Auto-assign agent type classification
-    "error_propagation",  # Error classification and propagation
-    "writer_summary",     # Writer summaries and drafts
-    "light_review",       # Initial review pass (not final review)
-})
-
-
 def decide_models(
     agent_type: str,
     task: dict[str, Any],
@@ -260,44 +240,34 @@ def decide_models(
 
     complexity, criticality = classify_task(task, agent_type=agent_type)
 
-    # Check if local tier has models configured.
-    # If not, local-eligible tasks fall through to cheap/standard.
-    _local_tier_map, _ = _effective_tier_models(tier_overrides)
-    local_available = bool(_local_tier_map.get("local"))
-
     # Policy table by tiers:
-    # - local-eligible purposes (when local tier configured): local -> cheap -> standard
     # - programming: standard -> strong
-    # - writer (non-complex): local -> cheap -> standard (summaries are local-friendly)
-    # - reviewer (light): local -> cheap -> standard (initial pass)
+    # - writer (non-complex): cheap -> standard
+    # - reviewer (light): cheap -> standard
     # - light inbox: cheap -> standard -> strong
     # - default non-programming: standard (+ strong for very_complex)
+    #
+    # Local Ollama models are auto-injected into tiers by the ModelChooser
+    # based on their parameter count, so a 30B local model in "cheap" tier
+    # gets preferred over cloud cheap models (because it's free).
     policy = "default"
 
     # Explicit model_tier override on the task (highest priority)
     explicit_tier = (task.get("model_tier") or "").strip().lower()
-    if explicit_tier in ("local", "cheap", "standard", "strong"):
+    if explicit_tier in ("cheap", "standard", "strong"):
         policy = f"explicit_{explicit_tier}"
-        # Build plan starting from the requested tier, with fallbacks upward
-        tier_order: list[ModelTier] = ["local", "cheap", "standard", "strong"]
+        tier_order: list[ModelTier] = ["cheap", "standard", "strong"]
         start_idx = tier_order.index(explicit_tier)  # type: ignore[arg-type]
         plan: list[ModelTier] = list(tier_order[start_idx:])
-        # If local requested but not available, skip it
-        if not local_available and "local" in plan:
-            plan = [t for t in plan if t != "local"]
-    # Local-eligible purpose override (next priority after explicit)
-    elif local_available and purpose in LOCAL_ELIGIBLE_PURPOSES and criticality != "high":
-        policy = f"local_{purpose}"
-        plan = ["local", "cheap", "standard"]
     elif agent_type == "programmer":
         policy = "programmer_default"
         plan = ["standard", "strong"]
-    elif agent_type == "writer" and complexity != "very_complex" and local_available:
-        policy = "writer_local"
-        plan = ["local", "cheap", "standard"]
-    elif agent_type == "reviewer" and complexity == "light" and local_available:
-        policy = "reviewer_local_light"
-        plan = ["local", "cheap", "standard"]
+    elif agent_type == "writer" and complexity != "very_complex":
+        policy = "writer_default"
+        plan = ["cheap", "standard"]
+    elif agent_type == "reviewer" and complexity == "light":
+        policy = "reviewer_light"
+        plan = ["cheap", "standard"]
     elif complexity == "light" and (task.get("status") or "").lower() == "inbox":
         policy = "light_inbox"
         plan = ["cheap", "standard", "strong"]
@@ -305,12 +275,9 @@ def decide_models(
         policy = "non_programming_default"
         plan = ["standard"] + (["strong"] if complexity == "very_complex" else [])
 
-    # Critical tasks must include strong tier and never start with local.
-    if criticality == "high":
-        if "local" in plan:
-            plan = [t for t in plan if t != "local"]
-        if "strong" not in plan:
-            plan = plan + ["strong"]
+    # Critical tasks must include strong tier.
+    if criticality == "high" and "strong" not in plan:
+        plan = plan + ["strong"]
         policy = f"{policy}+high_crit"
 
     models, tier_map, allowlist, config_source = _resolve_plan_to_models(

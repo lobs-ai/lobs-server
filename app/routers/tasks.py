@@ -229,6 +229,11 @@ async def update_task_status(
         raise HTTPException(status_code=404, detail="Task not found")
     
     task.status = status_update.status
+    
+    # Mark GitHub-backed tasks as locally changed
+    if task.external_source == "github":
+        task.sync_state = "local_changed"
+    
     await db.flush()
     await db.refresh(task)
     return Task.model_validate(task)
@@ -247,6 +252,11 @@ async def update_task_work_state(
         raise HTTPException(status_code=404, detail="Task not found")
     
     task.work_state = work_state_update.work_state
+    
+    # Mark GitHub-backed tasks as locally changed
+    if task.external_source == "github":
+        task.sync_state = "local_changed"
+    
     await db.flush()
     await db.refresh(task)
     return Task.model_validate(task)
@@ -265,6 +275,11 @@ async def update_task_review_state(
         raise HTTPException(status_code=404, detail="Task not found")
     
     task.review_state = review_state_update.review_state
+    
+    # Mark GitHub-backed tasks as locally changed
+    if task.external_source == "github":
+        task.sync_state = "local_changed"
+    
     await db.flush()
     await db.refresh(task)
     return Task.model_validate(task)

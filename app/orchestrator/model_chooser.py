@@ -24,38 +24,128 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
-# --- Ollama availability cache ---
-# We cache the result for 60s to avoid hammering Ollama on every model choice.
-_ollama_available: bool | None = None
-_ollama_checked_at: float = 0.0
-_OLLAMA_CHECK_TTL = 60.0  # seconds
-_OLLAMA_URL = "http://localhost:11434/api/tags"
+# --- Ollama auto-detection cache ---
+# Discovers running Ollama models and classifies them into tiers.
+# Cached for 60s. Returns empty dict when Ollama is unreachable.
+
+import os
+import re
+
+_ollama_models_cache: dict[str, list[str]] | None = None
+_ollama_cache_time: float = 0.0
+_OLLAMA_CACHE_TTL = 60.0
+_OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+# Parameter size → tier mapping.
+# Models are inserted at the FRONT of their tier (preferred because free).
+_PARAM_TIER_THRESHOLDS: list[tuple[float, str]] = [
+    # (max_billions, tier)
+    (15.0, "cheap"),      # ≤15B → cheap
+    (40.0, "cheap"),      # ≤40B → cheap  (Qwen 30B, Mistral 22B, etc.)
+    (80.0, "standard"),   # ≤80B → standard (Llama 70B, Qwen 72B, etc.)
+    (float("inf"), "strong"),  # >80B → strong (Llama 405B, etc.)
+]
+
+# Override specific model families to tiers regardless of param count.
+_MODEL_TIER_OVERRIDES: dict[str, str] = {
+    # Add overrides here as needed, e.g.:
+    # "deepseek-coder-v2": "standard",
+}
 
 
-async def is_ollama_available() -> bool:
-    """Check if Ollama is reachable (cached for 60s)."""
-    global _ollama_available, _ollama_checked_at
+def _classify_ollama_model(name: str, param_size: str | None, size_bytes: int | None) -> str:
+    """Classify an Ollama model into cheap/standard/strong based on parameter count."""
+    # Check family overrides first
+    base_name = name.split(":")[0].lower()
+    if base_name in _MODEL_TIER_OVERRIDES:
+        return _MODEL_TIER_OVERRIDES[base_name]
+    
+    # Parse parameter size (e.g., "30B", "7.6B", "70B")
+    billions = _parse_param_billions(param_size)
+    if billions is None and size_bytes:
+        # Rough estimate: ~0.5 bytes per parameter for Q4 quantization
+        billions = size_bytes / (0.5 * 1e9)
+    
+    if billions is not None:
+        for threshold, tier in _PARAM_TIER_THRESHOLDS:
+            if billions <= threshold:
+                return tier
+    
+    # Default: cheap (conservative — don't waste API money when unsure)
+    return "cheap"
+
+
+def _parse_param_billions(param_size: str | None) -> float | None:
+    """Parse '30B', '7.6B', '405B' etc. into float billions."""
+    if not param_size:
+        return None
+    match = re.match(r"([\d.]+)\s*[bB]", param_size.strip())
+    if match:
+        return float(match.group(1))
+    return None
+
+
+async def discover_ollama_models() -> dict[str, list[str]]:
+    """Discover Ollama models and classify into tiers.
+    
+    Returns dict like {"cheap": ["ollama/qwen3:30b"], "standard": ["ollama/llama3:70b"]}.
+    Returns empty dict when Ollama is unreachable.
+    Cached for 60s.
+    """
+    global _ollama_models_cache, _ollama_cache_time
     
     now = time.monotonic()
-    if _ollama_available is not None and (now - _ollama_checked_at) < _OLLAMA_CHECK_TTL:
-        return _ollama_available
+    if _ollama_models_cache is not None and (now - _ollama_cache_time) < _OLLAMA_CACHE_TTL:
+        return _ollama_models_cache
+    
+    result: dict[str, list[str]] = {}
     
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(_OLLAMA_URL, timeout=aiohttp.ClientTimeout(total=2)) as resp:
-                _ollama_available = resp.status == 200
+            async with session.get(
+                f"{_OLLAMA_BASE_URL}/api/tags",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                if resp.status != 200:
+                    _ollama_models_cache = {}
+                    _ollama_cache_time = now
+                    return {}
+                
+                data = await resp.json()
     except Exception:
-        _ollama_available = False
+        logger.debug("[MODEL_CHOOSER] Ollama not reachable — no local models")
+        _ollama_models_cache = {}
+        _ollama_cache_time = now
+        return {}
     
-    _ollama_checked_at = now
-    if not _ollama_available:
-        logger.debug("[MODEL_CHOOSER] Ollama not available — local tier disabled")
-    return _ollama_available
+    models = data.get("models", [])
+    for m in models:
+        name = m.get("name", "")
+        if not name:
+            continue
+        
+        details = m.get("details", {})
+        param_size = details.get("parameter_size")
+        size_bytes = m.get("size")
+        
+        tier = _classify_ollama_model(name, param_size, size_bytes)
+        ollama_model_id = f"ollama/{name}"
+        
+        result.setdefault(tier, []).append(ollama_model_id)
+    
+    if result:
+        logger.info(
+            "[MODEL_CHOOSER] Discovered Ollama models: %s",
+            {k: v for k, v in result.items()},
+        )
+    
+    _ollama_models_cache = result
+    _ollama_cache_time = now
+    return result
 
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
 from app.orchestrator.model_router import (
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
-    MODEL_ROUTER_TIER_LOCAL_KEY,
     MODEL_ROUTER_TIER_CHEAP_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
@@ -97,14 +187,16 @@ class ModelChooser:
         purpose: str = "execution",
     ) -> ModelChoice:
         cfg = await self._load_runtime_config()
+        tiers = dict(cfg.get("tiers") or {})
         
-        # Gate local tier on Ollama availability.
-        # If Ollama isn't reachable, clear the local tier so the router
-        # falls through to cheap/standard instead.
-        tiers = cfg.get("tiers") or {}
-        if tiers.get("local"):
-            if not await is_ollama_available():
-                tiers = {**tiers, "local": None}
+        # Auto-discover Ollama models and inject into tiers.
+        # Local models are prepended (preferred because free/fast).
+        ollama_tiers = await discover_ollama_models()
+        if ollama_tiers:
+            for tier_name, ollama_models in ollama_tiers.items():
+                existing = list(tiers.get(tier_name) or [])
+                # Prepend Ollama models (free → preferred)
+                tiers[tier_name] = ollama_models + [m for m in existing if m not in ollama_models]
         
         decision = decide_models(
             agent_type,
@@ -151,7 +243,6 @@ class ModelChooser:
 
     async def _load_runtime_config(self) -> dict[str, Any]:
         keys = (
-            MODEL_ROUTER_TIER_LOCAL_KEY,
             MODEL_ROUTER_TIER_CHEAP_KEY,
             MODEL_ROUTER_TIER_STANDARD_KEY,
             MODEL_ROUTER_TIER_STRONG_KEY,
@@ -174,7 +265,6 @@ class ModelChooser:
             return None
 
         explicit_tiers = {
-            "local": _list_value(MODEL_ROUTER_TIER_LOCAL_KEY),
             "cheap": _list_value(MODEL_ROUTER_TIER_CHEAP_KEY),
             "standard": _list_value(MODEL_ROUTER_TIER_STANDARD_KEY),
             "strong": _list_value(MODEL_ROUTER_TIER_STRONG_KEY),
@@ -183,7 +273,6 @@ class ModelChooser:
         catalog_raw = rows.get(OPENCLAW_MODEL_CATALOG_KEY)
         derived = self._derive_tiers_from_catalog(catalog_raw if isinstance(catalog_raw, dict) else {})
         tiers = {
-            "local": explicit_tiers["local"] or derived.get("local"),
             "cheap": explicit_tiers["cheap"] or derived["cheap"],
             "standard": explicit_tiers["standard"] or derived["standard"],
             "strong": explicit_tiers["strong"] or derived["strong"],
@@ -203,10 +292,9 @@ class ModelChooser:
     def _derive_tiers_from_catalog(catalog: dict[str, Any]) -> dict[str, list[str] | None]:
         models = catalog.get("models") if isinstance(catalog.get("models"), list) else []
         if not models:
-            return {"local": None, "cheap": None, "standard": None, "strong": None, "available_models": None}
+            return {"cheap": None, "standard": None, "strong": None, "available_models": None}
 
         available: list[str] = []
-        local: list[str] = []
         cheap: list[str] = []
         standard: list[str] = []
         strong: list[str] = []
@@ -221,10 +309,6 @@ class ModelChooser:
             available.append(name)
             lower = name.lower()
             billing = str(item.get("billing_type", "")).lower()
-
-            # Detect local/self-hosted models (ollama, vllm, local providers)
-            if any(k in lower for k in ("ollama", "vllm", "local", "lmstudio")):
-                local.append(name)
 
             if billing == "subscription":
                 cheap.append(name)
@@ -246,7 +330,6 @@ class ModelChooser:
             return out
 
         available = _dedupe(available)
-        local = _dedupe(local)
         cheap = _dedupe(cheap)
         standard = _dedupe(standard)
         strong = _dedupe(strong)
@@ -259,7 +342,6 @@ class ModelChooser:
             cheap = standard[:]
 
         return {
-            "local": local or None,
             "cheap": cheap or None,
             "standard": standard or None,
             "strong": strong or None,

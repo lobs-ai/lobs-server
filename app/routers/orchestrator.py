@@ -12,13 +12,12 @@ from app.orchestrator.sweep_arbitrator import DEFAULT_DAILY_BUDGET
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator import OrchestratorEngine
 from app.orchestrator.model_router import (
-    MODEL_ROUTER_TIER_LOCAL_KEY,
     MODEL_ROUTER_TIER_CHEAP_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
-    LOCAL_ELIGIBLE_PURPOSES,
 )
+from app.orchestrator.model_chooser import discover_ollama_models
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
@@ -37,7 +36,6 @@ PROVIDER_CONFIG_KEY = "provider_config"
 
 
 class ModelTierConfig(BaseModel):
-    local: list[str] | None = Field(default=None)
     cheap: list[str] | None = Field(default=None)
     standard: list[str] | None = Field(default=None)
     strong: list[str] | None = Field(default=None)
@@ -223,7 +221,6 @@ async def get_model_router_config(
     """Get runtime model-router config stored in DB."""
 
     keys = (
-        MODEL_ROUTER_TIER_LOCAL_KEY,
         MODEL_ROUTER_TIER_CHEAP_KEY,
         MODEL_ROUTER_TIER_STANDARD_KEY,
         MODEL_ROUTER_TIER_STRONG_KEY,
@@ -234,15 +231,17 @@ async def get_model_router_config(
     )
     rows = {row.key: row.value for row in result.scalars().all()}
 
+    # Include auto-discovered Ollama models
+    ollama_tiers = await discover_ollama_models()
+
     return {
         "tiers": {
-            "local": rows.get(MODEL_ROUTER_TIER_LOCAL_KEY),
             "cheap": rows.get(MODEL_ROUTER_TIER_CHEAP_KEY),
             "standard": rows.get(MODEL_ROUTER_TIER_STANDARD_KEY),
             "strong": rows.get(MODEL_ROUTER_TIER_STRONG_KEY),
         },
         "available_models": rows.get(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
-        "local_eligible_purposes": sorted(LOCAL_ELIGIBLE_PURPOSES),
+        "ollama_models": ollama_tiers if ollama_tiers else None,
     }
 
 
@@ -260,7 +259,6 @@ async def update_model_router_config(
     updates: dict[str, list[str] | None] = {}
 
     if payload.tiers is not None:
-        updates[MODEL_ROUTER_TIER_LOCAL_KEY] = payload.tiers.local
         updates[MODEL_ROUTER_TIER_CHEAP_KEY] = payload.tiers.cheap
         updates[MODEL_ROUTER_TIER_STANDARD_KEY] = payload.tiers.standard
         updates[MODEL_ROUTER_TIER_STRONG_KEY] = payload.tiers.strong

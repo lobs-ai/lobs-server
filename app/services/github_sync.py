@@ -85,11 +85,15 @@ class GitHubSyncService:
                     imported += 1
                     continue
 
+                # Convert datetimes to timezone-aware for comparison
+                task_updated_aware = task.updated_at.replace(tzinfo=timezone.utc) if task.updated_at and not task.updated_at.tzinfo else task.updated_at
+                external_updated_aware = task.external_updated_at.replace(tzinfo=timezone.utc) if task.external_updated_at and not task.external_updated_at.tzinfo else task.external_updated_at
+                
                 if (
-                    task.updated_at
-                    and task.external_updated_at
-                    and task.updated_at > task.external_updated_at
-                    and issue_updated > task.external_updated_at
+                    task_updated_aware
+                    and external_updated_aware
+                    and task_updated_aware > external_updated_aware
+                    and issue_updated > external_updated_aware
                 ):
                     task.sync_state = "conflict"
                     task.conflict_payload = {

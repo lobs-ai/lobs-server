@@ -13,7 +13,8 @@ def test_programmer_routes_to_standard_then_strong_tiers(monkeypatch):
     assert d.models[:3] == ["model/std-a", "model/std-b", "model/strong-a"]
 
 
-def test_light_inbox_routes_to_cheap_then_standard_then_strong(monkeypatch):
+def test_light_inbox_routes_to_cheap_then_standard(monkeypatch):
+    """Writer with light inbox routes cheap → standard (writer_default policy)."""
     monkeypatch.setenv("LOBS_MODEL_TIER_CHEAP", "model/cheap-a")
     monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
     monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
@@ -21,19 +22,34 @@ def test_light_inbox_routes_to_cheap_then_standard_then_strong(monkeypatch):
     task = {"id": "t2", "title": "reply", "notes": "quick response", "status": "inbox"}
     d = decide_models("writer", task)
 
+    # Writer non-complex goes cheap → standard
+    assert d.models == ["model/cheap-a", "model/std-a"]
+    assert d.policy == "writer_default"
+
+
+def test_light_inbox_non_writer_routes_to_cheap_standard_strong(monkeypatch):
+    """Non-writer light inbox task includes strong tier fallback."""
+    monkeypatch.setenv("LOBS_MODEL_TIER_CHEAP", "model/cheap-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
+    monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
+
+    task = {"id": "t2b", "title": "reply", "notes": "quick response", "status": "inbox"}
+    d = decide_models("researcher", task)
+
     assert d.models == ["model/cheap-a", "model/std-a", "model/strong-a"]
+    assert d.policy == "light_inbox"
 
 
 def test_available_models_allowlist_filters_candidates(monkeypatch):
     monkeypatch.setenv("LOBS_MODEL_TIER_CHEAP", "model/cheap-a,model/cheap-b")
     monkeypatch.setenv("LOBS_MODEL_TIER_STANDARD", "model/std-a")
     monkeypatch.setenv("LOBS_MODEL_TIER_STRONG", "model/strong-a")
-    monkeypatch.setenv("LOBS_AVAILABLE_MODELS", "model/cheap-b,model/strong-a")
+    monkeypatch.setenv("LOBS_AVAILABLE_MODELS", "model/cheap-b,model/std-a,model/strong-a")
 
     task = {"id": "t3", "title": "reply", "notes": "quick response", "status": "inbox"}
-    d = decide_models("writer", task)
+    d = decide_models("researcher", task)
 
-    assert d.models == ["model/cheap-b", "model/strong-a"]
+    assert d.models == ["model/cheap-b", "model/std-a", "model/strong-a"]
 
 
 def test_runtime_overrides_argument_beats_env(monkeypatch):
