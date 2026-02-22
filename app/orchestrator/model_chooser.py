@@ -7,16 +7,50 @@ Centralizes model selection using:
 - provider health tracking (cooldowns, error rates, availability)
 - recent provider error rates
 - model pricing (when available)
+- local model availability (Ollama health check with TTL cache)
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+import aiohttp
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+# --- Ollama availability cache ---
+# We cache the result for 60s to avoid hammering Ollama on every model choice.
+_ollama_available: bool | None = None
+_ollama_checked_at: float = 0.0
+_OLLAMA_CHECK_TTL = 60.0  # seconds
+_OLLAMA_URL = "http://localhost:11434/api/tags"
+
+
+async def is_ollama_available() -> bool:
+    """Check if Ollama is reachable (cached for 60s)."""
+    global _ollama_available, _ollama_checked_at
+    
+    now = time.monotonic()
+    if _ollama_available is not None and (now - _ollama_checked_at) < _OLLAMA_CHECK_TTL:
+        return _ollama_available
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(_OLLAMA_URL, timeout=aiohttp.ClientTimeout(total=2)) as resp:
+                _ollama_available = resp.status == 200
+    except Exception:
+        _ollama_available = False
+    
+    _ollama_checked_at = now
+    if not _ollama_available:
+        logger.debug("[MODEL_CHOOSER] Ollama not available — local tier disabled")
+    return _ollama_available
 
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
 from app.orchestrator.model_router import (
@@ -63,10 +97,19 @@ class ModelChooser:
         purpose: str = "execution",
     ) -> ModelChoice:
         cfg = await self._load_runtime_config()
+        
+        # Gate local tier on Ollama availability.
+        # If Ollama isn't reachable, clear the local tier so the router
+        # falls through to cheap/standard instead.
+        tiers = cfg.get("tiers") or {}
+        if tiers.get("local"):
+            if not await is_ollama_available():
+                tiers = {**tiers, "local": None}
+        
         decision = decide_models(
             agent_type,
             task,
-            tier_overrides=cfg.get("tiers"),
+            tier_overrides=tiers,
             available_models=cfg.get("available_models"),
             purpose=purpose,
         )
