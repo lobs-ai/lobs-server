@@ -836,7 +836,7 @@ class OrchestratorEngine:
                         "tool": "sessions_send",
                         "sessionKey": caller_key,
                         "args": {
-                            "sessionKey": "agent:main",
+                            "sessionKey": "agent:main:main",
                             "message": summary_text
                         }
                     },
