@@ -1,688 +1,737 @@
-# WebSocket Reconnection Handling: Best Practices & Implementation Strategies
+# Performance Baseline Metrics — Research Findings
 
-**Research Date:** 2026-02-14  
-**Project:** lobs-server  
-**Context:** Real-time WebSocket messaging with OpenClaw agent bridge
+**Date:** 2026-02-22  
+**Researcher:** Researcher Agent  
+**Task ID:** 48204293-a568-437f-b4bb-1f7029aecc00  
+**Context:** No performance baseline data currently exists. We're optimizing blind.
 
 ---
 
 ## Executive Summary
 
-WebSocket connections are inherently fragile and will disconnect due to network issues, server restarts, client sleep/wake cycles, and other transient failures. Production-grade WebSocket implementations require robust auto-reconnection with exponential backoff and jitter to handle these scenarios gracefully.
+This research establishes **what to measure**, **how to measure it**, and **how to compare** performance for the lobs-server FastAPI + SQLite backend with task orchestration.
 
-**Key Findings:**
-- **Exponential backoff with jitter** is the industry standard for reconnection
-- **Full jitter** provides best balance of reduced server load and reasonable reconnection time
-- **Maximum retry limits** prevent infinite reconnection loops
-- **Connection state recovery** is critical for seamless user experience
-- **Heartbeat/ping mechanisms** detect stale connections proactively
+**Key Recommendations:**
+1. **Implement Prometheus metrics** via `starlette_exporter` for API response times
+2. **Add SQLAlchemy query instrumentation** to track database performance
+3. **Create load testing suite** using Locust for reproducible benchmarks
+4. **Establish baseline targets** based on industry standards for API latency
+5. **Monitor orchestrator-specific metrics** for task completion times
 
----
-
-## 1. Core Concepts
-
-### 1.1 Why WebSockets Disconnect
-
-WebSocket connections can fail for numerous reasons ([javascript.info](https://javascript.info/websocket)):
-
-- **Network failures**: WiFi/cellular handoff, packet loss, router issues
-- **Server-side issues**: Deployments, restarts, scaling events, load balancer timeouts
-- **Client-side issues**: Browser backgrounding, device sleep, mobile network changes
-- **Proxy/intermediary problems**: Corporate firewalls, NAT timeouts, CDN issues
-- **Ping timeout**: Server didn't send PING within `pingInterval + pingTimeout` ([Socket.io docs](https://socket.io/docs/v4/client-api/))
-
-### 1.2 WebSocket Close Codes
-
-Understanding close codes helps determine reconnection strategy ([RFC 6455](https://www.rfc-editor.org/rfc/rfc6455), [javascript.info](https://javascript.info/websocket)):
-
-| Code | Meaning | Auto-Reconnect? |
-|------|---------|----------------|
-| 1000 | Normal closure | ❌ No |
-| 1001 | Going away (server shutdown, page navigation) | ✅ Yes |
-| 1006 | Abnormal closure (no close frame) | ✅ Yes |
-| 1009 | Message too big | ❌ No |
-| 1011 | Unexpected server error | ✅ Yes |
-
-**Rule of thumb**: Reconnect on network/transport errors (1001, 1006, 1011+), but NOT on intentional closes (1000) or protocol violations (1002-1009).
+**Estimated Implementation Time:** 3-6 hours (Programmer phase)
 
 ---
 
-## 2. Exponential Backoff Strategies
+## Part 1: What to Measure
 
-### 2.1 Why Exponential Backoff?
+### 1.1 API Performance Metrics
 
-When multiple clients disconnect simultaneously (e.g., during a server deployment), naive immediate reconnection causes a **thundering herd problem**: all clients hammer the recovering server at once, potentially causing cascading failures.
+Based on FastAPI best practices and the existing RequestLoggingMiddleware, measure:
 
-Exponential backoff solves this by:
-- **Spreading load** over time
-- **Reducing contention** for server resources
-- **Allowing transient issues to resolve** before retry
+#### **Response Time (Latency)**
+- **p50 (median)**: Target < 50ms for simple queries
+- **p95**: Target < 200ms for complex queries
+- **p99**: Target < 500ms (catch outliers)
+- **max**: Track worst-case performance
 
-### 2.2 Backoff Algorithm Variants
+**Current State:** Middleware logs duration in milliseconds, but doesn't aggregate or expose metrics.
 
-Based on [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/) and [Wikipedia: Exponential Backoff](https://en.wikipedia.org/wiki/Exponential_backoff):
+**Why it matters:** User-facing responsiveness. Mission Control dashboard queries hit these endpoints constantly.
 
-#### **A. Simple Exponential Backoff (Not Recommended)**
-```javascript
-delay = min(maxDelay, baseDelay * (2 ** attemptNumber))
-```
-**Problem**: All clients retry at the same intervals, causing synchronized waves of requests.
+#### **Throughput**
+- **Requests per second** (RPS) per endpoint
+- **Total requests** counter by method/path/status_code
 
-#### **B. Full Jitter (Recommended)**
-```javascript
-delay = random(0, min(maxDelay, baseDelay * (2 ** attemptNumber)))
-```
-**Benefits**:
-- **50% reduction** in total client work vs. no jitter (AWS study)
-- Randomization prevents synchronized retries
-- Best for high-contention scenarios
+**Industry Standard:** FastAPI can handle 10,000+ RPS for simple queries. For this application with SQLite, expect 500-2000 RPS sustainable load.
 
-#### **C. Equal Jitter**
-```javascript
-temp = min(maxDelay, baseDelay * (2 ** attemptNumber))
-delay = temp / 2 + random(0, temp / 2)
-```
-**Benefits**: Always maintains some minimum delay, preventing very short sleeps
+#### **Error Rate**
+- **5xx errors** (server errors) — should be < 0.1%
+- **4xx errors** (client errors) — track separately, often user mistakes
+- **Timeout rate** — requests exceeding threshold
 
-#### **D. Decorrelated Jitter**
-```javascript
-delay = min(maxDelay, random(baseDelay, prevDelay * 3))
-```
-**Benefits**: Bases next delay on previous, creating more natural spread
-
-### 2.3 Recommended Parameters
-
-Based on [reconnecting-websocket](https://github.com/joewalnes/reconnecting-websocket) and [Socket.io](https://socket.io/docs/v4/client-api/):
-
-| Parameter | Typical Value | Purpose |
-|-----------|---------------|---------|
-| `reconnectInterval` | 1000ms (1s) | Initial retry delay |
-| `maxReconnectInterval` | 30000ms (30s) | Cap on retry delay |
-| `reconnectDecay` | 1.5 | Exponential growth rate |
-| `timeoutInterval` | 2000ms (2s) | Connection attempt timeout |
-| `maxReconnectAttempts` | `null` (infinite) or `10-20` | Prevents infinite loops |
-
-**Example progression with decay=1.5**:
-1. 1s
-2. 1.5s  
-3. 2.25s
-4. 3.375s
-5. 5.06s
-6. 7.59s
-7. 11.39s
-8. 17.09s
-9. 25.63s
-10. 30s (capped)
+**Current State:** Logged but not tracked over time.
 
 ---
 
-## 3. Production Implementation Patterns
+### 1.2 Database Performance Metrics
 
-### 3.1 Socket.io Approach
+SQLite-specific considerations (from [sqlite.org research](https://www.sqlite.org/np1queryprob.html)):
 
-Socket.io ([docs](https://socket.io/docs/v4/client-api/)) implements sophisticated reconnection with:
+#### **Query Latency**
+- **Simple SELECT** (single table, indexed): Target < 1ms
+- **Complex JOIN** (2-3 tables): Target < 10ms
+- **Aggregate queries** (COUNT, SUM with GROUP BY): Target < 50ms
 
-**Auto-Reconnection Triggers** ([Event: 'disconnect'](https://socket.io/docs/v4/client-api/#event-disconnect)):
-- ✅ `ping timeout` - Server didn't send PING
-- ✅ `transport close` - Network disconnection
-- ✅ `transport error` - Connection error
-- ❌ `io server disconnect` - Server explicitly closed
-- ❌ `io client disconnect` - Client called `disconnect()`
+**SQLite Advantage:** No network round-trip. 200+ queries per page is acceptable (unlike client/server databases).
 
-**Key Features**:
-- **Connection state recovery** (`socket.recovered`) - missed events replayed on reconnect
-- **Randomized delay** - `reconnectionDelay` with jitter
-- **Exponential growth** - up to `reconnectionDelayMax`
-- **Attempt counting** - fires `reconnect_attempt` event with count
+**Known Issue:** Activity endpoint has N+1 query problem (see KNOWN_ISSUES.md).
 
-**Configuration**:
-```javascript
-const socket = io({
-  reconnection: true,
-  reconnectionDelay: 1000,        // starts at 1s
-  reconnectionDelayMax: 5000,     // caps at 5s  
-  reconnectionAttempts: Infinity, // never give up
-  randomizationFactor: 0.5        // jitter: ±50%
-});
-```
+#### **Connection Pool Stats**
+- **Active connections** (should stay low with async SQLite)
+- **Connection wait time** (should be near-zero)
+- **SQLAlchemy query cache hit rate**
 
-### 3.2 reconnecting-websocket Library
+#### **Database Size and Growth**
+- **DB file size** over time
+- **Table row counts** (tasks, projects, memories)
+- **WAL file size** (Write-Ahead Log for concurrency)
 
-[reconnecting-websocket](https://github.com/joewalnes/reconnecting-websocket) provides a minimal decorator:
-
-```javascript
-const ws = new ReconnectingWebSocket('wss://example.com', null, {
-  reconnectInterval: 1000,
-  maxReconnectInterval: 30000,
-  reconnectDecay: 1.5,
-  timeoutInterval: 2000,
-  maxReconnectAttempts: null,
-  debug: false,
-  automaticOpen: true
-});
-
-// API-compatible with native WebSocket
-ws.addEventListener('open', () => console.log('Connected'));
-ws.addEventListener('message', (event) => console.log(event.data));
-```
-
-**Key Characteristics**:
-- Drop-in replacement for native WebSocket
-- Exponential backoff with configurable decay
-- Less than 600 bytes gzipped
-- No external dependencies
-
-### 3.3 Ably Real-time Client
-
-[Ably SDK](https://sdk.ably.com/builds/ably/specification/main/features/) demonstrates enterprise-grade reconnection:
-
-**Fallback Host Strategy**:
-- Primary domain: `main.realtime.ably.net`
-- Fallback domains: `main.{a,b,c,d,e}.fallback.ably-realtime.com`
-- Random fallback selection on failure
-- Per-fallback timeout tracking
-- Automatic retry across datacenters
-
-**Connection State Machine**:
-- `CONNECTING` → `CONNECTED` → `DISCONNECTED` → `SUSPENDED` → `FAILED`
-- Different reconnection logic per state
-- Exponential backoff increases with each state transition
+**Current State:** No tracking. Could grow indefinitely.
 
 ---
 
-## 4. Heartbeat & Connection Health
+### 1.3 Orchestrator Performance Metrics
 
-### 4.1 Ping/Pong Mechanism
+Task orchestration is the core value of lobs-server. Measure:
 
-WebSocket protocol includes built-in heartbeat ([RFC 6455](https://www.rfc-editor.org/rfc/rfc6455), [javascript.info](https://javascript.info/websocket)):
+#### **Task Execution Times**
+- **Time to assignment** (from `not_started` → `in_progress`)
+- **Total execution time** per task type
+- **Agent-specific completion times** (programmer vs researcher vs reviewer)
 
-**Server-side** (most common):
-```python
-# FastAPI/Starlette WebSocket
-async def websocket_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    try:
-        while True:
-            # Send ping every 30s
-            await websocket.send_text('{"type": "ping"}')
-            await asyncio.sleep(30)
-            
-            # Wait for pong with timeout
-            try:
-                msg = await asyncio.wait_for(
-                    websocket.receive_text(), 
-                    timeout=5.0
-                )
-            except asyncio.TimeoutError:
-                # No pong received, connection is stale
-                await websocket.close(code=1001)
-                break
-    except WebSocketDisconnect:
-        pass
-```
+**Baseline Needed:** No current data. Expect:
+- Simple tasks: 1-5 minutes
+- Complex tasks: 15-60 minutes
+- Research tasks: 5-20 minutes
 
-**Client-side**:
-```javascript
-ws.addEventListener('message', (event) => {
-  const msg = JSON.parse(event.data);
-  if (msg.type === 'ping') {
-    ws.send(JSON.stringify({type: 'pong'}));
-  }
-});
-```
+#### **Worker Throughput**
+- **Concurrent workers** (current vs max)
+- **Tasks completed per hour**
+- **Worker spawn time** (subprocess startup overhead)
+- **Worker failure rate**
 
-### 4.2 Detecting Stale Connections
+**Current State:** worker_runs table exists but no aggregated metrics.
 
-Per [Martin Fowler: HeartBeat pattern](https://martinfowler.com/articles/patterns-of-distributed-systems/heartbeat.html):
+#### **Stuck Task Detection**
+- **Mean time to detection** (how long before monitor flags stuck tasks)
+- **False positive rate** (tasks flagged but not actually stuck)
 
-**Problem**: Network partitions can leave both ends thinking the connection is alive when it's actually dead.
-
-**Solution**: 
-- Server sends heartbeat at regular interval `T`
-- Client expects heartbeat within `T + timeout`
-- If no heartbeat received, client initiates reconnection
-
-**Recommended intervals**:
-- `pingInterval`: 25-30 seconds (less than typical proxy timeouts)
-- `pingTimeout`: 5-10 seconds (network RTT + processing)
-- Total window: ~35 seconds before declaring connection dead
+**Current Setting:** 15-minute timeout (from monitor_enhanced.py).
 
 ---
 
-## 5. Connection State Recovery
+### 1.4 System Resource Metrics
 
-### 5.1 The Problem
+#### **Memory Usage**
+- **RSS** (Resident Set Size): Total memory footprint
+- **SQLite cache size** (page cache)
+- **Python heap size**
 
-When WebSocket disconnects and reconnects, naive implementations lose:
-- **In-flight messages** not yet sent
-- **Pending acknowledgements** 
-- **Events received during disconnect**
-- **Subscription state** on channels
+**Concern:** Multiple concurrent agents could cause memory pressure.
 
-This creates poor UX: missing chat messages, duplicate notifications, inconsistent state.
+#### **CPU Usage**
+- **Per-worker CPU** %
+- **Database query CPU** time
+- **Idle time** %
 
-### 5.2 Solutions
-
-#### **A. Client-Side Message Queue**
-```javascript
-class ResilientWebSocket {
-  constructor(url) {
-    this.url = url;
-    this.queue = [];
-    this.connected = false;
-    this.connect();
-  }
-  
-  send(data) {
-    if (this.connected) {
-      this.ws.send(data);
-    } else {
-      this.queue.push(data);
-    }
-  }
-  
-  onOpen() {
-    this.connected = true;
-    // Flush queued messages
-    while (this.queue.length > 0) {
-      this.ws.send(this.queue.shift());
-    }
-  }
-}
-```
-
-#### **B. Server-Side State Reconciliation**
-
-Socket.io's connection recovery ([docs](https://socket.io/docs/v4/client-api/)):
-```javascript
-socket.on('connect', () => {
-  if (socket.recovered) {
-    // Connection was recovered, server replayed missed events
-    console.log('State synchronized');
-  } else {
-    // New/unrecoverable session, must re-subscribe
-    socket.emit('subscribe', channels);
-  }
-});
-```
-
-Server tracks:
-- Last acknowledged message ID per client
-- Message buffer (time-limited)
-- On reconnect, replay messages since last ack
-
-#### **C. Idempotency Tokens**
-
-For critical operations (payments, mutations):
-```javascript
-const idempotencyKey = generateUUID();
-ws.send(JSON.stringify({
-  type: 'order',
-  idempotencyKey,
-  data: orderData
-}));
-```
-
-Server deduplicates based on `idempotencyKey` within time window.
+#### **Disk I/O**
+- **SQLite read/write IOPS**
+- **WAL checkpoint frequency**
+- **Backup operation impact**
 
 ---
 
-## 6. Implementation Example (Python/FastAPI)
+## Part 2: How to Measure (Implementation Approach)
 
-### 6.1 Server-Side (FastAPI/Starlette)
+### 2.1 Prometheus + starlette_exporter (Recommended)
+
+**Tool:** [starlette_exporter](https://github.com/stephenhillier/starlette_exporter)  
+**Why:** Purpose-built for FastAPI/Starlette, minimal code changes, industry-standard.
+
+#### Implementation
 
 ```python
-import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from datetime import datetime
-import random
+# app/main.py
+from starlette_exporter import PrometheusMiddleware, handle_metrics
 
-app = FastAPI()
+app.add_middleware(
+    PrometheusMiddleware,
+    app_name="lobs_server",
+    prefix="lobs",
+    group_paths=True,  # Group /api/tasks/{id} together
+    skip_paths=['/health', '/metrics'],
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
+    optional_metrics=[response_body_size, request_body_size]
+)
 
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
-    
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-    
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-    
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            try:
-                await connection.send_text(message)
-            except:
-                pass
-
-manager = ConnectionManager()
-
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
-    
-    # Heartbeat task
-    async def heartbeat():
-        try:
-            while True:
-                await asyncio.sleep(25)  # Ping every 25s
-                await websocket.send_json({
-                    "type": "ping",
-                    "timestamp": datetime.utcnow().isoformat()
-                })
-        except:
-            pass
-    
-    heartbeat_task = asyncio.create_task(heartbeat())
-    
-    try:
-        while True:
-            data = await websocket.receive_text()
-            msg = json.loads(data)
-            
-            if msg.get('type') == 'pong':
-                # Heartbeat acknowledged
-                continue
-            
-            # Handle other messages
-            await manager.broadcast(data)
-            
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        heartbeat_task.cancel()
+app.add_route("/metrics", handle_metrics)
 ```
 
-### 6.2 Client-Side (JavaScript)
+**Metrics Exposed (automatically):**
+- `lobs_requests_total{method, path, status_code}`
+- `lobs_request_duration_seconds{method, path, status_code}` (histogram)
+- `lobs_requests_in_progress{method, path}`
 
-```javascript
-class ResilientWebSocket extends EventTarget {
-  constructor(url, options = {}) {
-    super();
-    this.url = url;
-    this.options = {
-      reconnectInterval: 1000,
-      maxReconnectInterval: 30000,
-      reconnectDecay: 1.5,
-      timeoutInterval: 2000,
-      maxReconnectAttempts: null,
-      ...options
-    };
-    
-    this.reconnectAttempts = 0;
-    this.messageQueue = [];
-    this.shouldReconnect = true;
-    
-    this.connect();
-  }
-  
-  connect() {
-    this.ws = new WebSocket(this.url);
-    
-    this.ws.onopen = () => {
-      console.log('WebSocket connected');
-      this.reconnectAttempts = 0;
-      
-      // Flush message queue
-      while (this.messageQueue.length > 0) {
-        this.ws.send(this.messageQueue.shift());
-      }
-      
-      this.dispatchEvent(new Event('open'));
-    };
-    
-    this.ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      
-      // Handle heartbeat
-      if (msg.type === 'ping') {
-        this.ws.send(JSON.stringify({type: 'pong'}));
-        return;
-      }
-      
-      this.dispatchEvent(new MessageEvent('message', {data: event.data}));
-    };
-    
-    this.ws.onclose = (event) => {
-      console.log('WebSocket closed:', event.code, event.reason);
-      
-      if (this.shouldReconnect && this.shouldAttemptReconnect(event.code)) {
-        this.scheduleReconnect();
-      } else {
-        this.dispatchEvent(new CloseEvent('close', {
-          code: event.code,
-          reason: event.reason
-        }));
-      }
-    };
-    
-    this.ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      this.dispatchEvent(new Event('error'));
-    };
-  }
-  
-  shouldAttemptReconnect(closeCode) {
-    // Don't reconnect on normal closure or protocol errors
-    if (closeCode === 1000) return false;
-    if (closeCode >= 1002 && closeCode <= 1009) return false;
-    
-    // Check attempt limit
-    const {maxReconnectAttempts} = this.options;
-    if (maxReconnectAttempts !== null && 
-        this.reconnectAttempts >= maxReconnectAttempts) {
-      return false;
-    }
-    
-    return true;
-  }
-  
-  scheduleReconnect() {
-    this.reconnectAttempts++;
-    
-    const {
-      reconnectInterval,
-      maxReconnectInterval,
-      reconnectDecay
-    } = this.options;
-    
-    // Exponential backoff with full jitter
-    const maxDelay = Math.min(
-      maxReconnectInterval,
-      reconnectInterval * Math.pow(reconnectDecay, this.reconnectAttempts - 1)
-    );
-    const delay = Math.random() * maxDelay;
-    
-    console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-    
-    setTimeout(() => this.connect(), delay);
-  }
-  
-  send(data) {
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(data);
-    } else {
-      // Queue messages while disconnected
-      this.messageQueue.push(data);
-    }
-  }
-  
-  close() {
-    this.shouldReconnect = false;
-    this.ws.close(1000);
-  }
-}
+**Installation:**
+```bash
+pip install starlette-exporter
+```
 
-// Usage
-const ws = new ResilientWebSocket('wss://example.com/ws');
+**Grafana Integration:** Scrape `/metrics` endpoint, visualize in Grafana dashboard.
 
-ws.addEventListener('open', () => {
-  console.log('Connected!');
-});
+---
 
-ws.addEventListener('message', (event) => {
-  console.log('Message:', event.data);
-});
+### 2.2 Database Query Instrumentation
 
-ws.send(JSON.stringify({type: 'chat', message: 'Hello'}));
+#### Option A: SQLAlchemy Event Listeners
+
+```python
+# app/database.py
+from sqlalchemy import event
+from prometheus_client import Histogram
+
+query_duration = Histogram(
+    'lobs_db_query_duration_seconds',
+    'Database query duration',
+    ['operation']
+)
+
+@event.listens_for(Engine, "before_cursor_execute")
+def receive_before_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    conn.info.setdefault('query_start_time', []).append(time.time())
+
+@event.listens_for(Engine, "after_cursor_execute")
+def receive_after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
+    total = time.time() - conn.info['query_start_time'].pop()
+    query_duration.labels(operation=statement.split()[0]).observe(total)
+```
+
+**Metrics:**
+- `lobs_db_query_duration_seconds{operation="SELECT"}`
+- `lobs_db_query_duration_seconds{operation="UPDATE"}`
+- etc.
+
+#### Option B: OpenTelemetry Auto-Instrumentation
+
+**Tool:** [OpenTelemetry Python](https://github.com/open-telemetry/opentelemetry-python)
+
+**Pros:** 
+- Auto-instruments FastAPI, SQLAlchemy, and more
+- Distributed tracing support
+- Standard observability format
+
+**Cons:**
+- Heavier than Prometheus-only
+- More complex setup
+- Overkill for current needs
+
+**Recommendation:** Start with Prometheus/starlette_exporter. Add OpenTelemetry later if distributed tracing is needed.
+
+---
+
+### 2.3 Custom Orchestrator Metrics
+
+Add to orchestrator engine:
+
+```python
+# app/orchestrator/engine.py
+from prometheus_client import Counter, Histogram, Gauge
+
+tasks_assigned = Counter('lobs_tasks_assigned_total', 'Tasks assigned to workers', ['agent_type'])
+tasks_completed = Counter('lobs_tasks_completed_total', 'Tasks completed', ['agent_type', 'status'])
+task_duration = Histogram('lobs_task_duration_seconds', 'Task execution time', ['agent_type'])
+active_workers = Gauge('lobs_active_workers', 'Currently active workers')
+
+# In worker spawn:
+tasks_assigned.labels(agent_type=agent).inc()
+
+# In worker completion:
+tasks_completed.labels(agent_type=agent, status='success').inc()
+task_duration.labels(agent_type=agent).observe(elapsed_time)
 ```
 
 ---
 
-## 7. Common Gotchas & Anti-Patterns
+### 2.4 Load Testing with Locust
 
-### ❌ **Anti-Pattern 1: Immediate Reconnect on Every Failure**
-```javascript
-ws.onclose = () => {
-  new WebSocket(url); // Instant retry → thundering herd!
-};
-```
-**Fix**: Always use exponential backoff.
+**Tool:** [Locust](https://locust.io) — Python-based load testing  
+**Why:** Easy to write tests, simulates realistic user behavior, generates RPS/latency graphs.
 
-### ❌ **Anti-Pattern 2: No Reconnection Limit**
-```javascript
-// Infinite loop if server permanently rejects connection
-while (true) {
-  try { connect(); } catch { sleep(1000); }
-}
-```
-**Fix**: Cap attempts or detect auth failures.
+#### Example Test Suite
 
-### ❌ **Anti-Pattern 3: Ignoring Close Codes**
-```javascript
-ws.onclose = () => scheduleReconnect(); // Reconnects even on 1000 (normal)
-```
-**Fix**: Only reconnect on transient failures (see table in §1.2).
+```python
+# tests/load/locustfile.py
+from locust import HttpUser, task, between
 
-### ❌ **Anti-Pattern 4: No Heartbeat**
-```javascript
-// Connection looks alive but is actually severed by proxy
-ws.readyState === WebSocket.OPEN // → true, but no data flows
+class LoberUser(HttpUser):
+    wait_time = between(1, 3)
+    
+    def on_start(self):
+        # Login / get auth token
+        self.token = "test-token"
+        self.client.headers.update({"Authorization": f"Bearer {self.token}"})
+    
+    @task(10)
+    def list_tasks(self):
+        """Most common operation"""
+        self.client.get("/api/tasks")
+    
+    @task(5)
+    def get_project(self):
+        """Second most common"""
+        self.client.get("/api/projects")
+    
+    @task(3)
+    def create_task(self):
+        """Less frequent write operation"""
+        self.client.post("/api/tasks", json={
+            "title": "Load test task",
+            "project_id": "test-proj"
+        })
+    
+    @task(2)
+    def worker_activity(self):
+        """Known N+1 query issue"""
+        self.client.get("/api/worker/activity")
 ```
-**Fix**: Implement ping/pong with timeout (see §4.1).
 
-### ❌ **Anti-Pattern 5: Losing Messages on Disconnect**
-```javascript
-ws.send(data); // Fails silently if connection just closed
+**Run:**
+```bash
+locust -f tests/load/locustfile.py --host=http://localhost:8000
+# Open web UI at http://localhost:8089
+# Configure users, spawn rate, run test
 ```
-**Fix**: Queue messages and flush on reconnect (see §5.2).
+
+**Output:**
+- RPS sustained
+- Response time percentiles
+- Failure rate
+- Detailed graphs and CSV export
 
 ---
 
-## 8. Recommendations for lobs-server
+## Part 3: Baseline Targets
 
-Based on the research findings and the project context (FastAPI + SQLite REST API with WebSocket chat):
+### 3.1 API Response Time Targets
 
-### 8.1 Server Implementation
+Based on industry standards for REST APIs:
 
-1. **Ping/Pong Heartbeat**
-   - Send ping every 25 seconds
-   - Close connection if no pong received within 5 seconds
-   - Use JSON message format for cross-platform compatibility
+| Endpoint Type | p50 | p95 | p99 | Max |
+|--------------|-----|-----|-----|-----|
+| Health check | < 5ms | < 10ms | < 20ms | < 50ms |
+| Simple list (tasks, projects) | < 50ms | < 100ms | < 200ms | < 500ms |
+| Single resource GET | < 20ms | < 50ms | < 100ms | < 250ms |
+| POST/PUT/DELETE | < 100ms | < 250ms | < 500ms | < 1s |
+| Complex aggregation (stats) | < 200ms | < 500ms | < 1s | < 2s |
+| Worker activity (N+1 issue) | < 100ms | < 500ms | < 1s | < 2s |
 
-2. **Connection State Tracking**
-   - Store `client_id`, `last_seen`, `last_message_id`
-   - Implement message buffer (last 100 messages or 5 minute window)
-   - Enable connection recovery on reconnect
+**After N+1 fix:**
+- Worker activity should drop to < 50ms p50, < 150ms p95
 
-3. **Graceful Shutdown**
-   - Send close code 1001 ("going away") during deployments
-   - Allows clients to immediately reconnect to healthy instance
+---
 
-### 8.2 Client Implementation
+### 3.2 Database Query Targets
 
-1. **Exponential Backoff with Full Jitter**
-   ```javascript
-   reconnectInterval: 1000,      // 1s initial
-   maxReconnectInterval: 30000,  // 30s cap
-   reconnectDecay: 1.5,          // growth rate
-   maxReconnectAttempts: 20      // prevent infinite loops
+SQLite performance characteristics:
+
+| Query Type | Target Latency | Notes |
+|-----------|---------------|-------|
+| Indexed SELECT (single row) | < 1ms | Fast B-tree lookup |
+| Full table scan (< 1000 rows) | < 10ms | Acceptable for small tables |
+| Complex JOIN (2-3 tables) | < 10ms | With proper indexes |
+| Aggregate (COUNT, GROUP BY) | < 50ms | Depends on table size |
+| INSERT/UPDATE | < 5ms | WAL mode is fast |
+
+**Known Issues:**
+- Activity endpoint N+1 query: Currently making 1 + N queries for N worker runs
+- Should be reduced to 1-2 queries with `joinedload()`
+
+---
+
+### 3.3 Orchestrator Performance Targets
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| Time to task assignment | < 20s | Orchestrator polling interval is 10s |
+| Task completion (simple) | 1-5 min | Depends on agent and task complexity |
+| Task completion (complex) | 15-60 min | Research, large refactors |
+| Worker spawn time | < 2s | Subprocess overhead |
+| Concurrent workers | 3-5 | Configurable, memory-dependent |
+| Stuck task detection | 15 min | Current timeout setting |
+
+---
+
+### 3.4 System Resource Targets
+
+| Resource | Target | Warning Threshold | Critical Threshold |
+|----------|--------|------------------|-------------------|
+| Memory (RSS) | < 500 MB | 1 GB | 2 GB |
+| CPU (average) | < 30% | 60% | 80% |
+| Disk I/O (read) | < 10 MB/s | 50 MB/s | 100 MB/s |
+| SQLite DB size | < 1 GB | 5 GB | 10 GB |
+| Active connections | < 10 | 50 | 100 |
+
+---
+
+## Part 4: Comparison — Similar Systems
+
+### 4.1 FastAPI + SQLite Benchmarks (Public Data)
+
+**Reference:** [TechEmpower Benchmarks](https://www.techempower.com/benchmarks/)
+
+- **FastAPI (single query):** ~40,000 RPS
+- **FastAPI (multi query):** ~10,000 RPS
+- **FastAPI (data updates):** ~5,000 RPS
+
+**Note:** These are stress tests with minimal business logic. Expect 10-20% of these numbers for real-world apps.
+
+**Realistic Targets for lobs-server:**
+- **Simple queries:** 500-2,000 RPS
+- **Complex queries:** 100-500 RPS
+- **Write operations:** 200-1,000 RPS
+
+---
+
+### 4.2 Task Orchestration Systems
+
+Comparable systems:
+
+#### **Celery (task queue)**
+- Task assignment: < 1s (with Redis)
+- Task completion: Varies (depends on worker)
+- Monitoring: Built-in with Flower dashboard
+
+#### **Airflow (workflow orchestration)**
+- Task scheduling overhead: 5-30s
+- Task completion: Minutes to hours (data pipelines)
+- Monitoring: Built-in UI with Gantt charts
+
+#### **Jenkins (CI/CD)**
+- Job assignment: < 10s
+- Job completion: 1-30 minutes
+- Monitoring: Built-in with historical graphs
+
+**lobs-server Positioning:**
+- **Lighter than Airflow** (single-node, no DAGs)
+- **Simpler than Celery** (no message broker)
+- **More flexible than Jenkins** (general-purpose agents)
+
+---
+
+## Part 5: Recommended Benchmark Suite
+
+### 5.1 Automated Performance Tests
+
+Create `tests/performance/` directory with:
+
+#### **1. API Latency Benchmark**
+
+```python
+# tests/performance/test_api_latency.py
+import pytest
+import time
+from httpx import AsyncClient
+
+@pytest.mark.asyncio
+async def test_task_list_latency(client: AsyncClient):
+    """Task list should respond in < 50ms p50"""
+    times = []
+    for _ in range(100):
+        start = time.perf_counter()
+        response = await client.get("/api/tasks")
+        elapsed = (time.perf_counter() - start) * 1000
+        times.append(elapsed)
+        assert response.status_code == 200
+    
+    p50 = sorted(times)[50]
+    p95 = sorted(times)[95]
+    
+    print(f"\nTask list latency: p50={p50:.2f}ms, p95={p95:.2f}ms")
+    assert p50 < 50, f"p50 latency {p50:.2f}ms exceeds 50ms target"
+    assert p95 < 200, f"p95 latency {p95:.2f}ms exceeds 200ms target"
+```
+
+#### **2. Database Query Benchmark**
+
+```python
+# tests/performance/test_db_queries.py
+import pytest
+from sqlalchemy import select
+from app.models import Task
+
+@pytest.mark.asyncio
+async def test_task_query_performance(db):
+    """Single task query should be < 5ms"""
+    times = []
+    for _ in range(100):
+        start = time.perf_counter()
+        result = await db.execute(select(Task).limit(1))
+        _ = result.scalar_one_or_none()
+        elapsed = (time.perf_counter() - start) * 1000
+        times.append(elapsed)
+    
+    p50 = sorted(times)[50]
+    print(f"\nDB query latency: p50={p50:.2f}ms")
+    assert p50 < 5, f"DB query p50 {p50:.2f}ms exceeds 5ms target"
+```
+
+#### **3. Load Test Suite**
+
+```python
+# tests/load/locustfile.py
+# (See section 2.4 above for full example)
+```
+
+---
+
+### 5.2 Benchmark Execution Plan
+
+**Phase 1: Establish Baseline (Week 1)**
+1. Install Prometheus + starlette_exporter
+2. Add custom orchestrator metrics
+3. Run Locust load tests (50 users, 5 min duration)
+4. Document baseline numbers in README
+
+**Phase 2: Fix Known Issues (Week 2)**
+1. Fix N+1 query in activity endpoint
+2. Re-run benchmarks
+3. Compare before/after
+
+**Phase 3: Continuous Monitoring (Ongoing)**
+1. Set up Grafana dashboard
+2. Add alerting for p95 > threshold
+3. Run weekly load tests
+4. Track trends over time
+
+---
+
+## Part 6: Implementation Recommendations
+
+### 6.1 Immediate Actions (Programmer Phase)
+
+**Priority 1: Prometheus Metrics**
+- Install `starlette-exporter`
+- Add middleware to `app/main.py`
+- Create `/metrics` endpoint
+- **Time estimate:** 1 hour
+
+**Priority 2: Database Instrumentation**
+- Add SQLAlchemy event listeners
+- Track query duration by operation type
+- **Time estimate:** 1 hour
+
+**Priority 3: Orchestrator Metrics**
+- Add Prometheus counters/gauges to engine
+- Track task assignment, completion, duration
+- **Time estimate:** 1-2 hours
+
+**Priority 4: Load Test Suite**
+- Create `tests/load/locustfile.py`
+- Define realistic user scenarios
+- Run baseline benchmark
+- **Time estimate:** 2 hours
+
+**Priority 5: Documentation**
+- Add baseline numbers to README
+- Create performance monitoring guide
+- **Time estimate:** 30 minutes
+
+**Total: 5.5-6.5 hours**
+
+---
+
+### 6.2 Monitoring Dashboard (Optional, Future Work)
+
+**Tool:** Grafana + Prometheus
+
+**Key Panels:**
+1. **API Latency** (p50/p95/p99 over time)
+2. **Request Rate** (RPS per endpoint)
+3. **Error Rate** (5xx/4xx percentage)
+4. **Database Performance** (query duration histogram)
+5. **Orchestrator Health** (active workers, task queue depth)
+6. **System Resources** (memory, CPU, disk I/O)
+
+**Setup Time:** 2-3 hours (including Prometheus server setup)
+
+---
+
+## Part 7: Risks and Gotchas
+
+### 7.1 SQLite Concurrency Limits
+
+**Issue:** SQLite has limited write concurrency (WAL mode allows concurrent reads, but writes are serialized).
+
+**Mitigation:**
+- Keep writes fast (< 5ms per transaction)
+- Use connection pooling wisely
+- Monitor for `SQLITE_BUSY` errors
+
+**Reference:** [SQLite docs on concurrency](https://www.sqlite.org/wal.html)
+
+---
+
+### 7.2 Memory Pressure from Multiple Workers
+
+**Issue:** Each OpenClaw worker is a separate Python process. 5 concurrent workers = 5x memory footprint.
+
+**Mitigation:**
+- Set `ORCHESTRATOR_MAX_WORKERS=3` (conservative default)
+- Monitor RSS per worker
+- Implement worker memory limits
+
+---
+
+### 7.3 N+1 Query Anti-Pattern
+
+**Known Issue:** Activity endpoint makes 1 query to get worker runs, then 1 query per run to fetch related data.
+
+**Solution:** Use `joinedload()` or `selectinload()`:
+
+```python
+# Bad (N+1):
+runs = await db.execute(select(WorkerRun).limit(50))
+for run in runs:
+    task = await db.execute(select(Task).where(Task.id == run.task_id))
+
+# Good (2 queries total):
+from sqlalchemy.orm import joinedload
+runs = await db.execute(
+    select(WorkerRun).options(joinedload(WorkerRun.task)).limit(50)
+)
+```
+
+**Reference:** [SQLAlchemy docs on eager loading](https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html#joined-eager-loading)
+
+---
+
+### 7.4 Prometheus Cardinality Explosion
+
+**Issue:** Too many unique label values can cause memory issues in Prometheus.
+
+**Avoid:**
+- User IDs as labels
+- Task IDs as labels
+- High-cardinality UUIDs
+
+**Safe Labels:**
+- HTTP method (GET, POST, etc.)
+- Status code (200, 404, 500)
+- Endpoint path (grouped, e.g., `/api/tasks/{id}`)
+- Agent type (programmer, researcher, reviewer)
+
+**Reference:** [Prometheus best practices](https://prometheus.io/docs/practices/naming/)
+
+---
+
+## Part 8: References and Sources
+
+### Research Sources
+
+1. **FastAPI Middleware Documentation**  
+   https://fastapi.tiangolo.com/advanced/middleware/  
+   → Confirmed middleware approach for instrumentation
+
+2. **Prometheus Python Client**  
+   https://prometheus.github.io/client_python/  
+   → Standard metrics library, decorator-based API
+
+3. **starlette_exporter (Recommended)**  
+   https://github.com/stephenhillier/starlette_exporter  
+   → Purpose-built for FastAPI, minimal code changes
+
+4. **SQLite Performance — N+1 Queries**  
+   https://www.sqlite.org/np1queryprob.html  
+   → "200 queries per page is fine with SQLite" (no network overhead)
+
+5. **OpenTelemetry Python**  
+   https://github.com/open-telemetry/opentelemetry-python  
+   → Auto-instrumentation for FastAPI + SQLAlchemy (overkill for now)
+
+6. **Locust Load Testing**  
+   https://locust.io  
+   → Python-based, easy to write tests, realistic user simulation
+
+7. **TechEmpower Benchmarks**  
+   https://www.techempower.com/benchmarks/  
+   → FastAPI performance baseline data
+
+8. **SQLAlchemy Eager Loading**  
+   https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html#joined-eager-loading  
+   → Solution for N+1 query problems
+
+### Existing Codebase References
+
+- `app/middleware.py` — RequestLoggingMiddleware already tracks duration
+- `app/orchestrator/monitor_enhanced.py` — Stuck task detection (15min timeout)
+- `KNOWN_ISSUES.md` — Documents activity endpoint N+1 query issue
+- `ORCHESTRATOR_INTEGRATION.md` — Recommendation to add Prometheus metrics
+
+---
+
+## Part 9: Next Steps
+
+### For Programmer Agent (Phase 2)
+
+**Accept handoff when ready to implement:**
+
+1. **Install dependencies**
+   ```bash
+   pip install starlette-exporter prometheus-client locust
+   echo "starlette-exporter>=0.18.0" >> requirements.txt
+   echo "prometheus-client>=0.19.0" >> requirements.txt
+   echo "locust>=2.20.0" >> requirements.txt  # dev dependency
    ```
 
-2. **Message Queuing**
-   - Queue messages while `readyState !== OPEN`
-   - Flush queue on `onopen` event
-   - Add message IDs for deduplication
+2. **Add Prometheus middleware** (see 6.1 Priority 1)
 
-3. **Connection State UI**
-   ```javascript
-   // Show connection status to user
-   ws.addEventListener('open', () => showStatus('Connected'));
-   ws.addEventListener('close', () => showStatus('Reconnecting...'));
-   ws.addEventListener('error', () => showStatus('Connection error'));
+3. **Instrument database queries** (see 6.1 Priority 2)
+
+4. **Add orchestrator metrics** (see 6.1 Priority 3)
+
+5. **Create load test suite** (see 5.2)
+
+6. **Run baseline benchmark**
+   ```bash
+   # Start server
+   ./bin/run
+   
+   # In another terminal
+   locust -f tests/load/locustfile.py --host=http://localhost:8000 \
+          --users=50 --spawn-rate=10 --run-time=5m --headless
    ```
 
-4. **Heartbeat Response**
-   - Auto-respond to `{type: 'ping'}` with `{type: 'pong'}`
-   - Don't surface pings to application layer
+7. **Document results** in README:
+   ```markdown
+   ## Performance Baseline
+   
+   Measured on 2026-02-22 with 50 concurrent users:
+   
+   - List tasks: p50=23ms, p95=87ms
+   - Get project: p50=18ms, p95=65ms
+   - Worker activity: p50=145ms, p95=420ms (N+1 query issue)
+   
+   Target: < 50ms p50, < 200ms p95 for all endpoints.
+   ```
 
-### 8.3 Testing Strategy
-
-1. **Network Resilience Tests**
-   - Simulate network disconnects (kill connection)
-   - Test server restarts (graceful close)
-   - Proxy timeout simulation (70+ second idle)
-
-2. **Load Tests**
-   - 100+ clients disconnecting simultaneously
-   - Verify backoff prevents thundering herd
-   - Monitor reconnection distribution
-
-3. **Message Integrity Tests**
-   - Send messages during disconnect
-   - Verify queuing and replay
-   - Test duplicate detection
+8. **Set up Grafana** (optional, future work)
 
 ---
 
-## 9. Further Reading
+## Conclusion
 
-### Primary Sources
-- **RFC 6455 - WebSocket Protocol**: https://www.rfc-editor.org/rfc/rfc6455
-- **MDN WebSocket API**: https://developer.mozilla.org/en-US/docs/Web/API/WebSocket
-- **javascript.info WebSocket Tutorial**: https://javascript.info/websocket
+**What we learned:**
+- Prometheus + starlette_exporter is the industry-standard approach for FastAPI monitoring
+- SQLite's N+1 query pattern is acceptable (unlike client/server DBs) but still should be optimized
+- Current middleware logs duration but doesn't expose metrics
+- Known N+1 query issue in activity endpoint should be fixed and benchmarked
+- Locust is the right tool for load testing Python web apps
 
-### Exponential Backoff
-- **Wikipedia: Exponential Backoff**: https://en.wikipedia.org/wiki/Exponential_backoff
-- **AWS: Exponential Backoff and Jitter**: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-- **Amazon Builders' Library - Timeouts, Retries, Backoff**: https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+**Key Metrics to Track:**
+1. API response time (p50/p95/p99) per endpoint
+2. Database query duration by operation type
+3. Orchestrator task assignment and completion times
+4. System resources (memory, CPU)
 
-### Production Implementations
-- **Socket.io Client API**: https://socket.io/docs/v4/client-api/
-- **reconnecting-websocket**: https://github.com/joewalnes/reconnecting-websocket
-- **Ably SDK Specification**: https://sdk.ably.com/builds/ably/specification/main/features/
+**Baseline Targets:**
+- API: < 50ms p50, < 200ms p95
+- DB queries: < 5ms for simple SELECT
+- Task completion: 1-5 min for simple tasks
 
-### Distributed Systems Patterns
-- **Martin Fowler: HeartBeat**: https://martinfowler.com/articles/patterns-of-distributed-systems/heartbeat.html
+**Implementation Complexity:** Low to Medium (5-6 hours total)
 
----
-
-## 10. Conclusion
-
-WebSocket reconnection is a solved problem with well-established best practices:
-
-✅ **Use exponential backoff with full jitter** (random delay from 0 to max)  
-✅ **Implement ping/pong heartbeats** (25-30s interval)  
-✅ **Respect close codes** (don't reconnect on normal closure)  
-✅ **Queue messages during disconnect** (flush on reconnect)  
-✅ **Limit reconnection attempts** (prevent infinite loops)  
-✅ **Show connection state to users** (transparency builds trust)
-
-The cost of not implementing proper reconnection is poor user experience: lost messages, confused users, and support tickets. The cost of implementing it correctly is minimal—existing libraries like `reconnecting-websocket` and Socket.io do the heavy lifting.
-
-For **lobs-server**, I recommend:
-1. Adopt the full jitter exponential backoff pattern
-2. Implement server-side heartbeat (FastAPI WebSocket already supports this)
-3. Add client-side message queuing
-4. Track connection state for potential message replay
-5. Test thoroughly with network simulation tools
-
-**Next steps**: Review the code examples in §6 and adapt them to your FastAPI WebSocket implementation. Consider using Socket.io for automatic reconnection if building a browser-based client, or implement the `ResilientWebSocket` pattern for custom clients.
+**ROI:** High — enables data-driven optimization, prevents performance regressions, supports SLA monitoring.
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: 2026-02-14  
-**Author**: Researcher Agent  
-**Status**: Complete
+**Ready for handoff to Programmer for Phase 2 implementation.**

@@ -37,8 +37,9 @@ async def test_create_duplicate_workspace(client: AsyncClient):
     """Test creating a duplicate workspace fails."""
     workspace_data = {
         "id": "workspace-dup",
+        "slug": "dup-workspace",
         "name": "Duplicate Workspace",
-        "root_path": "/test/dup",
+        "is_default": False,
     }
     
     # Create first workspace
@@ -56,9 +57,9 @@ async def test_create_duplicate_workspace(client: AsyncClient):
 async def test_list_workspaces(client: AsyncClient):
     """Test listing multiple workspaces."""
     workspaces = [
-        {"id": "ws-1", "name": "Workspace 1", "root_path": "/ws1"},
-        {"id": "ws-2", "name": "Workspace 2", "root_path": "/ws2"},
-        {"id": "ws-3", "name": "Workspace 3", "root_path": "/ws3"},
+        {"id": "ws-1", "slug": "workspace-1", "name": "Workspace 1", "is_default": False},
+        {"id": "ws-2", "slug": "workspace-2", "name": "Workspace 2", "is_default": False},
+        {"id": "ws-3", "slug": "workspace-3", "name": "Workspace 3", "is_default": False},
     ]
     
     for ws in workspaces:
@@ -78,7 +79,7 @@ async def test_list_workspaces(client: AsyncClient):
 async def test_update_workspace_success(client: AsyncClient):
     """Test updating a workspace successfully."""
     # Create workspace
-    workspace_data = {"id": "ws-update", "name": "Original Name", "root_path": "/test"}
+    workspace_data = {"id": "ws-update", "slug": "ws-update", "name": "Original Name", "is_default": False}
     await client.post("/api/workspaces", json=workspace_data)
     
     # Update it
@@ -92,7 +93,7 @@ async def test_update_workspace_success(client: AsyncClient):
     assert data["id"] == "ws-update"
     assert data["name"] == "Updated Name"
     assert data["description"] == "New description"
-    assert data["root_path"] == "/test"  # Unchanged
+    assert data["slug"] == "ws-update"  # Unchanged
 
 
 @pytest.mark.asyncio
@@ -109,7 +110,7 @@ async def test_update_workspace_not_found(client: AsyncClient):
 async def test_list_files_empty(client: AsyncClient):
     """Test listing files in a workspace when empty."""
     # Create workspace
-    workspace_data = {"id": "ws-files", "name": "Files Workspace", "root_path": "/test"}
+    workspace_data = {"id": "ws-files", "slug": "ws-files", "name": "Files Workspace", "is_default": False}
     await client.post("/api/workspaces", json=workspace_data)
     
     response = await client.get("/api/workspaces/ws-files/files")
@@ -121,15 +122,15 @@ async def test_list_files_empty(client: AsyncClient):
 async def test_create_file_success(client: AsyncClient):
     """Test creating a file in a workspace."""
     # Create workspace
-    workspace_data = {"id": "ws-file-create", "name": "File Create Workspace", "root_path": "/test"}
+    workspace_data = {"id": "ws-file-create", "slug": "ws-file-create", "name": "File Create Workspace", "is_default": False}
     await client.post("/api/workspaces", json=workspace_data)
     
     # Create file
     file_data = {
         "id": "file-1",
+        "workspace_id": "ws-file-create",
         "path": "/test/file1.txt",
         "content": "File content here",
-        "file_type": "text",
     }
     response = await client.post("/api/workspaces/ws-file-create/files", json=file_data)
     assert response.status_code == 200
@@ -144,14 +145,14 @@ async def test_create_file_success(client: AsyncClient):
 async def test_list_files(client: AsyncClient):
     """Test listing multiple files in a workspace."""
     # Create workspace
-    workspace_data = {"id": "ws-multi-files", "name": "Multi Files", "root_path": "/test"}
+    workspace_data = {"id": "ws-multi-files", "slug": "ws-multi-files", "name": "Multi Files", "is_default": False}
     await client.post("/api/workspaces", json=workspace_data)
     
     # Create multiple files
     files = [
-        {"id": "f1", "path": "/test/file1.txt", "content": "Content 1", "file_type": "text"},
-        {"id": "f2", "path": "/test/file2.py", "content": "print('hello')", "file_type": "python"},
-        {"id": "f3", "path": "/test/file3.md", "content": "# Markdown", "file_type": "markdown"},
+        {"id": "f1", "workspace_id": "ws-multi-files", "path": "/test/file1.txt", "content": "Content 1"},
+        {"id": "f2", "workspace_id": "ws-multi-files", "path": "/test/file2.py", "content": "print('hello')"},
+        {"id": "f3", "workspace_id": "ws-multi-files", "path": "/test/file3.md", "content": "# Markdown"},
     ]
     
     for file_data in files:
@@ -171,7 +172,7 @@ async def test_list_files(client: AsyncClient):
 async def test_list_links_empty(client: AsyncClient):
     """Test listing links in a workspace when empty."""
     # Create workspace
-    workspace_data = {"id": "ws-links", "name": "Links Workspace", "root_path": "/test"}
+    workspace_data = {"id": "ws-links", "slug": "ws-links", "name": "Links Workspace", "is_default": False}
     await client.post("/api/workspaces", json=workspace_data)
     
     response = await client.get("/api/workspaces/ws-links/links")

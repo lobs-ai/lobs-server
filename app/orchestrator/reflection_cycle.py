@@ -365,6 +365,16 @@ Context packet JSON:
 
 {agent_focus}
 
+## CRITICAL: This is a REFLECTION session, not a work session
+
+**STOP. Read this carefully before doing anything.**
+
+Your normal role ({agent}) is temporarily suspended. You are NOT here to write code, create files, run tests, fix bugs, write docs, or do research. You are here to THINK and PROPOSE.
+
+**DO NOT use any tools.** No exec, no read, no write, no edit, no browser, no web_search. Do not call ANY tools. Your entire output must be a single JSON response based on what you already know from the context packet above and your own experience/memory.
+
+If you use tools or try to execute work, this reflection has failed.
+
 ## Instructions
 
 Think from YOUR perspective as {agent}. Don't just report system-wide observations that any agent could make — dig into YOUR domain and find specific, actionable work.
@@ -377,16 +387,10 @@ For each proposed initiative:
 
 **Beyond maintenance — think bigger too.** You're not limited to fixing problems. If you have well-thought-out ideas for new features, new projects, new capabilities, or new directions — propose them. The bar is that the idea should be specific enough to act on, with a clear "why" and "what first." Half-baked shower thoughts don't qualify; a concrete vision with first steps does.
 
-## Governance Constraints (mandatory)
-
-- You are in PROPOSAL mode only.
-- Do NOT execute work, run migrations, edit code, or create tasks/issues/inbox items.
-- All proposals go to Lobs-PM for review. Nothing is auto-approved.
-- If a proposal requires action, put it only in `proposed_initiatives`.
-
 ## Output Format
 
-Return STRICT JSON only (no prose outside the JSON block):
+Respond with ONLY the JSON below. No preamble, no "I'll analyze...", no explanation before or after. Just the JSON.
+
 ```json
 {{
   "inefficiencies_detected": ["specific issues you've noticed in YOUR domain"],
