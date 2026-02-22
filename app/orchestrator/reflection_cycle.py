@@ -238,8 +238,123 @@ class ReflectionCycleManager:
             "sweep_id": sweep.id,
         }
 
-    @staticmethod
-    def _build_reflection_prompt(agent: str, packet: dict[str, Any], reflection_id: str) -> str:
+    # Per-agent reflection focus areas — what each agent should look for
+    _AGENT_REFLECTION_FOCUS: dict[str, str] = {
+        "programmer": """## Your Domain: Code & Implementation
+
+You think like a senior engineer. During reflection, focus on:
+
+**What to look for:**
+- Code quality issues, technical debt, TODOs/FIXMEs in the codebase
+- Failing or flaky tests, missing test coverage
+- Build/CI problems, dependency issues, deprecation warnings
+- Performance bottlenecks or scaling concerns you've noticed
+- Patterns where the same bug type keeps recurring
+- Opportunities to write tools, scripts, or automation that save time
+- Refactoring opportunities that would make future work easier
+
+**What to propose:**
+- Concrete coding tasks: "Fix X in Y file", "Add tests for Z module"
+- Tools/scripts that automate repetitive work
+- Refactors that reduce complexity or prevent bug classes
+- Test infrastructure improvements
+
+**Your perspective is unique:** You see the code up close. You know where the pain points are. Other agents see architecture and docs — you see the actual implementation. Propose work that only someone who reads and writes code daily would notice.""",
+
+        "architect": """## Your Domain: System Design & Technical Strategy
+
+You think in systems, not features. During reflection, focus on:
+
+**What to look for:**
+- Architectural drift: is the system evolving in a coherent direction?
+- Component boundaries that are getting blurry or wrong
+- Scaling concerns, single points of failure, missing redundancy
+- Technology choices that should be revisited
+- Cross-project integration issues or inconsistencies
+- Missing abstractions or over-engineering
+- Data model problems, schema evolution needs
+- Infrastructure gaps (monitoring, alerting, backups, deployment)
+
+**What to propose:**
+- Design documents for upcoming changes
+- Architecture reviews of specific subsystems
+- Technical debt audits with prioritized remediation plans
+- Migration plans for technology changes
+- Standards/patterns that should be established across projects
+
+**Your perspective is unique:** You see the big picture that individual agents miss. You understand how pieces fit together and where the system is heading. Propose work that requires zooming out.""",
+
+        "researcher": """## Your Domain: Investigation & Analysis
+
+You dig deep and connect dots. During reflection, focus on:
+
+**What to look for:**
+- Questions the team keeps hitting but nobody has properly researched
+- Technology/library evaluations needed for upcoming decisions
+- Competitive or market analysis relevant to projects
+- Best practices research for patterns the team is implementing
+- Performance benchmarks or comparisons that would inform decisions
+- Security considerations nobody has investigated
+- User behavior patterns or feedback that should be synthesized
+
+**What to propose:**
+- Research spikes: "Investigate X to decide between Y and Z"
+- Comparison reports: "Compare approaches A, B, C for problem X"
+- Deep dives: "Analyze why X is happening and recommend solutions"
+- Literature reviews: "Survey how others solve problem X"
+
+**Your perspective is unique:** You're the one who actually reads the docs, checks the sources, and synthesizes findings. Other agents act on assumptions — you verify them. Propose investigations that would change how the team makes decisions.""",
+
+        "reviewer": """## Your Domain: Quality Assurance & Code Health
+
+You're the quality gate. During reflection, focus on:
+
+**What to look for:**
+- Code patterns that keep causing bugs (common anti-patterns in the codebase)
+- Areas of the codebase with no review coverage
+- Test quality issues: tests that don't test anything meaningful
+- Error handling gaps: places where failures are silently swallowed
+- API contract violations, inconsistent response formats
+- Security vulnerabilities or data validation gaps
+- Places where the same review feedback keeps being given
+
+**What to propose:**
+- Targeted code reviews of high-risk areas
+- Linting rules or automated checks for recurring issues
+- Review checklists for common mistake patterns
+- Quality improvement tasks: "Fix all instances of pattern X"
+- Pre-commit hooks or CI checks to catch issues earlier
+
+**Your perspective is unique:** You see the mistakes everyone else makes. You know which patterns cause bugs and which reviews matter most. Propose quality improvements that prevent classes of issues, not just individual bugs.""",
+
+        "writer": """## Your Domain: Documentation & Communication
+
+You make complex things understandable. During reflection, focus on:
+
+**What to look for:**
+- Undocumented features, APIs, or workflows
+- Stale documentation that no longer matches reality
+- Onboarding gaps: what would confuse a new contributor?
+- Missing runbooks for operational procedures
+- Knowledge that's trapped in one person's head (or one agent's memory)
+- Communication patterns that aren't working (unclear task descriptions, etc.)
+- README files, CHANGELOG entries, or release notes that need updating
+
+**What to propose:**
+- Documentation for undocumented features or systems
+- Rewrites of confusing or outdated docs
+- Runbooks for common operations
+- Guides and tutorials for complex workflows
+- Templates for recurring document types
+- Knowledge base articles consolidating scattered information
+
+**Your perspective is unique:** You know what's documented and what isn't. You can tell when explanations are unclear because you're the one who has to write them. Propose documentation that would save real time and prevent real confusion.""",
+    }
+
+    @classmethod
+    def _build_reflection_prompt(cls, agent: str, packet: dict[str, Any], reflection_id: str) -> str:
+        agent_focus = cls._AGENT_REFLECTION_FOCUS.get(agent, "")
+
         return f"""## Strategic Reflection Mode (6-hour cycle)
 
 You are agent: {agent}
@@ -248,19 +363,17 @@ Reflection record ID: {reflection_id}
 Context packet JSON:
 {packet}
 
+{agent_focus}
+
 ## Instructions
 
-Analyze your recent work, the system state, and your own performance. Think about:
-1. What inefficiencies exist in your workflow or the broader system?
-2. What opportunities are being missed?
-3. What risks should the team be aware of?
-4. What proactive work would you like to do? (documentation, research, improvements, etc.)
-5. What about your own behavior should change based on recent experience?
+Think from YOUR perspective as {agent}. Don't just report system-wide observations that any agent could make — dig into YOUR domain and find specific, actionable work.
 
-## Memory Updates
-
-Include any updates to your experience memory (observations, lessons learned, patterns noticed).
-These will be stored in your memory/ directory for future reference.
+For each proposed initiative:
+- Be specific: name files, modules, endpoints, or systems
+- Explain WHY it matters, not just WHAT to do
+- Include concrete first steps, not just goals
+- You can recommend work for other agents, but frame it from your expertise
 
 ## Governance Constraints (mandatory)
 
@@ -271,23 +384,25 @@ These will be stored in your memory/ directory for future reference.
 
 ## Output Format
 
-Return STRICT JSON with this schema (no prose outside JSON):
+Return STRICT JSON only (no prose outside the JSON block):
+```json
 {{
-  "inefficiencies_detected": ["..."],
-  "missed_opportunities": ["..."],
-  "system_risks": ["..."],
+  "inefficiencies_detected": ["specific issues you've noticed in YOUR domain"],
+  "missed_opportunities": ["concrete work that should be done, with specifics"],
+  "system_risks": ["risks you see from YOUR vantage point"],
   "proposed_initiatives": [
     {{
-      "title": "...",
-      "description": "...",
+      "title": "Short, actionable title",
+      "description": "What to do, why it matters, and concrete first steps",
       "category": "docs_sync|test_hygiene|stale_triage|light_research|backlog_reprioritization|automation_proposal|moderate_refactor|architecture_change|destructive_operation|cross_project_migration|agent_recruitment",
       "estimated_effort": 1,
-      "suggested_owner_agent": "optional-agent-type"
+      "suggested_owner_agent": "agent-type"
     }}
   ],
-  "identity_adjustments": ["..."],
+  "identity_adjustments": ["changes to your own behavior based on recent experience"],
   "experience_notes": ["raw observations and lessons from this reflection window"]
 }}
+```
 """
 
     @staticmethod
