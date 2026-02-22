@@ -122,6 +122,7 @@ class WorkerInfo:
     start_time: float
     label: str
     model_audit: dict[str, Any] | None = None
+    transcript_path: str | None = None
 
 
 class WorkerManager:
@@ -576,10 +577,15 @@ class WorkerManager:
                     f"({int(runtime/60)}m)"
                 )
 
-        # Check session status via Gateway API
+        # Resolve transcript path hint on first check (one-time lookup)
+        if not worker_info.transcript_path:
+            worker_info.transcript_path = await self._resolve_transcript_path(worker_info.child_session_key)
+
+        # Check session status
         session_status = await self._check_session_status(
             worker_info.child_session_key,
-            spawn_time=worker_info.start_time
+            spawn_time=worker_info.start_time,
+            transcript_hint=worker_info.transcript_path
         )
         
         if not session_status:
@@ -592,7 +598,8 @@ class WorkerManager:
             
             # Try to fetch the session result summary
             result_summary = await self._fetch_session_summary(
-                worker_info.child_session_key
+                worker_info.child_session_key,
+                transcript_hint=worker_info.transcript_path
             )
             
             await self._handle_worker_completion(
@@ -603,73 +610,170 @@ class WorkerManager:
                 result_summary=result_summary
             )
 
+    def _find_transcript_file(self, session_key: str, transcript_hint: Optional[str] = None) -> Optional["pathlib.Path"]:
+        """Find a transcript file on disk for the given session key.
+        
+        Searches agent session directories for JSONL files matching the session UUID,
+        including files that have been marked as deleted (.deleted.*).
+        
+        The session key UUID (subagent UUID) often differs from the transcript filename
+        (sessionId), so we try both the subagent UUID and any hint from sessions_list.
+        """
+        import pathlib
+
+        parts = session_key.split(":")
+        if len(parts) < 2:
+            return None
+        agent_id = parts[1]
+        subagent_uuid = parts[3] if len(parts) >= 4 else None
+
+        # Collect UUIDs to search for
+        search_uuids = []
+        if subagent_uuid:
+            search_uuids.append(subagent_uuid)
+
+        # If we have a transcript path hint, extract its sessionId
+        if transcript_hint:
+            hint_path = pathlib.Path(transcript_hint)
+            # Extract UUID from filename like "6c51b07a-2a06-4e3f-b1d9-f05ecf156ad2.jsonl"
+            stem = hint_path.name.split(".")[0]
+            if stem and stem not in search_uuids:
+                search_uuids.append(stem)
+            # Also check if the hint path itself exists (or its .deleted version)
+            if hint_path.exists():
+                return hint_path
+            deleted = list(hint_path.parent.glob(f"{hint_path.name}.deleted.*")) if hint_path.parent.exists() else []
+            if deleted:
+                return sorted(deleted, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+        # Search known locations
+        search_dirs = [
+            pathlib.Path.home() / ".openclaw" / "agents" / agent_id / "sessions",
+            pathlib.Path.home() / ".openclaw" / "workspace",
+        ]
+
+        for base in search_dirs:
+            if not base.exists():
+                continue
+            for uuid in search_uuids:
+                exact = base / f"{uuid}.jsonl"
+                if exact.exists():
+                    return exact
+                deleted = list(base.glob(f"{uuid}.jsonl.deleted.*"))
+                if deleted:
+                    return sorted(deleted, key=lambda p: p.stat().st_mtime, reverse=True)[0]
+
+        return None
+
+    def _read_transcript_assistant_messages(self, transcript_path: "pathlib.Path") -> list[str]:
+        """Read all assistant message texts from a JSONL transcript file."""
+        messages = []
+        try:
+            with open(transcript_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if entry.get("type") != "message":
+                        continue
+                    msg = entry.get("message", {})
+                    if msg.get("role") != "assistant":
+                        continue
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        # Extract text blocks, skip thinking blocks
+                        text_parts = []
+                        for block in content:
+                            if block.get("type") == "text":
+                                text_parts.append(block.get("text", ""))
+                        content = "\n".join(text_parts)
+                    if content:
+                        messages.append(content)
+        except Exception as e:
+            logger.debug("[WORKER] Error reading transcript %s: %s", transcript_path, e)
+        return messages
+
+    async def _resolve_transcript_path(self, session_key: str) -> Optional[str]:
+        """Query Gateway sessions_list to get the transcript path for a session."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_list",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-resolve-transcript",
+                        "args": {"limit": 50, "messageLimit": 0}
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                data = await resp.json()
+                if data.get("ok"):
+                    result = data.get("result", {})
+                    details = result.get("details", result)
+                    for s in details.get("sessions", []):
+                        if s.get("key") == session_key:
+                            return s.get("transcriptPath")
+        except Exception as e:
+            logger.debug("[WORKER] Error resolving transcript path: %s", e)
+        return None
+
     async def _check_session_status(
         self,
         session_key: str,
-        spawn_time: Optional[float] = None
+        spawn_time: Optional[float] = None,
+        transcript_hint: Optional[str] = None,
     ) -> Optional[dict[str, Any]]:
-        """Check session status via Gateway sessions_history API.
+        """Check if a worker session has completed.
 
-        Uses sessions_history to check if the session has an assistant response.
-        If the session exists and has an assistant message, it's completed.
-        Falls back to transcript file if sessions_history fails.
-        
-        Args:
-            session_key: The session key to check
-            spawn_time: Unix timestamp when the worker was spawned (for timeout handling)
+        Primary method: find transcript file on disk (including .deleted files).
+        Fallback: Gateway sessions_history API.
         """
+        import pathlib
+
         try:
-            # Try Gateway sessions_history — works even after session cleanup
-            history = await self._get_session_history(session_key)
-            
-            if history is not None:
-                # Got history — check for assistant messages
-                has_assistant = any(
-                    msg.get("role") == "assistant"
-                    for msg in history
-                )
-                if has_assistant:
-                    return {"completed": True, "success": True, "error": ""}
-                # No assistant message yet
-                if spawn_time is not None:
-                    age_minutes = (time.time() - spawn_time) / 60
-                    if age_minutes > 15:
-                        return {"completed": True, "success": False, "error": "Session stale (no assistant response)"}
-                return {"completed": False, "success": False, "error": ""}
-            
-            # sessions_history failed — fall back to transcript file
-            transcript_path = await self._get_transcript_path(session_key)
-            if transcript_path:
-                import pathlib
-                transcript = pathlib.Path(transcript_path)
-                if transcript.exists():
-                    mtime = transcript.stat().st_mtime
-                    age_seconds = time.time() - mtime
-                    if age_seconds < 15:
-                        return {"completed": False, "success": False, "error": ""}
-                    
-                    has_assistant = False
-                    with open(transcript, "r") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                entry = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            if entry.get("type") == "message":
-                                msg = entry.get("message", {})
-                                if msg.get("role") == "assistant":
-                                    has_assistant = True
-                    
-                    if has_assistant:
-                        return {"completed": True, "success": True, "error": ""}
-                    if age_seconds > 300:
-                        return {"completed": True, "success": False, "error": "Session stale"}
+            # Method 1: Find transcript on disk (most reliable)
+            transcript = self._find_transcript_file(session_key, transcript_hint=transcript_hint)
+            if transcript:
+                mtime = transcript.stat().st_mtime
+                age_seconds = time.time() - mtime
+
+                # .deleted files are always completed
+                is_deleted = ".deleted." in transcript.name
+                if is_deleted:
+                    messages = self._read_transcript_assistant_messages(transcript)
+                    return {
+                        "completed": True,
+                        "success": len(messages) > 0,
+                        "error": "" if messages else "No assistant response in deleted transcript",
+                    }
+
+                # Live transcript — check if still being written
+                if age_seconds < 15:
                     return {"completed": False, "success": False, "error": ""}
 
-            # No transcript, no history — check age
+                messages = self._read_transcript_assistant_messages(transcript)
+                if messages:
+                    return {"completed": True, "success": True, "error": ""}
+                if age_seconds > 300:
+                    return {"completed": True, "success": False, "error": "Session stale (no response)"}
+                return {"completed": False, "success": False, "error": ""}
+
+            # Method 2: Try Gateway sessions_history
+            history = await self._get_session_history(session_key)
+            if history is not None and len(history) > 0:
+                has_assistant = any(msg.get("role") == "assistant" for msg in history)
+                if has_assistant:
+                    return {"completed": True, "success": True, "error": ""}
+                if spawn_time and (time.time() - spawn_time) / 60 > 15:
+                    return {"completed": True, "success": False, "error": "Session stale"}
+                return {"completed": False, "success": False, "error": ""}
+
+            # Method 3: Check age-based fallback
             if spawn_time is not None:
                 age_minutes = (time.time() - spawn_time) / 60
                 if age_minutes < 5:
@@ -709,49 +813,29 @@ class WorkerManager:
             logger.debug("[WORKER] Error querying Gateway sessions_history: %s", e)
             return None
 
-    async def _get_transcript_path(self, session_key: str) -> Optional[str]:
-        """Get transcript file path for a session via Gateway sessions_list API."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_list",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-status-check",
-                        "args": {
-                            "limit": 50,
-                            "messageLimit": 0,
-                        }
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10)
-                )
-                data = await resp.json()
-                if not data.get("ok"):
-                    return None
-                
-                result = data.get("result", {})
-                details = result.get("details", result)
-                sessions = details.get("sessions", [])
-                
-                for s in sessions:
-                    if s.get("key") == session_key:
-                        return s.get("transcriptPath")
-                
-                return None
-        except Exception as e:
-            logger.warning("[WORKER] Error querying Gateway for session transcript: %s", e)
-            return None
-
     async def _fetch_session_summary(
-        self, session_key: str
+        self, session_key: str, transcript_hint: Optional[str] = None
     ) -> Optional[str]:
         """Fetch the last assistant message from a completed session as its summary.
 
-        Tries Gateway sessions_history first, then falls back to reading the
-        JSONL transcript file directly (avoids cross-agent permission issues).
+        Primary: read transcript file on disk (including .deleted files).
+        Fallback: Gateway sessions_history API.
         """
-        # --- Attempt 1: Gateway API ---
+        # --- Attempt 1: Read transcript directly from disk ---
+        transcript = self._find_transcript_file(session_key, transcript_hint=transcript_hint)
+        if transcript:
+            messages = self._read_transcript_assistant_messages(transcript)
+            if messages:
+                text = messages[-1]  # Last assistant message
+                if len(text) > 16000:
+                    text = text[:16000] + "..."
+                logger.info(
+                    "[WORKER] Read transcript summary for %s (len=%d, file=%s)",
+                    session_key, len(text), transcript.name,
+                )
+                return text
+
+        # --- Attempt 2: Gateway sessions_history API ---
         try:
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
@@ -775,81 +859,21 @@ class WorkerManager:
                     messages = details.get("messages", [])
 
                     for msg in reversed(messages):
-                        role = msg.get("role", "")
-                        if role == "assistant":
+                        if msg.get("role") == "assistant":
                             text = msg.get("content", "")
                             if isinstance(text, list):
                                 text = " ".join(
                                     b.get("text", "") for b in text
                                     if b.get("type") == "text"
                                 )
-                            if text and len(text) > 8000:
-                                text = text[:8000] + "..."
+                            if text and len(text) > 16000:
+                                text = text[:16000] + "..."
                             if text:
                                 return text
         except Exception as e:
             logger.debug("[WORKER] Gateway sessions_history failed: %s", e)
 
-        # --- Attempt 2: Read JSONL transcript directly via Gateway-resolved path ---
-        return await self._read_transcript_summary(session_key)
-
-    async def _read_transcript_summary(self, session_key: str) -> Optional[str]:
-        """Read the last assistant message from a session's JSONL transcript file.
-
-        Uses Gateway API to find the actual transcript path.
-        """
-        import pathlib
-
-        try:
-            transcript_path = await self._get_transcript_path(session_key)
-            if not transcript_path:
-                return None
-            
-            transcript = pathlib.Path(transcript_path)
-            if not transcript.exists():
-                return None
-
-            last_assistant_text = None
-
-            with open(transcript, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    if entry.get("type") != "message":
-                        continue
-                    msg = entry.get("message", {})
-                    if msg.get("role") != "assistant":
-                        continue
-
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = " ".join(
-                            b.get("text", "") for b in content
-                            if isinstance(b, dict) and b.get("type") == "text"
-                        )
-                    if content:
-                        last_assistant_text = content
-
-            if last_assistant_text and len(last_assistant_text) > 8000:
-                last_assistant_text = last_assistant_text[:8000] + "..."
-
-            if last_assistant_text:
-                logger.info(
-                    "[WORKER] Read transcript summary for %s (len=%d, file=%s)",
-                    session_key, len(last_assistant_text), transcript.name,
-                )
-
-            return last_assistant_text
-
-        except Exception as e:
-            logger.debug("[WORKER] Failed to read transcript: %s", e)
-            return None
+        return None
 
     async def _handle_worker_completion(
         self,
