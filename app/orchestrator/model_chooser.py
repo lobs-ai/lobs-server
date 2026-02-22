@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
 from app.orchestrator.model_router import (
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
+    MODEL_ROUTER_TIER_LOCAL_KEY,
     MODEL_ROUTER_TIER_CHEAP_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
@@ -67,6 +68,7 @@ class ModelChooser:
             task,
             tier_overrides=cfg.get("tiers"),
             available_models=cfg.get("available_models"),
+            purpose=purpose,
         )
 
         candidates = list(decision.models)
@@ -106,6 +108,7 @@ class ModelChooser:
 
     async def _load_runtime_config(self) -> dict[str, Any]:
         keys = (
+            MODEL_ROUTER_TIER_LOCAL_KEY,
             MODEL_ROUTER_TIER_CHEAP_KEY,
             MODEL_ROUTER_TIER_STANDARD_KEY,
             MODEL_ROUTER_TIER_STRONG_KEY,
@@ -128,6 +131,7 @@ class ModelChooser:
             return None
 
         explicit_tiers = {
+            "local": _list_value(MODEL_ROUTER_TIER_LOCAL_KEY),
             "cheap": _list_value(MODEL_ROUTER_TIER_CHEAP_KEY),
             "standard": _list_value(MODEL_ROUTER_TIER_STANDARD_KEY),
             "strong": _list_value(MODEL_ROUTER_TIER_STRONG_KEY),
@@ -136,6 +140,7 @@ class ModelChooser:
         catalog_raw = rows.get(OPENCLAW_MODEL_CATALOG_KEY)
         derived = self._derive_tiers_from_catalog(catalog_raw if isinstance(catalog_raw, dict) else {})
         tiers = {
+            "local": explicit_tiers["local"] or derived.get("local"),
             "cheap": explicit_tiers["cheap"] or derived["cheap"],
             "standard": explicit_tiers["standard"] or derived["standard"],
             "strong": explicit_tiers["strong"] or derived["strong"],
@@ -155,9 +160,10 @@ class ModelChooser:
     def _derive_tiers_from_catalog(catalog: dict[str, Any]) -> dict[str, list[str] | None]:
         models = catalog.get("models") if isinstance(catalog.get("models"), list) else []
         if not models:
-            return {"cheap": None, "standard": None, "strong": None, "available_models": None}
+            return {"local": None, "cheap": None, "standard": None, "strong": None, "available_models": None}
 
         available: list[str] = []
+        local: list[str] = []
         cheap: list[str] = []
         standard: list[str] = []
         strong: list[str] = []
@@ -172,6 +178,10 @@ class ModelChooser:
             available.append(name)
             lower = name.lower()
             billing = str(item.get("billing_type", "")).lower()
+
+            # Detect local/self-hosted models (ollama, vllm, local providers)
+            if any(k in lower for k in ("ollama", "vllm", "local", "lmstudio")):
+                local.append(name)
 
             if billing == "subscription":
                 cheap.append(name)
@@ -193,6 +203,7 @@ class ModelChooser:
             return out
 
         available = _dedupe(available)
+        local = _dedupe(local)
         cheap = _dedupe(cheap)
         standard = _dedupe(standard)
         strong = _dedupe(strong)
@@ -205,6 +216,7 @@ class ModelChooser:
             cheap = standard[:]
 
         return {
+            "local": local or None,
             "cheap": cheap or None,
             "standard": standard or None,
             "strong": strong or None,

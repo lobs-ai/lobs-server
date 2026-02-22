@@ -12,10 +12,12 @@ from app.orchestrator.sweep_arbitrator import DEFAULT_DAILY_BUDGET
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator import OrchestratorEngine
 from app.orchestrator.model_router import (
+    MODEL_ROUTER_TIER_LOCAL_KEY,
     MODEL_ROUTER_TIER_CHEAP_KEY,
     MODEL_ROUTER_TIER_STANDARD_KEY,
     MODEL_ROUTER_TIER_STRONG_KEY,
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
+    LOCAL_ELIGIBLE_PURPOSES,
 )
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
@@ -35,6 +37,7 @@ PROVIDER_CONFIG_KEY = "provider_config"
 
 
 class ModelTierConfig(BaseModel):
+    local: list[str] | None = Field(default=None)
     cheap: list[str] | None = Field(default=None)
     standard: list[str] | None = Field(default=None)
     strong: list[str] | None = Field(default=None)
@@ -57,6 +60,47 @@ class InitiativeDecisionRequest(BaseModel):
     selected_project_id: str | None = None
     decision_summary: str | None = None
     learning_feedback: str | None = None
+
+
+class BatchInitiativeDecision(BaseModel):
+    initiative_id: str
+    decision: str  # approve|defer|reject
+    revised_title: str | None = None
+    revised_description: str | None = None
+    selected_agent: str | None = None
+    selected_project_id: str | None = None
+    decision_summary: str | None = None
+    learning_feedback: str | None = None
+
+
+class LobsNewTask(BaseModel):
+    """A task Lobs creates directly during batch review — ideas inspired by the initiatives."""
+    title: str
+    notes: str | None = None
+    project_id: str | None = None
+    agent: str | None = None
+    status: str = "active"
+    work_state: str = "not_started"
+    owner: str = "lobs"
+    rationale: str | None = None  # why Lobs is creating this
+
+
+class LobsNewTask(BaseModel):
+    """A task Lobs creates directly during batch review — ideas inspired by the initiatives."""
+    title: str
+    notes: str | None = None
+    project_id: str | None = None
+    agent: str | None = None
+    status: str = "active"
+    work_state: str = "not_started"
+    owner: str = "lobs"
+    rationale: str | None = None  # why Lobs is creating this
+
+
+class BatchInitiativeDecisionRequest(BaseModel):
+    decisions: list[BatchInitiativeDecision] = Field(default_factory=list)
+    new_tasks: list[LobsNewTask] = Field(default_factory=list)
+    new_tasks: list[LobsNewTask] = Field(default_factory=list)
 
 
 class RuntimeIntervalsUpdate(BaseModel):
@@ -179,6 +223,7 @@ async def get_model_router_config(
     """Get runtime model-router config stored in DB."""
 
     keys = (
+        MODEL_ROUTER_TIER_LOCAL_KEY,
         MODEL_ROUTER_TIER_CHEAP_KEY,
         MODEL_ROUTER_TIER_STANDARD_KEY,
         MODEL_ROUTER_TIER_STRONG_KEY,
@@ -191,11 +236,13 @@ async def get_model_router_config(
 
     return {
         "tiers": {
+            "local": rows.get(MODEL_ROUTER_TIER_LOCAL_KEY),
             "cheap": rows.get(MODEL_ROUTER_TIER_CHEAP_KEY),
             "standard": rows.get(MODEL_ROUTER_TIER_STANDARD_KEY),
             "strong": rows.get(MODEL_ROUTER_TIER_STRONG_KEY),
         },
         "available_models": rows.get(MODEL_ROUTER_AVAILABLE_MODELS_KEY),
+        "local_eligible_purposes": sorted(LOCAL_ELIGIBLE_PURPOSES),
     }
 
 
@@ -213,6 +260,7 @@ async def update_model_router_config(
     updates: dict[str, list[str] | None] = {}
 
     if payload.tiers is not None:
+        updates[MODEL_ROUTER_TIER_LOCAL_KEY] = payload.tiers.local
         updates[MODEL_ROUTER_TIER_CHEAP_KEY] = payload.tiers.cheap
         updates[MODEL_ROUTER_TIER_STANDARD_KEY] = payload.tiers.standard
         updates[MODEL_ROUTER_TIER_STRONG_KEY] = payload.tiers.strong
@@ -423,6 +471,190 @@ async def decide_initiative(
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post("/intelligence/initiatives/batch-decide")
+async def batch_decide_initiatives(
+    payload: BatchInitiativeDecisionRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """
+    Process multiple initiative decisions in a single batch.
+    
+    This is the RECOMMENDED way for Lobs to review initiatives:
+    1. Fetch all pending: GET /intelligence/initiatives?status=proposed
+    2. Review as a batch with full context (spot duplicates, prioritize)
+    3. Submit all decisions together: POST /intelligence/initiatives/batch-decide
+    
+    The batch processor is forgiving:
+    - Missing initiative IDs are reported as errors but don't block the batch
+    - Each decision is processed independently
+    - Full stats returned: approved/deferred/rejected counts
+    
+    Returns:
+        {
+            "total": <number of decisions in request>,
+            "processed": <number successfully processed>,
+            "approved": <number approved and converted to tasks>,
+            "deferred": <number deferred for later>,
+            "rejected": <number rejected>,
+            "failed": <number that failed (not found or validation error)>,
+            "results": [
+                {
+                    "initiative_id": "...",
+                    "status": "approved|deferred|rejected",
+                    "task_id": "..." (only if approved),
+                    ...
+                },
+                ...
+            ],
+            "errors": [
+                {"initiative_id": "...", "error": "..."},
+                ...
+            ]
+        }
+    """
+    if not payload.decisions and not payload.new_tasks:
+        raise HTTPException(status_code=400, detail="No decisions or new tasks provided")
+
+    # Track stats
+    total = len(payload.decisions)
+    processed = 0
+    approved = 0
+    deferred = 0
+    rejected = 0
+    failed = 0
+    
+    results: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    # Pre-fetch all initiatives in one query
+    if payload.decisions:
+        ids = [d.initiative_id for d in payload.decisions]
+        result = await db.execute(
+            select(AgentInitiative).where(AgentInitiative.id.in_(ids))
+        )
+        initiatives_by_id = {i.id: i for i in result.scalars().all()}
+    else:
+        initiatives_by_id = {}
+
+    engine = InitiativeDecisionEngine(db)
+
+    for d in payload.decisions:
+        initiative_id = d.initiative_id
+        
+        # Handle missing initiatives gracefully
+        if initiative_id not in initiatives_by_id:
+            errors.append({
+                "initiative_id": initiative_id,
+                "error": "Initiative not found"
+            })
+            failed += 1
+            continue
+        
+        initiative = initiatives_by_id[initiative_id]
+        
+        try:
+            r = await engine.decide(
+                initiative,
+                decision=d.decision,
+                revised_title=d.revised_title,
+                revised_description=d.revised_description,
+                selected_agent=d.selected_agent,
+                selected_project_id=d.selected_project_id,
+                decision_summary=d.decision_summary,
+                learning_feedback=d.learning_feedback,
+                decided_by="lobs",
+            )
+            results.append(r)
+            processed += 1
+            
+            # Track decision type
+            if d.decision == "approve":
+                approved += 1
+            elif d.decision == "defer":
+                deferred += 1
+            elif d.decision == "reject":
+                rejected += 1
+                
+        except (ValueError, PermissionError) as e:
+            errors.append({
+                "initiative_id": initiative_id,
+                "error": str(e)
+            })
+            failed += 1
+
+    # --- Create Lobs-originated tasks ---
+    from app.models import Task as TaskModel, Project as ProjectModel, ControlLoopEvent
+    import uuid as _uuid
+    from datetime import datetime as _dt, timezone as _tz
+
+    created_tasks: list[dict[str, Any]] = []
+
+    for new_task in payload.new_tasks:
+        if new_task.project_id:
+            proj = await db.get(ProjectModel, new_task.project_id)
+            if not proj:
+                errors.append({"error": f"Project not found: {new_task.project_id}", "task_title": new_task.title})
+                failed += 1
+                continue
+
+        task_id = str(_uuid.uuid4())
+        notes_parts = []
+        if new_task.rationale:
+            notes_parts.append(f"Created by Lobs during batch initiative review.\nRationale: {new_task.rationale}")
+        if new_task.notes:
+            notes_parts.append(new_task.notes)
+
+        task = TaskModel(
+            id=task_id,
+            title=new_task.title,
+            status=new_task.status,
+            work_state=new_task.work_state,
+            owner=new_task.owner,
+            project_id=new_task.project_id,
+            agent=new_task.agent,
+            notes="\n\n".join(notes_parts) if notes_parts else None,
+        )
+        db.add(task)
+
+        db.add(ControlLoopEvent(
+            id=str(_uuid.uuid4()),
+            event_type="TaskCreated",
+            status="pending",
+            payload={
+                "task_id": task_id,
+                "project_id": new_task.project_id,
+                "title": new_task.title,
+                "agent": new_task.agent,
+                "source": "lobs_batch_review",
+                "created_at": _dt.now(_tz.utc).isoformat(),
+            },
+        ))
+
+        created_tasks.append({
+            "task_id": task_id,
+            "title": new_task.title,
+            "project_id": new_task.project_id,
+            "agent": new_task.agent,
+        })
+
+    await db.commit()
+
+    return {
+        "total": total,
+        "processed": processed,
+        "approved": approved,
+        "deferred": deferred,
+        "rejected": rejected,
+        "failed": failed,
+        "results": results,
+        "errors": errors,
+        "new_tasks": {
+            "created": len(created_tasks),
+            "tasks": created_tasks,
+        },
+    }
 
 
 @router.get("/intelligence/budgets")
