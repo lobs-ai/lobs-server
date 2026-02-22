@@ -46,6 +46,7 @@ from app.orchestrator.config import (
     GATEWAY_SESSION_KEY,
 )
 from app.orchestrator.model_chooser import ModelChooser
+from app.orchestrator.token_extractor import extract_usage_from_transcript
 from app.orchestrator.escalation_enhanced import EscalationManagerEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
@@ -984,6 +985,7 @@ class WorkerManager:
             model_audit=worker_info.model_audit,
             commit_sha=None,  # Sub-agents handle their own commits
             files_modified=None,
+            session_key=worker_info.child_session_key,
         )
 
         # Update worker status (mark inactive if no other workers)
@@ -1062,9 +1064,38 @@ class WorkerManager:
         model_audit: dict[str, Any] | None = None,
         commit_sha: str | None = None,
         files_modified: list[str] | None = None,
+        session_key: str | None = None,
     ) -> None:
-        """Record worker run to history table."""
+        """Record worker run to history table with actual token usage."""
         try:
+            # Extract token usage from session transcript
+            token_usage = None
+            if session_key:
+                try:
+                    token_usage = extract_usage_from_transcript(session_key)
+                    if token_usage and token_usage.has_data:
+                        logger.info(
+                            "[WORKER] Token usage for %s: %d in, %d out, $%.4f",
+                            worker_id, token_usage.input_tokens,
+                            token_usage.output_tokens, token_usage.estimated_cost_usd,
+                        )
+                except Exception as e:
+                    logger.warning("[WORKER] Failed to extract token usage: %s", e)
+
+            task_log = {"model_router": model_audit} if model_audit else {}
+            if token_usage and token_usage.has_data:
+                task_log["token_usage"] = {
+                    "input_tokens": token_usage.input_tokens,
+                    "output_tokens": token_usage.output_tokens,
+                    "cache_read_tokens": token_usage.cache_read_tokens,
+                    "cache_write_tokens": token_usage.cache_write_tokens,
+                    "total_tokens": token_usage.total_tokens,
+                    "estimated_cost_usd": round(token_usage.estimated_cost_usd, 6),
+                    "message_count": token_usage.message_count,
+                    "actual_model": token_usage.model,
+                    "actual_provider": token_usage.provider,
+                }
+
             run = WorkerRun(
                 worker_id=worker_id,
                 task_id=task_id,
@@ -1075,7 +1106,7 @@ class WorkerManager:
                 timeout_reason="exit_code_" + str(exit_code) if not succeeded else None,
                 source="orchestrator-gateway",
                 model=model,
-                task_log={"model_router": model_audit} if model_audit else None,
+                task_log=task_log or None,
                 summary=summary,
                 commit_shas=[commit_sha] if commit_sha else None,
                 files_modified=files_modified,
@@ -1089,20 +1120,32 @@ class WorkerManager:
                     subscription_models=(model_audit or {}).get("subscription_models", []),
                     subscription_providers=(model_audit or {}).get("subscription_providers", []),
                 )
+                # Use actual token counts if available
+                input_tokens = token_usage.input_tokens if token_usage else 0
+                output_tokens = token_usage.output_tokens if token_usage else 0
+                cached_tokens = token_usage.cache_read_tokens if token_usage else 0
+                cost = token_usage.estimated_cost_usd if token_usage else 0.0
+
                 await _safe_log_usage_event(
                     self.db,
                     source="orchestrator-worker",
-                    model=model,
+                    model=token_usage.model or model if token_usage else model,
+                    provider=token_usage.provider if token_usage and token_usage.provider else None,
                     route_type=route_type,
                     task_type="task_execution",
-                    requests=1,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cached_tokens=cached_tokens,
+                    requests=token_usage.message_count if token_usage and token_usage.message_count else 1,
                     status="success" if succeeded else "error",
+                    estimated_cost_usd=cost,
                     error_code=None if succeeded else f"exit_code_{exit_code}",
                     metadata={
                         "task_id": task_id,
                         "worker_id": worker_id,
                         "model_router": model_audit,
                         "duration_seconds": duration,
+                        "session_key": session_key,
                     },
                 )
 
@@ -1278,65 +1321,88 @@ class WorkerManager:
         return created
 
     async def _process_sweep_review_results(self, summary: str) -> None:
-        """Process Lobs sweep review output: create tasks from approved initiatives."""
+        """Process Lobs sweep review output: create tasks from approved initiatives.
+        
+        Uses InitiativeDecisionEngine to ensure proper audit trail, feedback reflections,
+        and task creation with full governance.
+        """
         try:
+            from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
+            
             payload = self._extract_json(summary)
             decisions = payload.get("decisions", [])
             if not isinstance(decisions, list):
+                logger.warning("[SWEEP_REVIEW] No decisions array found in LLM output")
                 return
 
-            created = 0
+            engine = InitiativeDecisionEngine(self.db)
+            processed = 0
+            approved = 0
+            deferred = 0
+            rejected = 0
+
             for d in decisions:
                 if not isinstance(d, dict):
                     continue
+                    
                 initiative_id = d.get("initiative_id")
                 decision = d.get("decision", "").lower()
+                
+                if not initiative_id or decision not in {"approve", "defer", "reject"}:
+                    logger.warning(
+                        "[SWEEP_REVIEW] Skipping invalid decision: id=%s decision=%s",
+                        initiative_id, decision
+                    )
+                    continue
 
-                # Update initiative status in DB
-                if initiative_id:
-                    initiative = await self.db.get(AgentInitiative, initiative_id)
-                    if initiative:
-                        if decision == "approve":
-                            initiative.status = "approved"
-                        elif decision == "reject":
-                            initiative.status = "rejected"
-                        elif decision == "defer":
-                            initiative.status = "deferred"
-                        initiative.rationale = (initiative.rationale or "") + f" | Lobs: {d.get('reason', '')}"
+                initiative = await self.db.get(AgentInitiative, initiative_id)
+                if not initiative:
+                    logger.warning("[SWEEP_REVIEW] Initiative not found: %s", initiative_id)
+                    continue
 
-                # Create task for approved initiatives
-                if decision == "approve":
-                    task_title = d.get("task_title") or d.get("title", "Untitled")
-                    task_notes = d.get("task_notes") or d.get("reason", "")
-                    owner_agent = d.get("owner_agent", "programmer")
-                    priority = d.get("priority", "medium")
-                    # Try to get project_id from initiative
-                    project_id = d.get("project_id")
-                    if not project_id and initiative:
-                        # Use a default project or leave None
-                        project_id = None
+                # Use the decision engine to ensure full governance
+                try:
+                    result = await engine.decide(
+                        initiative,
+                        decision=decision,
+                        revised_title=d.get("task_title"),
+                        revised_description=d.get("task_notes"),
+                        selected_agent=d.get("owner_agent"),
+                        selected_project_id=d.get("project_id"),
+                        decision_summary=d.get("reason"),
+                        learning_feedback=None,  # LLM didn't provide learning feedback
+                        decided_by="lobs",
+                    )
+                    
+                    processed += 1
+                    if decision == "approve":
+                        approved += 1
+                    elif decision == "defer":
+                        deferred += 1
+                    elif decision == "reject":
+                        rejected += 1
+                    
+                    logger.debug(
+                        "[SWEEP_REVIEW] Processed initiative %s: decision=%s task_id=%s",
+                        initiative_id[:8], decision, result.get("task_id")
+                    )
+                    
+                except Exception as e:
+                    logger.error(
+                        "[SWEEP_REVIEW] Failed to process initiative %s: %s",
+                        initiative_id[:8], e, exc_info=True
+                    )
 
-                    priority_map = {"high": 1, "medium": 2, "low": 3}
-
-                    self.db.add(Task(
-                        id=str(uuid.uuid4()),
-                        title=task_title[:200],
-                        notes=f"[Auto-created from initiative sweep]\n\nInitiative: {initiative_id or 'unknown'}\n\n{task_notes}",
-                        status="active",
-                        work_state="not_started",
-                        agent=owner_agent,
-                        project_id=project_id,
-                        priority=priority_map.get(priority, 2),
-                    ))
-                    created += 1
-
+            # Commit happens inside engine.decide(), but we should commit the batch
             await self.db.commit()
+            
             logger.info(
-                "[SWEEP_REVIEW] Processed %d decisions, created %d tasks",
-                len(decisions), created,
+                "[SWEEP_REVIEW] Processed %d decisions: approved=%d deferred=%d rejected=%d",
+                processed, approved, deferred, rejected
             )
+            
         except Exception as e:
-            logger.warning("[SWEEP_REVIEW] Failed to process results: %s", e, exc_info=True)
+            logger.error("[SWEEP_REVIEW] Failed to process sweep review results: %s", e, exc_info=True)
             await self.db.rollback()
 
     @staticmethod

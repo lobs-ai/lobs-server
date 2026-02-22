@@ -5,8 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import case, func, select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -373,4 +373,163 @@ async def sync_openclaw_model_catalog(db: AsyncSession = Depends(get_db)) -> dic
         "routing_policy": current_policy,
         "synced_subscription_models": subscription_models,
         "synced_subscription_providers": subscription_providers,
+    }
+
+
+@router.get("/dashboard")
+async def get_usage_dashboard(
+    window: str = Query("month", description="day, week, or month"),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Dashboard-optimized usage view: tasks per model/provider, tokens, costs.
+    
+    Returns everything the Mission Control dashboard needs in a single call:
+    - Summary totals (tasks, tokens, cost)
+    - Per-provider breakdown (tasks, tokens, cost, avg latency)
+    - Per-model breakdown (tasks, tokens, cost)
+    - Daily time series for charts
+    - Top models by task count and by cost
+    """
+    now = datetime.now(timezone.utc)
+    start = _window_start(window, now)
+
+    # === Totals ===
+    totals_q = await db.execute(
+        select(
+            func.coalesce(func.sum(ModelUsageEventModel.requests), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.cached_tokens), 0),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0),
+            func.count(ModelUsageEventModel.id),
+        ).where(
+            ModelUsageEventModel.timestamp >= start,
+            ModelUsageEventModel.source == "orchestrator-worker",
+        )
+    )
+    total_requests, total_input, total_output, total_cached, total_cost, total_events = totals_q.one()
+
+    # === Per-provider ===
+    provider_q = await db.execute(
+        select(
+            ModelUsageEventModel.provider,
+            func.count(ModelUsageEventModel.id).label("task_count"),
+            func.coalesce(func.sum(ModelUsageEventModel.requests), 0).label("requests"),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.cached_tokens), 0).label("cached_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0).label("cost"),
+            func.avg(ModelUsageEventModel.latency_ms).label("avg_latency"),
+            func.coalesce(
+                func.sum(case((ModelUsageEventModel.status != "success", 1), else_=0)),
+                0,
+            ).label("error_count"),
+        )
+        .where(
+            ModelUsageEventModel.timestamp >= start,
+            ModelUsageEventModel.source == "orchestrator-worker",
+        )
+        .group_by(ModelUsageEventModel.provider)
+        .order_by(func.count(ModelUsageEventModel.id).desc())
+    )
+
+    by_provider = []
+    for row in provider_q.all():
+        by_provider.append({
+            "provider": row.provider,
+            "task_count": int(row.task_count),
+            "requests": int(row.requests),
+            "input_tokens": int(row.input_tokens),
+            "output_tokens": int(row.output_tokens),
+            "cached_tokens": int(row.cached_tokens),
+            "total_tokens": int(row.input_tokens) + int(row.output_tokens),
+            "estimated_cost_usd": round(float(row.cost), 4),
+            "avg_latency_ms": round(float(row.avg_latency), 1) if row.avg_latency else None,
+            "error_count": int(row.error_count),
+        })
+
+    # === Per-model ===
+    model_q = await db.execute(
+        select(
+            ModelUsageEventModel.provider,
+            ModelUsageEventModel.model,
+            ModelUsageEventModel.route_type,
+            func.count(ModelUsageEventModel.id).label("task_count"),
+            func.coalesce(func.sum(ModelUsageEventModel.requests), 0).label("requests"),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.cached_tokens), 0).label("cached_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0).label("cost"),
+            func.avg(ModelUsageEventModel.latency_ms).label("avg_latency"),
+        )
+        .where(
+            ModelUsageEventModel.timestamp >= start,
+            ModelUsageEventModel.source == "orchestrator-worker",
+        )
+        .group_by(ModelUsageEventModel.provider, ModelUsageEventModel.model, ModelUsageEventModel.route_type)
+        .order_by(func.count(ModelUsageEventModel.id).desc())
+    )
+
+    by_model = []
+    for row in model_q.all():
+        by_model.append({
+            "provider": row.provider,
+            "model": row.model,
+            "route_type": row.route_type,
+            "task_count": int(row.task_count),
+            "requests": int(row.requests),
+            "input_tokens": int(row.input_tokens),
+            "output_tokens": int(row.output_tokens),
+            "cached_tokens": int(row.cached_tokens),
+            "total_tokens": int(row.input_tokens) + int(row.output_tokens),
+            "estimated_cost_usd": round(float(row.cost), 4),
+            "avg_latency_ms": round(float(row.avg_latency), 1) if row.avg_latency else None,
+        })
+
+    # === Daily time series ===
+    daily_q = await db.execute(
+        select(
+            func.date(ModelUsageEventModel.timestamp).label("day"),
+            ModelUsageEventModel.provider,
+            func.count(ModelUsageEventModel.id).label("task_count"),
+            func.coalesce(func.sum(ModelUsageEventModel.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(ModelUsageEventModel.estimated_cost_usd), 0.0).label("cost"),
+        )
+        .where(
+            ModelUsageEventModel.timestamp >= start,
+            ModelUsageEventModel.source == "orchestrator-worker",
+        )
+        .group_by(func.date(ModelUsageEventModel.timestamp), ModelUsageEventModel.provider)
+        .order_by(func.date(ModelUsageEventModel.timestamp).asc())
+    )
+
+    daily_series = []
+    for row in daily_q.all():
+        daily_series.append({
+            "date": str(row.day),
+            "provider": row.provider,
+            "task_count": int(row.task_count),
+            "input_tokens": int(row.input_tokens),
+            "output_tokens": int(row.output_tokens),
+            "total_tokens": int(row.input_tokens) + int(row.output_tokens),
+            "estimated_cost_usd": round(float(row.cost), 4),
+        })
+
+    return {
+        "window": window,
+        "period_start": start.isoformat(),
+        "period_end": now.isoformat(),
+        "totals": {
+            "task_count": int(total_events),
+            "requests": int(total_requests),
+            "input_tokens": int(total_input),
+            "output_tokens": int(total_output),
+            "cached_tokens": int(total_cached),
+            "total_tokens": int(total_input) + int(total_output),
+            "estimated_cost_usd": round(float(total_cost), 4),
+        },
+        "by_provider": by_provider,
+        "by_model": by_model,
+        "daily_series": daily_series,
     }
