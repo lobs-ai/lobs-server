@@ -799,26 +799,23 @@ class OrchestratorEngine:
                         summary_lines.append(f"  - Risks: {', '.join(findings['risks'][:1])}")
                     summary_lines.append("")
             
-            # Add initiative summary
+            # Add full initiative details
             if initiatives:
                 summary_lines.append("### Proposed Initiatives")
                 summary_lines.append(f"{len(initiatives)} initiative(s) proposed:")
                 summary_lines.append("")
                 
-                # Group by status/policy lane
-                proposed = [i for i in initiatives if i.status == "proposed"]
-                approved = [i for i in initiatives if i.status == "approved"]
-                needs_review = [i for i in initiatives if i.policy_lane == "lobs-pm-review"]
-                
-                if approved:
-                    summary_lines.append(f"- **Auto-approved:** {len(approved)} low-risk initiatives")
-                if proposed and needs_review:
-                    summary_lines.append(f"- **Pending review:** {len(needs_review)} initiatives need PM decision")
-                    for initiative in needs_review[:5]:  # Show first 5
-                        summary_lines.append(f"  - {initiative.title} (category: {initiative.category}, risk: {initiative.risk_tier})")
-                
-                summary_lines.append("")
-                summary_lines.append("Use the dashboard or API to review and approve/defer/reject initiatives.")
+                for i, initiative in enumerate(initiatives, 1):
+                    summary_lines.append(f"**{i}. {initiative.title}**")
+                    summary_lines.append(f"  - Proposed by: {initiative.proposed_by_agent}")
+                    summary_lines.append(f"  - Category: {initiative.category}")
+                    summary_lines.append(f"  - Risk tier: {initiative.risk_tier}")
+                    summary_lines.append(f"  - Status: {initiative.status}")
+                    if initiative.owner_agent:
+                        summary_lines.append(f"  - Suggested owner: {initiative.owner_agent}")
+                    if initiative.description:
+                        summary_lines.append(f"  - Description: {initiative.description}")
+                    summary_lines.append("")
             else:
                 summary_lines.append("### Proposed Initiatives")
                 summary_lines.append("No new initiatives proposed in this cycle.")
@@ -826,13 +823,28 @@ class OrchestratorEngine:
             summary_text = "\n".join(summary_lines)
             
             # Spawn a session for the main agent to process reflection results
-            task_prompt = (
-                "## Reflection Cycle Results\n\n"
-                "The orchestrator just completed a strategic reflection cycle. "
-                "Review the findings below and take appropriate action — create tasks, "
-                "update priorities, fix routing issues, or dismiss findings as needed.\n\n"
-                + summary_text
-            )
+            task_prompt = f"""## Reflection Cycle Results
+
+The orchestrator just completed a strategic reflection cycle. Review the findings below and decide what to act on.
+
+**Your job:**
+1. Review each proposed initiative
+2. For initiatives worth pursuing, create tasks via the lobs-server API:
+   ```bash
+   ~/.openclaw/workspace/scripts/lobs-api.sh create-task "title" --project <project-id> --agent <agent-type> --notes "description"
+   ```
+3. Skip or note any initiatives that are low-value, duplicates, or premature
+4. If any findings reveal urgent issues, flag them
+
+**Guidelines:**
+- Not every initiative needs a task — use judgment on what's actually valuable
+- Group related initiatives into single tasks where it makes sense
+- Assign to the right agent type (programmer, researcher, writer, reviewer, architect)
+- For research initiatives, assign to researcher
+- For code changes, assign to programmer
+- Don't create tasks for things that are already in progress
+
+{summary_text}"""
             
             async with aiohttp.ClientSession() as session:
                 caller_key = f"{GATEWAY_SESSION_KEY}-reflection-summary-{uuid.uuid4().hex[:8]}"
