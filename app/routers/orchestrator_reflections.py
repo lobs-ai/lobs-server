@@ -20,18 +20,19 @@ class AutonomyBudgetUpdate(BaseModel):
 
 
 class InitiativeDecisionRequest(BaseModel):
-    decision: str  # approve|defer|reject
+    decision: str  # approve|defer|reject|escalate
     revised_title: str | None = None
     revised_description: str | None = None
     selected_agent: str | None = None
     selected_project_id: str | None = None
     decision_summary: str | None = None
     learning_feedback: str | None = None
+    decided_by: str = "lobs"  # lobs or rafe
 
 
 class BatchInitiativeDecision(BaseModel):
     initiative_id: str
-    decision: str  # approve|defer|reject
+    decision: str  # approve|defer|reject|escalate
     revised_title: str | None = None
     revised_description: str | None = None
     selected_agent: str | None = None
@@ -237,10 +238,10 @@ async def decide_initiative(
             selected_project_id=payload.selected_project_id,
             decision_summary=payload.decision_summary,
             learning_feedback=payload.learning_feedback,
-            decided_by="lobs",
+            decided_by=payload.decided_by,
         )
         return result
-    except ValueError as e:
+    except (ValueError, PermissionError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
 

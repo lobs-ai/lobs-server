@@ -715,7 +715,7 @@ class WorkerMonitor:
                 initiative_id = d.get("initiative_id")
                 decision = d.get("decision", "").lower()
                 
-                if not initiative_id or decision not in {"approve", "defer", "reject"}:
+                if not initiative_id or decision not in {"approve", "defer", "reject", "escalate"}:
                     logger.warning(
                         "[SWEEP_REVIEW] Skipping invalid decision: id=%s decision=%s",
                         initiative_id, decision

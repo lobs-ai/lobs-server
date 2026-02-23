@@ -1,7 +1,13 @@
-"""Lobs-driven initiative decisioning and conversion to executable work."""
+"""Initiative decisioning and conversion to executable work.
+
+Tier A/B: Lobs has full autonomy — approve, rescope, create tasks.
+Tier C: Lobs CANNOT approve. Must escalate to Rafe. Task only created
+        after Rafe explicitly approves.
+"""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -10,7 +16,9 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AgentCapability, AgentInitiative, AgentReflection, InitiativeDecisionRecord, Project, Task
+from app.models import AgentCapability, AgentInitiative, AgentReflection, InboxItem, InitiativeDecisionRecord, Project, Task
+
+logger = logging.getLogger(__name__)
 
 
 class InitiativeDecisionEngine:
@@ -76,14 +84,79 @@ class InitiativeDecisionEngine:
         capability_gap: bool = False,
     ) -> dict[str, Any]:
         decision = decision.strip().lower()
-        if decision not in {"approve", "defer", "reject"}:
-            raise ValueError("decision must be approve|defer|reject")
+        decided_by = (decided_by or "lobs").strip().lower()
 
-        if (decided_by or "").strip().lower() != "lobs":
-            raise PermissionError("initiative decisions must be finalized by lobs")
+        # Validate decision values
+        valid_decisions = {"approve", "defer", "reject", "escalate"}
+        if decision not in valid_decisions:
+            raise ValueError(f"decision must be one of: {', '.join(sorted(valid_decisions))}")
 
-        if decision == "approve" and initiative.status not in {"lobs_review", "proposed"}:
-            raise ValueError(f"initiative in status '{initiative.status}' is not approvable")
+        # Only lobs and rafe can make decisions
+        if decided_by not in {"lobs", "rafe"}:
+            raise PermissionError("initiative decisions must be made by lobs or rafe")
+
+        # --- TIER C GATE: Lobs CANNOT approve tier-C items ---
+        is_tier_c = (initiative.risk_tier or "").upper() == "C"
+        if is_tier_c and decision == "approve" and decided_by == "lobs":
+            # Auto-convert to escalation: create Rafe inbox item instead
+            logger.info(
+                "[DECISION] Tier-C approval blocked for Lobs, auto-escalating to Rafe: %s",
+                initiative.title,
+            )
+            decision = "escalate"
+
+        # Handle escalation: create Rafe inbox item, set status to awaiting_rafe
+        if decision == "escalate":
+            title = (revised_title or initiative.title or "Untitled initiative").strip()
+            description = (revised_description or initiative.description or "").strip()
+
+            initiative.selected_agent = selected_agent or await self.suggest_agent(initiative)
+            initiative.selected_project_id = selected_project_id or await self._default_project_id()
+            initiative.decision_summary = decision_summary
+            initiative.status = "awaiting_rafe"
+            initiative.approved_by = None  # Not yet approved
+
+            # Create Rafe inbox item
+            await self._create_rafe_inbox_item(
+                initiative,
+                lobs_recommendation=decision_summary or "Lobs recommends approval",
+                revised_title=revised_title,
+                revised_description=revised_description,
+            )
+
+            self.db.add(
+                InitiativeDecisionRecord(
+                    id=str(uuid.uuid4()),
+                    initiative_id=initiative.id,
+                    sweep_id=sweep_id,
+                    decision="escalate",
+                    decided_by=decided_by,
+                    decision_summary=decision_summary,
+                    overlap_with_ids=overlap_with_ids or [],
+                    contradiction_with_ids=contradiction_with_ids or [],
+                    capability_gap=bool(capability_gap),
+                    source_reflection_ids=[initiative.source_reflection_id] if initiative.source_reflection_id else [],
+                    task_id=None,
+                )
+            )
+
+            await self.db.commit()
+            return {
+                "initiative_id": initiative.id,
+                "status": "awaiting_rafe",
+                "task_id": None,
+                "selected_agent": initiative.selected_agent,
+                "selected_project_id": initiative.selected_project_id,
+                "escalated": True,
+            }
+
+        # Standard approve/defer/reject flow
+        if decision == "approve":
+            if initiative.status not in {"lobs_review", "proposed", "awaiting_rafe"}:
+                raise ValueError(f"initiative in status '{initiative.status}' is not approvable")
+            # Rafe approval required for tier-C in awaiting_rafe
+            if initiative.status == "awaiting_rafe" and decided_by != "rafe":
+                raise PermissionError("only rafe can approve tier-C initiatives in awaiting_rafe status")
 
         title = (revised_title or initiative.title or "Untitled initiative").strip()
         description = (revised_description or initiative.description or "").strip()
@@ -176,6 +249,54 @@ class InitiativeDecisionEngine:
         )
         self.db.add(task)
         return task
+
+    async def _create_rafe_inbox_item(
+        self,
+        initiative: AgentInitiative,
+        *,
+        lobs_recommendation: str,
+        revised_title: str | None = None,
+        revised_description: str | None = None,
+    ) -> None:
+        """Create an inbox item for Rafe to review a tier-C initiative."""
+        title = revised_title or initiative.title or "Untitled"
+        description = revised_description or initiative.description or "(no description)"
+
+        content = (
+            f"## 🚨 Tier-C Initiative — Needs Your Approval\n\n"
+            f"**{title}**\n\n"
+            f"**Proposed by:** {initiative.proposed_by_agent}\n"
+            f"**Category:** {initiative.category}\n"
+            f"**Risk tier:** {initiative.risk_tier}\n\n"
+            f"**Description:**\n{description}\n\n"
+            f"---\n\n"
+            f"**Lobs's recommendation:** {lobs_recommendation}\n\n"
+        )
+        if revised_title and revised_title != initiative.title:
+            content += f"**Lobs rescoped title:** {revised_title}\n"
+        if revised_description and revised_description != initiative.description:
+            content += f"**Lobs rescoped scope:** {revised_description}\n"
+
+        content += (
+            f"\n---\n\n"
+            f"**To approve:** Tell Lobs to approve initiative `{initiative.id[:8]}`\n"
+            f"**To reject:** Tell Lobs to reject initiative `{initiative.id[:8]}`\n"
+        )
+
+        self.db.add(
+            InboxItem(
+                id=str(uuid.uuid4()),
+                title=f"🚨 [APPROVAL NEEDED] {title[:70]}",
+                content=content,
+                is_read=False,
+                summary=f"tier_c_escalation:{initiative.id}",
+                modified_at=datetime.now(timezone.utc),
+            )
+        )
+        logger.info(
+            "[DECISION] Created Rafe inbox item for tier-C initiative: %s",
+            initiative.id[:8],
+        )
 
     async def _record_feedback_reflection(
         self,
