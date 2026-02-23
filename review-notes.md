@@ -1,65 +1,67 @@
-# Diagnostic Review Notes — Task `diag_186a9af5-9385-4135-996a-e176fe0e6746_1771884271`
+# Diagnostic Review Notes — Task `diag_C469A3C2-79B5-431E-A171-142979360E5D_1771885518`
 
 ## Scope
-Analyze repeated failure of original task `186a9af5-9385-4135-996a-e176fe0e6746` ("Document database migration strategy and create migration template").
+Analyze repeated failure of original task `C469A3C2-79B5-431E-A171-142979360E5D` ("Add knowledge_entries table and Knowledge API").
 
 ## Findings
 
 ### 1) Root cause (primary)
-**This is an orchestration/session-lifecycle failure, not a content/task-definition failure.**
+**This is an orchestrator/session execution failure, not a missing-design or coding-requirements problem.**
 
 Evidence:
-- Task row records infra-style failure reason, not domain error:
-  - `tasks.failure_reason = "Session not found"`
-  - `tasks.retry_count = 3`, `tasks.escalation_tier = 3`
-- All worker attempts failed with **no model output**:
-  - `worker_runs` for this task all have `succeeded=0`, `timeout_reason=exit_code_-1`
-  - Token usage was `0 in, 0 out` for all runs (logs around lines `28755`, `29161`, `29497`, `29827`)
-- Failure happens after ~5 minutes per attempt, matching fallback logic in session checker:
-  - `worker_1771883059_186a9af5`: started `21:44:20`, ended `21:49:21`
-  - Similar ~5 min for all retries
-  - In `app/orchestrator/worker.py` (`_check_session_status`), when transcript/history cannot be found, after age >=5 min it returns `{"error": "Session not found"}` (around lines `767-782`).
+- Task state shows infra-style terminal reason, not implementation error:
+  - `tasks.failure_reason = "No assistant response in deleted transcript"`
+  - `retry_count = 3`, `escalation_tier = 3`
+- All attempts died the same way, across different agents/models:
+  - `worker_runs` IDs 9259, 9261, 9262, 9263 all have `timeout_reason = exit_code_-1`, `succeeded = 0`
+  - token usage is `0 input / 0 output` for all runs
+  - switched from `programmer` to `architect` with no behavior change
+- The failure string maps directly to orchestrator logic in `app/orchestrator/worker.py` (and `worker_gateway.py`):
+  - `_check_session_status()` treats a `.deleted` transcript with no assistant message as terminal failure: `"No assistant response in deleted transcript"`.
 
 Interpretation:
-- Spawn succeeded (runId/childSessionKey created), but status polling later cannot find transcript or session history for that key.
-- The same pattern reproduces across agents/models (writer -> researcher; OpenAI + Anthropic), so this is unlikely to be prompt/content-specific.
+- Workers are being spawned, but sessions are ending/being deleted before any assistant response is captured.
+- Because there are no tokens and no assistant output, this is upstream of task implementation (session lifecycle / runtime stability / gateway integration), not caused by the knowledge-system spec itself.
 
-### 2) Contributing issue
-**Observability/persistence is degraded by intermittent SQLite lock errors**, which reduces diagnostic fidelity and slows recovery.
-
-Evidence:
-- `logs/server.log` shows repeated `sqlite3.OperationalError: database is locked` when persisting reflection output (`app/orchestrator/worker.py:_persist_reflection_output`).
+### 2) Contributing factors
+- **Intermittent SQLite lock contention** is visible in the same timeframe (reflection/usage persistence warnings), which degrades reliability and observability during retries.
+- Task complexity is high (schema + API + indexer + scheduler + deprecations in one request), so when orchestration is unstable, long jobs are more likely to repeatedly fail before first usable output.
 
 ## Recommended fix / workaround
 
-### Immediate operational workaround
-1. **Retry as a constrained run**: single agent (`writer` or `programmer`), single model, single attempt, with reduced queue contention.
-2. **Reduce dependence on session-history lookup** by requiring direct artifact output in repo files for this task (migration strategy doc + template script) so completion can be validated from filesystem.
-3. If possible, **restart/health-check Gateway session services** before retrying this task to clear stale session-state.
+### Immediate workaround (to get delivery moving)
+1. **Modify the task into smaller slices** and run sequentially:
+   - A: migration + model only
+   - B: API router endpoints only
+   - C: indexer/sync service
+   - D: periodic scheduler + deprecation flags/docs
+2. **Run first retry as a constrained execution** (single agent/model, low contention window).
+3. **Preflight session health** (ensure spawned session remains queryable and transcript path is stable before long execution).
 
-### Code-level fixes (recommended)
-1. **Harden session completion detection in `worker.py` / `worker_gateway.py`**:
-   - Distinguish `session lookup miss` vs `spawn/runtime crash` vs `transcript missing`.
-   - Persist structured failure metadata (childSessionKey, runId, gateway response excerpt, poll attempts, age).
-2. **Add pre-fail verification before returning `Session not found`**:
-   - Re-query `sessions_list`/history with short retry/backoff window before classifying as terminal.
-3. **Add DB write retry/backoff** for reflection/task-result persistence to avoid losing diagnostics under lock contention.
+### Platform/orchestrator fix (recommended)
+1. In `worker.py` / `worker_gateway.py`, distinguish:
+   - deleted transcript with process crash
+   - deleted transcript due cleanup race
+   - genuinely completed-but-empty transcript
+2. Add short retry/backoff before terminalizing on deleted-empty transcript.
+3. Persist richer diagnostics on failure (runId, childSessionKey, transcript path, poll attempts, last gateway responses).
+4. Add retry/backoff for DB commit on non-critical reflection/usage writes to reduce lock-related cascading instability.
 
 ## Retry / modify / escalate decision
 **Decision: MODIFY then RETRY.**
 
-- The task itself is valid and straightforward documentation work.
-- Current failures indicate infra/session tracking instability.
-- Escalate only if a constrained retry still returns `Session not found` after session-lifecycle fixes/workaround.
+- The original implementation request is valid (design doc exists at `~/lobs-shared-memory/docs/designs/unified-knowledge-system.md`).
+- Current failures are dominated by session/orchestration reliability, not spec ambiguity.
+- If a modified/sliced retry still fails with deleted-empty transcripts, **escalate to infrastructure/orchestrator owners** before further feature retries.
 
 ## Suggested handoff
 ```json
 {
   "to": "programmer",
   "initiative": "code-review-fixes",
-  "title": "Fix orchestrator session-not-found false terminal failures",
-  "context": "Task 186a9af5 failed 3 times with failure_reason='Session not found' and zero token usage across attempts. See review-notes.md and app/orchestrator/worker.py _check_session_status (~lines 767-782).",
-  "acceptance": "Worker status checker no longer prematurely terminal-fails as 'Session not found' without structured diagnostics; fallback recheck/backoff implemented; tests cover missing transcript/history + delayed session visibility paths.",
+  "title": "Harden orchestrator handling of deleted transcripts with no assistant output",
+  "context": "Task C469A3C2 failed 4 consecutive runs (programmer/architect) with failure_reason='No assistant response in deleted transcript', exit_code_-1, and zero token usage. See review-notes.md and app/orchestrator/worker.py::_check_session_status.",
+  "acceptance": "Orchestrator no longer prematurely terminal-fails on deleted-empty transcripts without retry/recheck; structured diagnostics are persisted for each failure; tests cover deleted transcript + no assistant + delayed session visibility paths.",
   "files": ["app/orchestrator/worker.py", "app/orchestrator/worker_gateway.py", "tests/"]
 }
 ```
