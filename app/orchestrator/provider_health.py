@@ -460,7 +460,12 @@ class ProviderHealthRegistry:
         return True
 
     async def _persist_state(self) -> None:
-        """Persist current state to DB."""
+        """Persist current state to DB.
+        
+        Uses its own DB session to avoid corrupting the caller's transaction
+        when fired via asyncio.create_task().
+        """
+        from app.database import AsyncSessionLocal
         try:
             config = {
                 "disabled_providers": sorted(list(self.disabled_providers)),
@@ -468,23 +473,24 @@ class ProviderHealthRegistry:
                 "persisted_at": datetime.now(timezone.utc).isoformat(),
             }
             
-            result = await self.db.execute(
-                select(OrchestratorSetting).where(
-                    OrchestratorSetting.key == PROVIDER_HEALTH_CONFIG_KEY
+            async with AsyncSessionLocal() as db:
+                result = await db.execute(
+                    select(OrchestratorSetting).where(
+                        OrchestratorSetting.key == PROVIDER_HEALTH_CONFIG_KEY
+                    )
                 )
-            )
-            row = result.scalar_one_or_none()
-            
-            if row:
-                row.value = config
-            else:
-                row = OrchestratorSetting(
-                    key=PROVIDER_HEALTH_CONFIG_KEY,
-                    value=config,
-                )
-                self.db.add(row)
-            
-            await self.db.commit()
+                row = result.scalar_one_or_none()
+                
+                if row:
+                    row.value = config
+                else:
+                    row = OrchestratorSetting(
+                        key=PROVIDER_HEALTH_CONFIG_KEY,
+                        value=config,
+                    )
+                    db.add(row)
+                
+                await db.commit()
             self.last_persist = time.time()
             
             logger.debug("[PROVIDER_HEALTH] Persisted state to DB")
