@@ -1,0 +1,13 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "title": "Add database schema for learning system (task_outcomes, learned_patterns, pattern_applications)",
+  "context": "Implementing Milestone 1 of agent learning system. See design doc at docs/agent-learning-system.md and detailed spec at docs/handoffs/learning-system-milestone-1.md (Task 1). Need 3 new tables: task_outcomes (captures what happened after task completion including human feedback), learned_patterns (extracted lessons from outcomes), pattern_applications (tracks when patterns were applied to tasks). This enables closed-loop learning where agents improve from past outcomes.",
+  "acceptance": "Migration runs successfully. TaskOutcome, LearnedPattern, PatternApplication models added to app/models.py with all fields per spec. All indexes created (agent_type, outcome_type, active, etc). Pydantic schemas added. Can create and query records via ORM. Unit tests verify model creation and relationships.",
+  "files": [
+    "docs/agent-learning-system.md",
+    "docs/handoffs/learning-system-milestone-1.md",
+    "app/models.py",
+    "app/schemas.py"
+  ]
+}

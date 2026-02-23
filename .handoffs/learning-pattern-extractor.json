@@ -1,0 +1,13 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "title": "Implement pattern extraction service to analyze outcomes and create reusable lessons",
+  "context": "Implementing Milestone 1 of agent learning system. Create PatternExtractor service that analyzes TaskOutcomes and extracts LearnedPatterns. See design doc at docs/agent-learning-system.md and detailed spec at docs/handoffs/learning-system-milestone-1.md (Task 3). Start with rule-based pattern matching for programmer agent: 'missing tests' feedback → 'require_tests' pattern, 'no docstrings' → 'document_functions' pattern, etc. This converts raw feedback into reusable lessons that can be injected into future prompts. DEPENDS ON: Database schema + outcome tracker handoffs must complete first.",
+  "acceptance": "PatternExtractor service created at app/services/pattern_extractor.py with methods: extract_from_outcome, extract_batch, detect_programmer_patterns. Rule-based patterns defined for common programmer feedback (missing tests, no docs, unclear names, missing error handling). CLI command works: python -m app.cli.learning extract --agent programmer. LearnedPattern records created from outcomes with human feedback. Unit tests verify pattern detection logic. Integration test: create outcome with 'missing tests' feedback → pattern extracted → pattern queryable.",
+  "files": [
+    "docs/agent-learning-system.md",
+    "docs/handoffs/learning-system-milestone-1.md",
+    "app/services/pattern_extractor.py",
+    "app/cli/learning.py"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "title": "Add metrics endpoint to track learning system effectiveness and improvement over time",
+  "context": "Implementing Milestone 1 of agent learning system. Create API endpoint to measure if the learning system is actually improving agent performance. See design doc at docs/agent-learning-system.md section 'Success Metrics'. Need to track: code review acceptance rate before/after learning injection, pattern application count, pattern effectiveness (success rate when applied), learning coverage (% of tasks with learnings injected). This provides observability into whether agents are getting better. DEPENDS ON: All prior learning handoffs.",
+  "acceptance": "Endpoint GET /api/learning/stats?agent=programmer returns: total outcomes, rejection rate, acceptance rate (overall + with/without learnings), pattern count (total, active, high-confidence), top patterns by application count, effectiveness scores. Endpoint GET /api/learning/patterns?agent=programmer&active=true returns list of active learned patterns. Unit tests verify metric calculations. Can verify in browser that stats show expected data after running some tasks.",
+  "files": [
+    "docs/agent-learning-system.md",
+    "app/routers/learning.py",
+    "app/schemas.py"
+  ]
+}

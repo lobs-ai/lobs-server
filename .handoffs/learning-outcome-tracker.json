@@ -1,0 +1,14 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "title": "Implement outcome tracking service to capture task success/failure/rejection with human feedback",
+  "context": "Implementing Milestone 1 of agent learning system. Create OutcomeTracker service that automatically records task outcomes. See design doc at docs/agent-learning-system.md and detailed spec at docs/handoffs/learning-system-milestone-1.md (Task 2). This hooks into task completion flow in worker.py to capture: success/failure, human review feedback, error types, retry counts. Enables tracking what happened with each task so patterns can be extracted later. DEPENDS ON: Database schema handoff must complete first.",
+  "acceptance": "OutcomeTracker service created at app/services/outcome_tracker.py with methods: record_outcome, record_success, record_failure, record_rejection. Integrated into worker.py to auto-record on task completion. Integrated into task review endpoint to capture human feedback when review_state changes. TaskOutcome records created for all completed tasks. Unit tests verify outcome recording. Integration test verifies end-to-end flow (task completes → outcome recorded → queryable).",
+  "files": [
+    "docs/agent-learning-system.md",
+    "docs/handoffs/learning-system-milestone-1.md",
+    "app/services/outcome_tracker.py",
+    "app/orchestrator/worker.py",
+    "app/routers/tasks.py"
+  ]
+}

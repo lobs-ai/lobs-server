@@ -1,0 +1,14 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "title": "Implement context injection to add relevant past learnings into agent prompts",
+  "context": "Implementing Milestone 1 of agent learning system. Create LearningContextInjector service that queries relevant LearnedPatterns before task execution and injects them into agent prompts. See design doc at docs/agent-learning-system.md and detailed spec at docs/handoffs/learning-system-milestone-1.md (Task 4). Integrates with Prompter.build_task_prompt() to add 'Lessons from Past Work' section. Queries patterns by agent_type, filters by confidence threshold, selects top 3-5 most relevant based on task category/keywords. This closes the learning loop: past mistakes → extracted patterns → injected into future prompts → better outcomes. DEPENDS ON: All prior learning handoffs (schema, tracker, extractor).",
+  "acceptance": "LearningContextInjector service created at app/services/learning_context_injector.py with methods: inject_context, query_relevant_patterns, format_for_prompt. Integrated into app/orchestrator/prompter.py to automatically inject learnings. Configuration flag LEARNING_INJECTION_ENABLED (default: True). Prompts include 'Lessons from Past Work' section when relevant patterns exist. Can verify injection in worker run logs. Unit tests verify pattern querying and formatting. Integration test: create pattern → start task → verify pattern in prompt → task completes successfully.",
+  "files": [
+    "docs/agent-learning-system.md",
+    "docs/handoffs/learning-system-milestone-1.md",
+    "app/services/learning_context_injector.py",
+    "app/orchestrator/prompter.py",
+    "app/orchestrator/config.py"
+  ]
+}

@@ -2,9 +2,10 @@
 
 High-level overview of the backend system design, data flow, and key components.
 
-**Last Updated:** 2026-02-22
+**Last Updated:** 2026-02-23
 
-**Recent Architectural Changes (Feb 21-22):**
+**Recent Architectural Changes (Feb 21-23):**
+- **Agent learning system** — Closed-loop feedback from task outcomes to prompt improvement (design complete, ready for implementation)
 - **5-tier model routing** — Upgraded to micro/small/medium/standard/strong tier system with Ollama auto-discovery
 - **Reflection system improvements** — Domain-specific prompts, isolated sessions, manual trigger endpoint
 - **Token usage tracking** — Extract and track token usage from session transcripts
@@ -21,7 +22,8 @@ lobs-server is the central backend for the Lobs multi-agent system. It provides:
 2. **WebSocket Server** — Real-time chat and updates
 3. **Task Orchestrator** — Autonomous task execution via AI agent workers
 4. **Project Manager** — Intelligent task delegation and approval workflows
-5. **Data Storage** — SQLite database for all system state
+5. **Agent Learning System** — Closed-loop feedback from outcomes to behavior improvement
+6. **Data Storage** — SQLite database for all system state
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -86,6 +88,7 @@ lobs-server/
 │   │   ├── calendar.py
 │   │   ├── status.py
 │   │   ├── agents.py
+│   │   ├── learning.py        # Learning system stats and management
 │   │   ├── orchestrator.py
 │   │   └── ...
 │   ├── orchestrator/           # Task execution engine
@@ -96,12 +99,15 @@ lobs-server/
 │   │   ├── monitor_enhanced.py      # Stuck task detection
 │   │   ├── escalation_enhanced.py   # Multi-tier failure handling
 │   │   ├── circuit_breaker.py       # Infrastructure failure isolation
+│   │   ├── lesson_extractor.py      # Extract learnings from outcomes
+│   │   ├── prompt_enhancer.py       # Inject learnings into prompts
 │   │   ├── agent_tracker.py         # Agent status tracking
 │   │   ├── prompter.py              # Task prompt builder
 │   │   └── registry.py              # Agent config loader
 │   ├── services/
 │   │   ├── chat_manager.py    # WebSocket connection management
-│   │   └── openclaw_bridge.py # Webhook handler for agent responses
+│   │   ├── openclaw_bridge.py # Webhook handler for agent responses
+│   │   └── outcome_tracker.py # Track task outcomes for learning
 │   ├── models.py              # SQLAlchemy database models
 │   ├── schemas.py             # Pydantic request/response schemas
 │   ├── database.py            # Database session management
@@ -391,6 +397,85 @@ User sends message → POST /api/chat/sessions/:key/messages
 
 ---
 
+### 8. Agent Learning System
+
+**Purpose:** Closed-loop learning where agents improve from task outcomes and human feedback
+
+**Status:** Design complete, implementation pending (see `docs/agent-learning-system.md`)
+
+**How it works:**
+
+```
+Task Execution
+      ↓
+Task Outcome tracked → TaskOutcome record created
+      ↓
+Human Feedback → Update outcome with review state + feedback
+      ↓
+Lesson Extraction → Analyze patterns, create OutcomeLearnings
+      ↓
+Next Task → Query relevant learnings → Inject into prompt
+      ↓
+Improved Performance → Measure success rate
+```
+
+**Key components:**
+
+#### OutcomeTracker (`app/orchestrator/outcome_tracker.py`)
+- Creates `TaskOutcome` records after task completion
+- Captures success/failure, duration, retry count
+- Updates with human feedback (review state, feedback text, category)
+- Infers task category and complexity
+- Computes context hash for similarity matching
+
+#### LessonExtractor (`app/orchestrator/lesson_extractor.py`)
+- Analyzes `TaskOutcome` records to detect patterns
+- Rule-based pattern matching (v1):
+  - "missing tests" feedback → "require_tests" learning
+  - "unclear naming" → "descriptive_names" learning
+  - "missing error handling" → "error_handling" learning
+- Creates `OutcomeLearning` records with prompt injection text
+- Updates learning confidence based on new evidence
+
+#### PromptEnhancer (`app/orchestrator/prompt_enhancer.py`)
+- Queries relevant learnings before task execution
+- Matches on task category, complexity, keywords
+- Selects top N learnings (sorted by confidence)
+- Injects into prompt (prefix/inline/structured styles)
+- Tracks which learnings were applied
+
+#### StrategyManager (`app/orchestrator/strategy_manager.py`)
+- A/B testing framework for prompt strategies
+- Tracks performance per strategy variant
+- Auto-adjusts weights based on success rate
+- Converges to best-performing approach
+
+**Database tables:**
+- `task_outcomes` — Structured outcome records (success/failure, feedback, metrics)
+- `outcome_learnings` — Extracted lessons with prompt injection text
+- `prompt_strategies` — A/B testing variants and performance tracking
+
+**Metrics tracked:**
+- Review acceptance rate (baseline vs current)
+- Learning confidence distribution
+- Application rate (% of tasks receiving learnings)
+- Strategy performance comparison
+
+**Integration points:**
+- `worker.py` — Calls OutcomeTracker after task completion
+- `prompter.py` — Calls PromptEnhancer before task execution
+- `/api/tasks/{id}/feedback` — Endpoint for human review feedback
+- `/api/learning/stats` — Learning system metrics
+
+**Rollout plan:**
+1. **Milestone 1:** Outcome tracking + memory injection for programmer (demonstrating measurable improvement)
+2. **Milestone 2:** Strategy A/B testing framework
+3. **Milestone 3:** Expand to researcher agent, advanced pattern detection
+
+**See:** `docs/agent-learning-system.md` for complete design
+
+---
+
 ## Data Flow Patterns
 
 ### Task Lifecycle
@@ -656,6 +741,87 @@ Orchestrator → OpenClaw Gateway /tools/invoke
 
 ---
 
+## Agent Learning System (In Development)
+
+**Status:** Design complete, implementation pending  
+**Design Doc:** [docs/agent-learning-system.md](docs/agent-learning-system.md)  
+**Handoffs:** [HANDOFFS.md](HANDOFFS.md)  
+
+### Overview
+
+Closed-loop learning system where agents track task outcomes (success/failure, human feedback) and automatically improve their approaches over time.
+
+### Architecture
+
+```
+Task Execution → Outcome Tracking → Lesson Extraction → Prompt Enhancement
+      ↑                                                          ↓
+      └──────────────────────────────────────────────────────────┘
+                    (feedback loop)
+```
+
+### Key Components
+
+**1. Outcome Tracker** (`app/orchestrator/outcome_tracker.py`)
+- Captures structured task outcomes after completion
+- Records human feedback from code reviews, quality ratings
+- Classifies tasks by category (feature/bug/test/docs)
+- Stores outcomes in `task_outcomes` table
+
+**2. Lesson Extractor** (`app/orchestrator/lesson_extractor.py`)
+- Analyzes outcome patterns using rule-based matching
+- Extracts actionable lessons from feedback (e.g., "missing tests" → "require tests")
+- Creates `outcome_learnings` records with prompt injections
+- Updates learning confidence based on reinforcement
+
+**3. Prompt Enhancer** (`app/orchestrator/prompt_enhancer.py`)
+- Queries relevant learnings before task execution
+- Selects top N learnings by confidence and relevance
+- Injects learnings into task prompts (prefix/inline/structured styles)
+- Tracks which learnings were applied to which tasks
+
+**4. Strategy Manager** (`app/orchestrator/strategy_manager.py`)
+- A/B testing framework for different prompt strategies
+- Weighted random strategy selection per task
+- Performance tracking and automatic weight adjustment
+- Converges to best-performing strategy over time
+
+### Data Model
+
+**New Tables:**
+- `task_outcomes` — Structured outcome records (success/failure, feedback, metrics)
+- `outcome_learnings` — Extracted lessons with prompt injections and confidence scores
+- `prompt_strategies` — A/B testing variants with performance tracking
+
+### Rollout Plan
+
+**Milestone 1:** Outcome tracking + memory injection for programmer (2-3 weeks)
+- Goal: >10% improvement in code review acceptance rate
+- Ship: Database schema, outcome tracking, rule-based extraction, prompt injection
+
+**Milestone 2:** Strategy A/B testing framework (+1 week)
+- Goal: Identify best prompt enhancement strategy
+- Ship: Strategy manager, weighted selection, performance comparison
+
+**Milestone 3:** Expand to researcher agent (+1-2 weeks)
+- Goal: Generalize learning system beyond programmer
+- Ship: Researcher patterns, cross-agent learnings
+
+### Design Principles
+
+- **Simplicity first** — Rule-based pattern matching, not ML
+- **Incremental rollout** — One agent, one metric, one feedback loop
+- **Explicit > implicit** — Visible, auditable, debuggable learnings
+- **Reversible decisions** — Learnings can be deactivated, prompts can revert
+
+### Success Metrics
+
+- **Primary:** Code review acceptance rate improvement >10%
+- **Secondary:** Learning coverage, confidence distribution, application frequency
+- **A/B validation:** Control group (no learnings) vs treatment group
+
+---
+
 ## Related Documentation
 
 - **[AGENTS.md](AGENTS.md)** — Complete API reference and development guide
@@ -664,7 +830,8 @@ Orchestrator → OpenClaw Gateway /tools/invoke
 - **[docs/project-manager-agent.md](docs/project-manager-agent.md)** — Project manager design
 - **[docs/tiered-approval-system.md](docs/tiered-approval-system.md)** — Approval workflow design
 - **[docs/README.md](docs/README.md)** — Documentation index
+- **[docs/agent-learning-system.md](docs/agent-learning-system.md)** — Agent learning system design
 
 ---
 
-*Last updated: 2026-02-14*
+*Last updated: 2026-02-23*
