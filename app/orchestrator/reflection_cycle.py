@@ -416,11 +416,21 @@ You're not just answering technical questions. You're the team's scout — findi
 - What human workflows could be automated that nobody's tried yet?
 - What would it take to make an AI agent truly proactive (not just reactive)?
 
-### Business & Product Research
+### Business & Product Opportunities
 - Who would pay for a personal AI workforce? What do they need?
 - What's the right pricing model for an AI agent platform?
-- What are the legal/privacy considerations for a personal AI assistant product?
+- What standalone products could we build with this AI agent infrastructure?
+- What tools do students need that don't exist yet? (course management, study aids, GSI tools, grade automation)
+- What tools do developers need that agents could build better than humans?
+- What "agent-built companies" could we spin up? (like Flock for social events — what else?)
+- What micro-SaaS products could a team of AI agents maintain and operate?
 - Research successful developer tools and what made them succeed
+
+### Rafe-Specific Opportunities
+- What tools would help a grad student / GSI be more productive?
+- What PrairieLearn / Canvas integrations would save hours of work?
+- What would help with Microsoft internship prep?
+- What esports team management tools exist? What's missing?
 
 ### Technology Scouting
 - What new APIs, services, or platforms could Lobs integrate with?
@@ -433,6 +443,8 @@ You're not just answering technical questions. You're the team's scout — findi
 - "Research proactive AI assistant patterns — what triggers should cause agents to act without being asked?"
 - "Market analysis: who's building personal AI agents and what's their pricing/positioning?"
 - "Research: what would it take to give Lobs access to a user's email/calendar securely?"
+- "Identify 5 micro-SaaS ideas that a team of AI agents could build and maintain autonomously"
+- "Research what tools GSIs use for grading/office hours — find gaps agents could fill"
 
 **Practical research is fine too** — investigating real technical questions, evaluating tools for actual decisions. Just balance it with bigger strategic thinking.""",
 
@@ -512,11 +524,19 @@ You're not just writing docs for existing features. You're thinking about how th
 - What documentation would make the open-source community want to contribute?
 - How should we document the "build your own agent team" experience?
 
+### Business & Product Content
+- What would a PAW landing page look like? What copy would convert?
+- What pitch materials would help Rafe present this to investors or professors?
+- What case studies could we write about the "agent-built company" concept?
+- How would we document the ROI of a personal AI workforce?
+
 **Examples of what we WANT:**
 - "Design an agent daily briefing format — a morning summary of what happened overnight and what's planned today"
 - "Write the PAW product pitch deck — positioning, value props, target users"
 - "Create a 'build your own agent' tutorial that walks through customizing agent behavior"
 - "Design notification templates for different event types (task done, blocked, needs attention)"
+- "Draft a blog post: 'How I Built a Personal AI Workforce as a Grad Student'"
+- "Write copy for a landing page that explains PAW to non-technical users"
 
 **Practical docs are fine too** — documenting real gaps, writing guides people need. Just balance it with bigger thinking about communication and product.""",
     }
@@ -562,21 +582,32 @@ For each proposed initiative:
 
 **CONTEXT:** We're building one of the best AI agent setups in the world. This isn't a maintenance project — it's an ambitious platform that will become PAW (Personal AI Workforce), a product people pay for. Think accordingly.
 
+**WHO WE'RE BUILDING FOR:** Rafe is a CS grad student at UMich, GSI for EECS 281/291, varsity Rocket League player, interning at Microsoft this summer, and building this entire system as a side project. His time is incredibly scarce. Every idea should be evaluated through the lens of: "Does this save Rafe time, make him more effective, or move his goals forward?"
+
 **QUALITY MATTERS.** Propose as many ideas as you genuinely believe in. An empty list is better than noise, but don't hold back good ideas.
 
 **What we WANT to see:**
-1. **New features and capabilities** — things that make Lobs dramatically more useful
-2. **Product ideas** — features that would make PAW compelling as a product
+1. **New features and capabilities** — things that make Lobs dramatically more useful as a personal assistant
+2. **Product ideas** — features that would make PAW compelling as a product people pay for
 3. **System-level improvements** — changes that make the entire agent team more effective
-4. **Business ideas** — new ways to use this technology, new markets, new applications
-5. **Cross-project opportunities** — connections between projects that create new value
-6. **Novel uses of agents** — things nobody else is doing with multi-agent systems
+4. **Business ideas** — standalone tools, apps, or products Rafe could build and sell. These DON'T have to be part of the current Lobs/PAW system. Think: what products could a team of AI agents build that people would pay for? What tools would help students, developers, or busy professionals?
+5. **Personal productivity ideas** — tools or automations that would directly help Rafe (class prep, GSI workflow, research, esports scheduling, internship prep, etc.)
+6. **Cross-project opportunities** — connections between projects that create new value
+7. **Novel uses of agents** — things nobody else is doing with multi-agent systems
+
+**IMPORTANT: Ideas don't have to be about the current system.** We actively encourage proposals for:
+- New standalone apps or tools (mobile apps, CLI tools, browser extensions, SaaS products)
+- Business opportunities that leverage our AI agent infrastructure
+- Products that could be "agent-built companies" (like Flock — social event planning app)
+- Tools that solve real problems for students, developers, or professionals
+- Integrations with platforms Rafe uses (Discord, GitHub, PrairieLearn, Canvas, etc.)
 
 **What we DON'T want:**
 - Vague improvements ("enhance monitoring", "improve logging")
 - Re-proposing previously rejected ideas
 - Proposals that restate an existing task in different words
 - Pure busywork with no clear impact
+- Ideas that ONLY improve internal agent infrastructure without user-facing value
 
 **Balance your proposals:**
 - Lead with your BEST idea — the one that would make the biggest impact
@@ -593,10 +624,13 @@ For each proposed initiative:
 - Features and products CAN be larger scope (1-2 weeks is fine for important features)
 - Break large visions into a concrete first milestone that delivers standalone value
 - It's OK to propose big ideas with a "start with X" first step
+- New product/business ideas should include: target user, core value prop, and a buildable MVP scope
 
 **Categories:**
 - `feature_proposal` — NEW user-facing capability or integration
-- `new_project` — NEW standalone system, tool, or application
+- `new_project` — NEW standalone system, tool, or application (including external products/businesses)
+- `business_idea` — Product or business concept that could generate revenue or strategic value
+- `personal_tool` — Tool or automation that directly helps Rafe's productivity and goals
 - `architecture_change` — Strategic system evolution (not just reorganization)
 - `light_research` — Market research, competitive analysis, technology scouting
 - Maintenance categories (test_hygiene, docs_sync, etc.) — ONLY for things that are actively broken
@@ -614,7 +648,7 @@ Respond with ONLY the JSON below. No preamble, no "I'll analyze...", no explanat
     {{
       "title": "Short, actionable title",
       "description": "What to do, why it matters, and concrete first steps",
-      "category": "docs_sync|test_hygiene|stale_triage|light_research|backlog_reprioritization|automation_proposal|moderate_refactor|architecture_change|destructive_operation|cross_project_migration|agent_recruitment|feature_proposal|new_project",
+      "category": "feature_proposal|new_project|business_idea|personal_tool|architecture_change|light_research|automation_proposal|moderate_refactor|docs_sync|test_hygiene|stale_triage|backlog_reprioritization|destructive_operation|cross_project_migration|agent_recruitment",
       "estimated_effort": 1,
       "suggested_owner_agent": "agent-type"
     }}

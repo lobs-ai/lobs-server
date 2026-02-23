@@ -121,6 +121,9 @@ class OrchestratorEngine:
         if not self._openclaw_available:
             logger.warning("[ENGINE] OpenClaw not found on PATH — orchestrator will run in monitoring-only mode (no worker spawning)")
         
+        # Startup recovery: ensure default project exists and reset orphaned tasks
+        await self._startup_recovery()
+        
         self._running = True
         self._paused = False
         self._task = asyncio.create_task(self._run_loop())
@@ -587,11 +590,11 @@ class OrchestratorEngine:
             if not eligible_tasks:
                 return activity
 
-            # Log queue depth if worker is busy
+            # Log queue depth if worker is busy (debug to avoid spam)
             worker_status = await worker_manager.get_worker_status()
             if worker_status.get("busy") and len(eligible_tasks) > 0:
                 current = (worker_status.get("current_task") or "unknown")[:8]
-                logger.info(
+                logger.debug(
                     f"[ENGINE] Worker busy (current: {current}). "
                     f"{len(eligible_tasks)} task(s) queued."
                 )

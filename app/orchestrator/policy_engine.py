@@ -116,6 +116,35 @@ class PolicyEngine:
                     escalate_to_rafe=True,
                 )
 
+        # Business ideas always escalate to Rafe — these are strategic decisions
+        if normalized == "business_idea":
+            return PolicyDecision(
+                risk_tier="C",
+                lane="review_required",
+                approval_mode="soft_gate",
+                reason="business idea — escalate to Rafe for strategic review",
+                escalate_to_rafe=True,
+            )
+
+        # Personal tools — small ones Lobs can approve, larger ones go to Rafe
+        if normalized == "personal_tool":
+            if estimated_effort is not None and estimated_effort <= 3:
+                return PolicyDecision(
+                    risk_tier="B",
+                    lane="review_required",
+                    approval_mode="soft_gate",
+                    reason="personal tool with small effort (≤3 days) — Lobs review",
+                    escalate_to_rafe=False,
+                )
+            else:
+                return PolicyDecision(
+                    risk_tier="C",
+                    lane="review_required",
+                    approval_mode="soft_gate",
+                    reason="large personal tool (>3 days) — escalate to Rafe",
+                    escalate_to_rafe=True,
+                )
+
         # Effort-based routing for architecture_change
         if normalized == "architecture_change":
             if estimated_effort is not None and estimated_effort <= 2:

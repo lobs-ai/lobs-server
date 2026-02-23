@@ -111,7 +111,7 @@ class WorkerManager:
 
         # Check capacity
         if len(self.active_workers) >= self.max_workers:
-            logger.info(
+            logger.debug(
                 f"[WORKER] Max workers ({self.max_workers}) reached. "
                 f"Task {task_id[:8]} queued."
             )
@@ -119,9 +119,8 @@ class WorkerManager:
 
         # Check project lock (one worker per project)
         if project_id in self.project_locks:
-            locked_task = self.project_locks[project_id]
-            logger.info(
-                f"[WORKER] Project {project_id} locked by task {locked_task[:8]}. "
+            logger.debug(
+                f"[WORKER] Project {project_id} locked. "
                 f"Task {task_id[:8]} queued."
             )
             return False

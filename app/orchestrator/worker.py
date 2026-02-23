@@ -192,9 +192,8 @@ class WorkerManager:
 
         # Check project lock (one worker per project)
         if project_id in self.project_locks:
-            locked_task = self.project_locks[project_id]
-            logger.info(
-                f"[WORKER] Project {project_id} locked by task {locked_task[:8]}. "
+            logger.debug(
+                f"[WORKER] Project {project_id} locked. "
                 f"Task {task_id[:8]} queued."
             )
             return False
@@ -209,7 +208,7 @@ class WorkerManager:
             # Get project details
             project = await self.db.get(Project, project_id)
             if not project:
-                logger.error(f"Project {project_id} not found")
+                logger.warning(f"Project {project_id} not found")
                 return False
 
             # Resolve repo path for context (sub-agent will use its own workspace)
