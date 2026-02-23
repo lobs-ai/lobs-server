@@ -238,6 +238,76 @@ class ReflectionCycleManager:
             "sweep_id": sweep.id,
         }
 
+    @staticmethod
+    def _format_decision_history(packet: dict[str, Any]) -> str:
+        """Format recent initiative decisions into a readable section for the prompt."""
+        decisions = packet.get("recent_initiative_decisions", [])
+        if not decisions:
+            return ""
+
+        approved = [d for d in decisions if d.get("status") == "approved"]
+        rejected = [d for d in decisions if d.get("status") == "rejected"]
+        deferred = [d for d in decisions if d.get("status") == "deferred"]
+
+        lines = [
+            "## 📊 Your Recent Initiative Decision History (Last 7 Days)",
+            "",
+            "**Study this carefully.** These are YOUR past proposals and how they were received.",
+            "Learn from what was approved and what was rejected. Do NOT re-propose rejected ideas.",
+            "",
+        ]
+
+        if approved:
+            lines.append(f"### ✅ Approved ({len(approved)})")
+            for d in approved:
+                lines.append(f"- **{d['title']}** [{d.get('category', '?')}]")
+                if d.get("decision_summary"):
+                    lines.append(f"  Why approved: {d['decision_summary']}")
+            lines.append("")
+
+        if rejected:
+            lines.append(f"### ❌ Rejected ({len(rejected)})")
+            for d in rejected:
+                lines.append(f"- **{d['title']}** [{d.get('category', '?')}]")
+                if d.get("learning_feedback"):
+                    lines.append(f"  Feedback: {d['learning_feedback']}")
+                elif d.get("decision_summary"):
+                    lines.append(f"  Reason: {d['decision_summary']}")
+                elif d.get("rationale"):
+                    lines.append(f"  Reason: {d['rationale']}")
+            lines.append("")
+
+        if deferred:
+            lines.append(f"### ⏸️ Deferred ({len(deferred)})")
+            for d in deferred:
+                lines.append(f"- **{d['title']}** [{d.get('category', '?')}]")
+                if d.get("learning_feedback"):
+                    lines.append(f"  Feedback: {d['learning_feedback']}")
+            lines.append("")
+
+        if rejected:
+            lines.extend([
+                "### 🎯 Patterns to Avoid",
+                "Based on your rejections, do NOT propose initiatives that:",
+                "- Repeat or closely resemble rejected ideas above",
+                "- Are vague, speculative, or lack concrete first steps",
+                "- Propose work that's already covered by existing tasks or infrastructure",
+                "- Are \"nice to have\" without clear immediate value",
+                "",
+            ])
+
+        if approved:
+            lines.extend([
+                "### 🎯 What Gets Approved",
+                "Based on your approvals, focus on initiatives that:",
+                "- Address real, observed problems (not hypothetical ones)",
+                "- Have clear, immediate value with concrete deliverables",
+                "- Are well-scoped (1-3 days) with specific files/modules/endpoints named",
+                "",
+            ])
+
+        return "\n".join(lines)
+
     # Per-agent reflection focus areas — what each agent should look for
     _AGENT_REFLECTION_FOCUS: dict[str, str] = {
         "programmer": """## Your Domain: Code & Implementation
@@ -259,14 +329,14 @@ You think like a senior engineer. During reflection, focus on:
 - Refactors that reduce complexity or prevent bug classes
 - Test infrastructure improvements
 
-**Think BIGGER — propose NEW capabilities:**
-Don't limit yourself to fixing what's broken. You're in the code every day — what NEW features would provide real value? What APIs, integrations, or automation could we build that don't exist yet? What would make the system fundamentally more capable or easier to use? Propose specific, implementable ideas with clear first steps.
+**Think BIGGER — but PROPOSE SMALL:**
+Don't limit yourself to fixing what's broken. You're in the code every day — what NEW features would provide real value? But remember: propose the smallest first step that proves the idea, not the entire system. What could we ship in 1-3 days?
 
-Examples:
-- "Add a new API endpoint for X that would enable Y workflow"
-- "Build a CLI tool that automates common Z operations"
-- "Implement real-time sync feature for A using technology B"
-- "Add support for C integration to unlock D use case"
+Examples of GOOD scoped feature proposals:
+- "Add a /webhooks endpoint that logs incoming GitHub events (1-2 days, first step for integration)" ← NOT "Build complete webhook infrastructure"
+- "Add CLI command to export tasks as JSON (1 day, enables automation)" ← NOT "Build full CLI tool suite"
+- "Add WebSocket message for task status updates (2 days, enables real-time UI)" ← NOT "Implement real-time sync across all entities"
+- "Add API endpoint to fetch Slack team info (1 day, first step for Slack integration)" ← NOT "Build complete Slack integration"
 
 **Your perspective is unique:** You see the code up close. You know where the pain points are. Other agents see architecture and docs — you see the actual implementation. Propose work that only someone who reads and writes code daily would notice.""",
 
@@ -291,16 +361,17 @@ You think in systems, not features. During reflection, focus on:
 - Migration plans for technology changes
 - Standards/patterns that should be established across projects
 
-**Think BIGGER — design NEW systems:**
-You see the entire landscape. What NEW systems, platforms, or capabilities should we build? What would 10x our capabilities or unlock entirely new use cases? Think multi-project, multi-year vision. Propose ambitious but concrete designs.
+**Think in INCREMENTS — what's the smallest architectural improvement that unlocks the most value?**
 
-Examples:
-- "Design a distributed task execution platform to replace X"
-- "Architect a plugin system that would enable Y extensibility"
-- "Design cross-service orchestration layer for Z workflow"
-- "Propose migration to microservices architecture for A subsystem"
+You see the entire landscape and long-term vision, but propose SMALL, CONCRETE steps (1-3 days each). Don't propose "build distributed system" — propose the first valuable increment. Think bigger than maintenance, but scope to actionable chunks.
 
-**Your perspective is unique:** You see the big picture that individual agents miss. You understand how pieces fit together and where the system is heading. Propose work that requires zooming out.""",
+Examples of GOOD incremental architecture proposals:
+- "Add database connection pooling to improve concurrency (1-2 days)" ← NOT "Design distributed task execution platform"
+- "Extract API authentication into middleware layer (2 days, enables reuse)" ← NOT "Architect microservices migration"
+- "Add service interface for task operations (2 days, first step toward service layer)" ← NOT "Design complete service-oriented architecture"
+- "Document current API versioning approach (1 day, enables future v2 planning)" ← NOT "Design API versioning strategy for next 3 years"
+
+**Your perspective is unique:** You see the big picture that individual agents miss. You understand how pieces fit together and where the system is heading. Use that vision to identify the NEXT valuable architectural step, not the entire journey.""",
 
         "researcher": """## Your Domain: Investigation & Analysis
 
@@ -399,6 +470,7 @@ Examples:
     @classmethod
     def _build_reflection_prompt(cls, agent: str, packet: dict[str, Any], reflection_id: str) -> str:
         agent_focus = cls._AGENT_REFLECTION_FOCUS.get(agent, "")
+        decision_history = cls._format_decision_history(packet)
 
         return f"""## Strategic Reflection Mode (6-hour cycle)
 
@@ -407,6 +479,8 @@ Reflection record ID: {reflection_id}
 
 Context packet JSON:
 {packet}
+
+{decision_history}
 
 {agent_focus}
 
@@ -430,35 +504,35 @@ For each proposed initiative:
 - Include concrete first steps, not just goals
 - You can recommend work for other agents, but frame it from your expertise
 
-## 🚀 THINK BIG — Propose NEW Features & Capabilities
+## 🎯 PROPOSE CONCRETE, INCREMENTAL WORK — Think Small, Ship Fast
 
-**DO NOT limit yourself to maintenance, fixes, and cleanup.** That's table stakes.
+**QUALITY > QUANTITY.** Propose 1-3 genuinely useful ideas rather than 5+ mediocre ones. Every rejected initiative wastes review time. If you don't have a strong idea, propose fewer or none — an empty list is better than noise.
 
-The reflection cycle exists to surface ideas that ONLY YOU can see from your vantage point. What NEW capabilities, features, projects, or systems should we build? What would provide significant value? What opportunities are we missing?
+**The bar for proposals:**
+1. **Solves a REAL problem you've observed** — not hypothetical, not speculative. You should be able to point to a specific issue, error, friction point, or missing capability you've personally encountered or seen evidence of.
+2. **Immediately actionable** — name specific files, modules, endpoints, or systems. "Improve error handling" is not actionable. "Add retry logic to `worker.py:_spawn_session` for transient Gateway errors" is.
+3. **Clear value** — explain what changes for the user/system after this is done. If you can't articulate the concrete benefit, it's not ready.
+4. **1-3 day scope** — if bigger, propose ONLY the first step that delivers standalone value.
+5. **Not already covered** — check the context packet for existing tasks, backlog, and active initiatives. Don't duplicate.
 
-**High bar for NEW ideas:**
-- Must be specific and concrete (not vague brainstorming)
-- Must have clear first steps (what would you actually do?)
-- Must explain WHY it matters (what value does it unlock?)
-- Can be ambitious — multi-week or multi-month is fine
-- Should leverage your unique domain expertise
+**Before proposing, ask yourself:**
+- "Would I reject this if I were reviewing it?" — if yes, don't propose it
+- "Is this solving a problem that actually exists today?" — not one that might exist someday
+- "Can someone start working on this tomorrow with just this description?" — if not, it's too vague
+- "Does the decision history show this was already rejected?" — if so, don't re-propose unless fundamentally different
 
-**Examples of GOOD new feature proposals:**
-- "Build real-time collaboration system for docs using WebSocket + CRDT (enables multi-user editing)"
-- "Add GitHub Actions integration to auto-sync issues (saves manual triage time)"
-- "Implement semantic search for memory using embeddings (enables natural language queries)"
-- "Design plugin architecture for custom agent types (enables user extensions)"
+**Categories:**
+- `feature_proposal` — NEW user-facing capability (1-3 day scope)
+- `new_project` — NEW standalone system/tool/project (only if truly completable in 1-3 days)
+- `architecture_change` — Small, incremental structural improvements
+- Maintenance categories (test_hygiene, docs_sync, etc.) — For real cleanup needs only
 
-**Examples of BAD proposals:**
-- "Maybe we should look into AI stuff" ← Too vague
-- "Consider improving performance" ← No concrete idea
-- "Think about mobile app" ← No first steps
-
-**Use categories wisely:**
-- `feature_proposal` — NEW user-facing capability
-- `new_project` — NEW standalone system/tool/project
-- `architecture_change` — Fundamental redesign of existing system
-- Maintenance categories (test_hygiene, docs_sync, etc.) — For cleanup/fixes only
+**Anti-patterns that get rejected:**
+- Vague improvements ("enhance monitoring", "improve logging")
+- Features nobody asked for that add complexity without clear demand
+- Proposals that restate an existing task in different words
+- "Nice to have" infrastructure that doesn't solve a current pain point
+- Re-proposing previously rejected ideas without fundamental changes
 
 ## Output Format
 

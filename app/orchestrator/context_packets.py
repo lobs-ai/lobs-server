@@ -20,6 +20,7 @@ class AgentContextPacket:
     generated_at: str
     recent_tasks_summary: list[dict[str, Any]]
     active_initiatives: list[dict[str, Any]]
+    recent_initiative_decisions: list[dict[str, Any]]
     backlog_summary: list[dict[str, Any]]
     performance_metrics: dict[str, Any]
     other_agent_activity_summary: list[dict[str, Any]]
@@ -44,6 +45,7 @@ class ContextPacketBuilder:
         metrics = await self._performance_metrics(agent_type, since)
         other_activity = await self._other_agent_activity(agent_type, since)
         initiatives = await self._active_initiatives(agent_type, since)
+        decisions = await self._recent_initiative_decisions(agent_type)
 
         return AgentContextPacket(
             schema_version="agent-context-packet.v1",
@@ -52,6 +54,7 @@ class ContextPacketBuilder:
             generated_at=now.isoformat(),
             recent_tasks_summary=recent_tasks,
             active_initiatives=initiatives,
+            recent_initiative_decisions=decisions,
             backlog_summary=backlog,
             performance_metrics=metrics,
             other_agent_activity_summary=other_activity,
@@ -198,6 +201,41 @@ class ContextPacketBuilder:
             )
 
         return items[:20]
+
+    async def _recent_initiative_decisions(self, agent_type: str) -> list[dict[str, Any]]:
+        """Load recent initiative decisions (approved/rejected/deferred) for this agent.
+
+        Uses a 7-day window so agents can learn from recent feedback patterns.
+        """
+        since = datetime.now(timezone.utc) - timedelta(days=7)
+
+        result = await self.db.execute(
+            select(AgentInitiative)
+            .where(
+                AgentInitiative.proposed_by_agent == agent_type,
+                AgentInitiative.status.in_(["approved", "rejected", "deferred"]),
+                AgentInitiative.updated_at >= since,
+            )
+            .order_by(AgentInitiative.updated_at.desc())
+            .limit(30)
+        )
+        initiatives = result.scalars().all()
+
+        items: list[dict[str, Any]] = []
+        for i in initiatives:
+            item: dict[str, Any] = {
+                "title": i.title,
+                "category": i.category,
+                "status": i.status,  # approved/rejected/deferred
+                "decision_summary": i.decision_summary,
+                "learning_feedback": i.learning_feedback,
+            }
+            # Include rationale for server-side rejections (quality gate, dedup)
+            if i.rationale:
+                item["rationale"] = i.rationale
+            items.append(item)
+
+        return items
 
     @staticmethod
     def _run_matches_agent(run: WorkerRun, agent_type: str) -> bool:
