@@ -1,0 +1,18 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "priority": "critical",
+  "title": "Phase 1.2: Pattern Extraction & Lesson Creation",
+  "context": "Extract learnings from task outcomes. Create outcome_learnings table, implement LessonExtractor with rule-based pattern detection (missing tests, unclear names, error handling, validation), add CLI command for manual extraction. See detailed spec in docs/handoffs/learning-phase-1.2-pattern-extraction.md. Depends on Phase 1.1.",
+  "acceptance": "1) outcome_learnings table exists. 2) OutcomeLearning model in models.py. 3) LessonExtractor extracts patterns from feedback. 4) 5+ programmer patterns implemented (tests, names, errors, docstrings, validation). 5) CLI command works: python app/cli/extract_learnings.py --agent programmer. 6) GET /api/learning/learnings endpoint. 7) POST /api/learning/extract endpoint. 8) Confidence updates on success/failure. 9) Low-confidence deactivation logic. 10) Unit tests >80% coverage.",
+  "files": [
+    "docs/handoffs/learning-phase-1.2-pattern-extraction.md",
+    "docs/agent-learning-system.md",
+    "app/models.py",
+    "app/orchestrator/lesson_extractor.py",
+    "app/routers/learning.py",
+    "app/cli/extract_learnings.py"
+  ],
+  "estimated_effort": "3-4 days",
+  "blocked_by": ["agent-learning-system:phase-1.1"]
+}

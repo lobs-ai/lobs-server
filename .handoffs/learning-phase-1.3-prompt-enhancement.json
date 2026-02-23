@@ -1,0 +1,17 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "priority": "critical",
+  "title": "Phase 1.3: Prompt Enhancement & Learning Injection",
+  "context": "Complete the learning loop by injecting learnings into prompts. Create PromptEnhancer service, integrate with prompter.py to query and inject relevant learnings, track which learnings were applied, update confidences based on outcomes. See detailed spec in docs/handoffs/learning-phase-1.3-prompt-enhancement.md. Depends on Phases 1.1 and 1.2.",
+  "acceptance": "1) PromptEnhancer class implemented. 2) Integration with prompter.py (breaking change - returns tuple now). 3) Feature flag LEARNING_INJECTION_ENABLED. 4) Learnings injected with prefix style. 5) Applied learning IDs stored in TaskOutcome. 6) Confidence updated when tasks complete. 7) Control group gets unmodified prompts. 8) Unit tests >80% coverage. 9) Integration test proves full cycle. 10) Enhancement adds <200ms overhead. 11) Graceful degradation if enhancer fails.",
+  "files": [
+    "docs/handoffs/learning-phase-1.3-prompt-enhancement.md",
+    "docs/agent-learning-system.md",
+    "app/orchestrator/prompter.py",
+    "app/orchestrator/prompt_enhancer.py",
+    "app/orchestrator/worker.py"
+  ],
+  "estimated_effort": "3-4 days",
+  "blocked_by": ["agent-learning-system:phase-1.1", "agent-learning-system:phase-1.2"]
+}

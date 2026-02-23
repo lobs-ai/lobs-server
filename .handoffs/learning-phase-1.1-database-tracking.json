@@ -1,0 +1,17 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "priority": "critical",
+  "title": "Phase 1.1: Database & Outcome Tracking",
+  "context": "First phase of agent learning system. Create task_outcomes table, implement OutcomeTracker service, integrate with worker.py to auto-track completions, add API endpoint for human feedback. See detailed spec in docs/handoffs/learning-phase-1.1-database-tracking.md and design doc at docs/agent-learning-system.md. This is the foundation - all other phases depend on this.",
+  "acceptance": "1) task_outcomes table exists with all columns and indexes. 2) TaskOutcome model in models.py. 3) OutcomeTracker service tracks completions automatically. 4) POST /api/learning/tasks/{id}/feedback endpoint works. 5) A/B control group: 20% of outcomes have learning_disabled=True. 6) Task category/complexity inference working. 7) Unit tests >80% coverage. 8) Integration tests pass. 9) All operations log with [LEARNING] prefix.",
+  "files": [
+    "docs/handoffs/learning-phase-1.1-database-tracking.md",
+    "docs/agent-learning-system.md",
+    "app/models.py",
+    "app/orchestrator/worker.py",
+    "app/routers/learning.py"
+  ],
+  "estimated_effort": "3-4 days",
+  "blocked_by": null
+}

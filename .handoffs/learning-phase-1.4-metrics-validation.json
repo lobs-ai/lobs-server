@@ -1,0 +1,18 @@
+{
+  "to": "programmer",
+  "initiative": "agent-learning-system",
+  "priority": "important",
+  "title": "Phase 1.4: Metrics, Stats & A/B Test Validation",
+  "context": "Implement metrics to measure learning system effectiveness. Create LearningStatsCalculator, add GET /api/learning/stats endpoint with A/B test results, statistical significance testing, health monitoring, CLI analysis tool. See detailed spec in docs/handoffs/learning-phase-1.4-metrics-validation.md. Depends on Phases 1.1-1.3. Completes Milestone 1.",
+  "acceptance": "1) LearningStatsCalculator implemented. 2) GET /api/learning/stats endpoint with full A/B analysis. 3) GET /api/learning/top-learnings endpoint. 4) GET /api/learning/health endpoint. 5) Statistical significance testing with Chi-squared. 6) CLI tool: python app/cli/analyze_learning.py (stats/top/health). 7) scipy added to requirements.txt. 8) Stats calculation <500ms. 9) Unit tests >80% coverage. 10) Integration tests for all endpoints. 11) Health checks detect common issues.",
+  "files": [
+    "docs/handoffs/learning-phase-1.4-metrics-validation.md",
+    "docs/agent-learning-system.md",
+    "app/orchestrator/learning_stats.py",
+    "app/routers/learning.py",
+    "app/cli/analyze_learning.py",
+    "requirements.txt"
+  ],
+  "estimated_effort": "2-3 days",
+  "blocked_by": ["agent-learning-system:phase-1.1", "agent-learning-system:phase-1.2", "agent-learning-system:phase-1.3"]
+}

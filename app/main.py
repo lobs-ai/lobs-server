@@ -45,6 +45,7 @@ from app.routers import (
     intent,
     usage,
     webhooks,
+    learning,
 )
 from app.routers import text_dumps
 
@@ -178,6 +179,7 @@ app.include_router(governance.router, prefix=settings.API_PREFIX, dependencies=[
 app.include_router(intent.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(usage.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(usage.routing_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(learning.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 
 # Webhooks - receive endpoint is public (external services), management requires auth
 app.include_router(webhooks.router, prefix=settings.API_PREFIX)

@@ -275,10 +275,14 @@ class InitiativeDecisionEngine:
             f"**To reject:** Tell Lobs to reject initiative `{initiative.id[:8]}`\n"
         )
 
+        item_id = str(uuid.uuid4())
+        filename = f"escalation_{initiative.id[:8]}_{int(datetime.now(timezone.utc).timestamp())}.md"
         self.db.add(
             InboxItem(
-                id=str(uuid.uuid4()),
+                id=item_id,
                 title=f"🚨 [APPROVAL NEEDED] {title[:70]}",
+                filename=filename,
+                relative_path=f"inbox/{filename}",
                 content=content,
                 is_read=False,
                 summary=f"tier_c_escalation:{initiative.id}",

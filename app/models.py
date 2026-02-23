@@ -797,3 +797,43 @@ class WebhookDelivery(Base):
     error_message = Column(Text)
     next_retry_at = Column(DateTime, index=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class TaskOutcome(Base):
+    """Task outcome model for agent learning system."""
+    __tablename__ = "task_outcomes"
+    
+    id = Column(String, primary_key=True)
+    task_id = Column(String, ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True)
+    worker_run_id = Column(String)  # Optional reference to worker run
+    agent_type = Column(String(50), nullable=False, index=True)
+    success = Column(Boolean, nullable=False, index=True)
+    task_category = Column(String(50), index=True)  # bug_fix, feature, test, refactor, docs
+    task_complexity = Column(String(20))  # simple, medium, complex
+    context_hash = Column(String(64), index=True)  # For finding similar tasks
+    human_feedback = Column(Text)  # From code review or manual feedback
+    review_state = Column(String(50))  # Snapshot of task.review_state
+    applied_learnings = Column(JSON)  # Array of learning IDs used
+    learning_disabled = Column(Boolean, default=False, nullable=False)  # A/B test control group
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class OutcomeLearning(Base):
+    """Extracted learnings from task outcomes for agent improvement."""
+    __tablename__ = "outcome_learnings"
+    
+    id = Column(String, primary_key=True)
+    agent_type = Column(String(50), nullable=False, index=True)
+    pattern_name = Column(String(100), nullable=False, index=True)  # e.g., 'missing_tests', 'unclear_names'
+    lesson_text = Column(Text, nullable=False)  # What to do differently
+    task_category = Column(String(50), index=True)  # Which task types this applies to
+    task_complexity = Column(String(20))  # Complexity filter (optional)
+    context_hash = Column(String(64))  # Similar task identifier
+    confidence = Column(Float, default=1.0, nullable=False)  # 0.0-1.0, based on evidence
+    success_count = Column(Integer, default=0, nullable=False)  # Times this helped
+    failure_count = Column(Integer, default=0, nullable=False)  # Times this didn't help
+    source_outcome_ids = Column(JSON)  # List of task_outcome IDs that led to this
+    is_active = Column(Boolean, default=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

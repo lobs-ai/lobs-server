@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-### Added (2026-02-21 to 2026-02-22)
+### Added (2026-02-21 to 2026-02-23)
 - **5-Tier Model Hierarchy** — Expanded from 3 tiers (cheap/standard/strong) to 5 tiers (micro/small/medium/standard/strong) for better cost control and local model support
 - **Ollama Auto-Discovery** — System automatically detects and injects Ollama models into micro/small/medium tiers based on parameter count
 - **Model Tier Field on Tasks** — Added `model_tier` field to Task model for explicit tier control (overrides auto-selection)
@@ -17,6 +17,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Domain-Specific Reflection Prompts** — Custom reflection prompts for programmer, researcher, specialist, and writer agents (targeted insights per agent type)
 - **Isolated Reflection Sessions** — Reflection results now sent to isolated Lobs session (not main agent session) to prevent context pollution
 - **Broader Proposal Scope** — Reflection system now encourages feature proposals and new project ideas (not just maintenance/fixes)
+- **Learning System Stats API** — Added `GET /api/learning/stats` endpoint for A/B test metrics, success rates, and improvement tracking
+- **Learning System Health API** — Added `GET /api/learning/health` endpoint for learning system health checks and issue detection
+- **Learning Validation CLI** — Added `app/cli/validate_learning.py` tool for offline analysis of learning system effectiveness
 
 ### Changed (2026-02-21 to 2026-02-22)
 - **Model Tier Refactoring** — Migrated all model routing from 3-tier to 5-tier system

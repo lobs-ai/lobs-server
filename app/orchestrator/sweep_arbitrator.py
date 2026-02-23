@@ -202,10 +202,14 @@ class SweepArbitrator:
                 "```"
             )
 
+            item_id = str(uuid.uuid4())
+            filename = f"review_{initiative.id[:8]}_{int(datetime.now(timezone.utc).timestamp())}.md"
             self.db.add(
                 InboxItem(
-                    id=str(uuid.uuid4()),
+                    id=item_id,
                     title=f"[REVIEW] {initiative.title[:80]}",
+                    filename=filename,
+                    relative_path=f"inbox/{filename}",
                     content=content,
                     is_read=False,
                     summary=f"initiative_review:{initiative.id}",
@@ -362,10 +366,14 @@ class SweepArbitrator:
             f"```"
         )
 
+        item_id = str(uuid.uuid4())
+        filename = f"escalation_{initiative.id[:8]}_{int(datetime.now(timezone.utc).timestamp())}.md"
         self.db.add(
             InboxItem(
-                id=str(uuid.uuid4()),
+                id=item_id,
                 title=f"🚨 [RAFE] {title[:70]}",
+                filename=filename,
+                relative_path=f"inbox/{filename}",
                 content=content,
                 is_read=False,
                 summary=f"Escalated: {escalation_reason}",

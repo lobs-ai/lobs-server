@@ -38,6 +38,7 @@ FastAPI App (app/main.py)
 | calendar.py | /api/calendar | Scheduled events, calendar views, deadlines |
 | status.py | /api/status | System health, activity, costs |
 | agents.py | /api/agents | Agent statuses and personality files |
+| learning.py | /api/learning | Learning system stats and health checks |
 | worker.py | /api/worker | Worker status, history, and activity feed |
 | orchestrator.py | /api/orchestrator | Orchestrator control (pause/resume) |
 | tracker.py | /api/tracker | Project tracker items |
