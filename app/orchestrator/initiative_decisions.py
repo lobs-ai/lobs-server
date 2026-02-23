@@ -1,8 +1,10 @@
 """Initiative decisioning and conversion to executable work.
 
 Tier A/B: Lobs has full autonomy — approve, rescope, create tasks.
-Tier C: Lobs CANNOT approve. Must escalate to Rafe. Task only created
-        after Rafe explicitly approves.
+Tier C: Lobs should escalate to Rafe (instruction-based, not enforced in code).
+        Lobs is instructed not to approve tier-C items directly — instead,
+        escalate them so Rafe can review via inbox.
+        The 'awaiting_rafe' status is still used for escalated items.
 """
 
 from __future__ import annotations
@@ -94,16 +96,6 @@ class InitiativeDecisionEngine:
         # Only lobs and rafe can make decisions
         if decided_by not in {"lobs", "rafe"}:
             raise PermissionError("initiative decisions must be made by lobs or rafe")
-
-        # --- TIER C GATE: Lobs CANNOT approve tier-C items ---
-        is_tier_c = (initiative.risk_tier or "").upper() == "C"
-        if is_tier_c and decision == "approve" and decided_by == "lobs":
-            # Auto-convert to escalation: create Rafe inbox item instead
-            logger.info(
-                "[DECISION] Tier-C approval blocked for Lobs, auto-escalating to Rafe: %s",
-                initiative.title,
-            )
-            decision = "escalate"
 
         # Handle escalation: create Rafe inbox item, set status to awaiting_rafe
         if decision == "escalate":
