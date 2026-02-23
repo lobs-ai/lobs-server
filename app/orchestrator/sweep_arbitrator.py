@@ -185,17 +185,20 @@ class SweepArbitrator:
                 f"**Description:**\n{initiative.description or '(no description)'}\n\n"
                 "---\n\n"
                 "**Review and decide:**\n"
-                "- **Approve**: Create a task from this initiative\n"
+                "- **Approve**: Create a task from this initiative (use as-is or rescope first)\n"
+                "- **Approve + Rescope**: Break big ideas into practical, buildable pieces — "
+                "use `revised_title` and `revised_description` to reshape the scope before approving\n"
+                "- **Escalate**: Tier-C items — send to Rafe for approval instead of approving directly\n"
                 "- **Defer**: Not now, revisit later\n"
-                "- **Reject**: Not worth doing\n\n"
-                "**Commands:**\n"
-                "```bash\n"
-                "# View initiative details\n"
-                f"~/.openclaw/workspace/scripts/lobs-api.sh get-initiative {initiative.id[:8]}\n\n"
-                "# Approve and create task\n"
-                "~/.openclaw/workspace/scripts/lobs-api.sh create-task\n\n"
-                "# Batch-decide on all pending\n"
-                "~/.openclaw/workspace/scripts/lobs-api.sh batch-decide\n"
+                "- **Reject**: Only if fundamentally wrong — prefer rescoping over rejecting\n\n"
+                "**💡 Prefer rescoping over rejection.** If an idea is too broad, break it into a "
+                "concrete first step. If it overlaps existing work, reshape it to complement.\n\n"
+                "**Batch-decide JSON format:**\n"
+                "```json\n"
+                '{"initiative_id": "' + initiative.id + '", '
+                '"decision": "approve", '
+                '"revised_title": "Narrower practical title", '
+                '"revised_description": "Concrete scope description"}\n'
                 "```"
             )
 
