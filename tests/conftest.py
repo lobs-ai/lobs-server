@@ -95,23 +95,34 @@ async def client(test_token):
     app.dependency_overrides.clear()
 
 
-@pytest.fixture
-def sync_test_token(setup_test_db):
+@pytest.fixture(scope="function")
+def sync_test_token():
     """Create a test API token synchronously for sync WebSocket tests."""
     import secrets
     import asyncio
     from app.models import APIToken
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
     
     token = secrets.token_urlsafe(32)
     
     async def create_token():
+        async with test_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        
         async with TestSessionLocal() as session:
             api_token = APIToken(token=token, name="test-token")
             session.add(api_token)
             await session.commit()
     
-    # Run async code synchronously
-    asyncio.get_event_loop().run_until_complete(create_token())
+    # Get or create event loop
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Run async code
+    loop.run_until_complete(create_token())
     
     return token
 
