@@ -1,468 +1,744 @@
-# API Caching Audit & Optimization Opportunities
+# Observability Gaps Analysis & Recommendations
 
 **Date:** 2026-02-23  
-**Researcher:** researcher  
-**Task ID:** b1f2b614-c244-4fa6-9c91-c2f62a875b3b
+**Author:** researcher agent  
+**Task ID:** 93df3aa5-b8d0-476f-b03f-07a2db6118f7
+
+---
 
 ## Executive Summary
 
-This audit identifies three high-impact caching opportunities for lobs-server that could significantly reduce costs and improve response times:
+This document audits current agent observability in lobs-server, identifies critical gaps, and recommends solutions based on industry patterns from LangSmith, Phoenix, and other agent frameworks.
 
-1. **HTTP Response Caching** — Cache read-heavy API endpoints (status, projects, agents) with Redis/in-memory cache
-2. **LLM Prompt Caching** — Enable Anthropic's prompt caching for orchestrator prompts with static context
-3. **Database Query Result Caching** — Cache expensive aggregation queries in status/usage endpoints
-
-**Estimated savings:** 40-60% cost reduction on LLM calls, 50-80% latency reduction on cached endpoints.
-
----
-
-## Current State
-
-### Caching Infrastructure
-- ❌ **No HTTP response caching** — Every API request hits the database
-- ❌ **No Redis or Memcached** — No caching backend installed
-- ✅ **Token-level tracking** — System tracks LLM token usage (including cache read/write tokens)
-- ❌ **No semantic caching** — LLM calls don't leverage prompt caching features
-
-### Architecture
-- **FastAPI + SQLite** — Async with aiosqlite, WAL mode
-- **28 API routers** — Projects, tasks, memories, topics, status, usage, chat, orchestrator, etc.
-- **OpenClaw Gateway** — LLM calls route through OpenClaw Gateway API (`/tools/invoke`)
-- **Database:** 22MB SQLite database with 15+ tables
-
-### High-Traffic Endpoints (Based on Codebase Analysis)
-1. `/api/status/overview` — Aggregates data from multiple tables
-2. `/api/agents` — Lists agent statuses
-3. `/api/projects` — Lists projects with filtering
-4. `/api/tasks` — Task lists with complex filtering
-5. `/api/chat/sessions/{session_key}/messages` — Chat message history
-6. `/api/usage/summary` — Complex aggregation queries for token usage
+**Key Findings:**
+- ✅ **Good foundation**: Token usage tracking, structured logging, model routing audit trails, failure escalation tracking
+- ❌ **Critical gaps**: No distributed tracing, limited reasoning visibility, no real-time dashboards
+- 🎯 **Top priority**: Implement OpenTelemetry-based distributed tracing with span hierarchy
 
 ---
 
-## Top 3 Caching Opportunities
+## Current State: What's Being Tracked
 
-### 1. HTTP Response Caching with fastapi-cache2
+### 1. Worker Lifecycle Events ✅
+**Location:** `app/orchestrator/worker.py`, `app/orchestrator/engine.py`
 
-**Priority:** HIGH  
-**Estimated Cost Savings:** Low (hosting costs)  
-**Estimated Latency Reduction:** 50-80% for cached endpoints  
+**What's logged:**
+- Worker spawn events with model selection audit trail
+- Worker completion/failure events
+- Runtime duration and exit codes
+- Stuck worker detection (15min timeout)
 
-#### Opportunity
-Cache read-heavy endpoints that don't change frequently or can tolerate short staleness:
-- Status/overview data (5-10 second cache)
-- Agent listings (30-60 second cache)
-- Project/task listings (10-30 second cache)
-- Usage summaries (1-5 minute cache)
+**Data persisted:**
+- `WorkerRun` table: worker_id, task_id, model, tokens, cost, commit_shas, files_modified, summary
+- `WorkerStatus` singleton: current task, heartbeat timestamp, activity state
 
-#### Solution
-Use **fastapi-cache2** (1.8k stars, actively maintained):
-- Supports Redis, Memcached, DynamoDB, and in-memory backends
-- Decorator-based caching: `@cache(expire=60)`
-- Supports ETags and conditional requests (304 Not Modified)
-- Automatic cache key generation from function parameters
-- Handles Pydantic models and dataclasses
-
-**Source:** [github.com/long2ice/fastapi-cache](https://github.com/long2ice/fastapi-cache)
-
-#### Implementation Example
+**Example log:**
 ```python
-from fastapi_cache import FastAPICache
-from fastapi_cache.backends.redis import RedisBackend
-from fastapi_cache.decorator import cache
-from redis import asyncio as aioredis
-
-# In lifespan startup
-redis = aioredis.from_url("redis://localhost")
-FastAPICache.init(RedisBackend(redis), prefix="lobs-cache")
-
-# In routers
-@router.get("/status/overview")
-@cache(expire=10)  # 10 second cache
-async def get_overview(
-    request: Request,
-    db: AsyncSession = Depends(get_db)
-) -> SystemOverview:
-    # Existing implementation
-    ...
+logger.info(
+    f"[WORKER] Spawned worker {worker_id} for task {task_id_short} "
+    f"(project={project_id}, agent={agent_type}, model={chosen_model}, runId={run_id})",
+    extra={"model_router": worker_info.model_audit},
+)
 ```
 
-#### Cost/Latency Estimates
-- **Setup cost:** 4-8 hours (Redis installation, library integration, testing)
-- **Redis hosting:** $10-20/month (managed Redis) or $0 (self-hosted)
-- **Latency improvement:** 
-  - Uncached: 50-200ms (complex DB queries)
-  - Cached: 2-10ms (Redis lookup)
-  - **Reduction: 80-95% for cached hits**
-- **Cache hit rate (estimated):** 60-80% for status endpoints during normal operation
+### 2. Token Usage & Cost Tracking ✅
+**Location:** `app/orchestrator/token_extractor.py`
 
-#### Recommended Endpoints
-| Endpoint | TTL | Rationale |
-|----------|-----|-----------|
-| `/api/status/overview` | 10s | Heavy aggregation, tolerates staleness |
-| `/api/agents` | 30s | Rarely changes, read-heavy |
-| `/api/projects` (GET) | 30s | Infrequent updates |
-| `/api/usage/summary` | 60s | Expensive aggregation |
-| `/api/agents/{agent_type}/identity-versions` | 300s | Immutable history |
+**What's tracked:**
+- Input/output tokens per message
+- Cache read/write tokens (for prompt caching)
+- Estimated cost per session
+- Provider and model used
 
-#### Cache Invalidation Strategy
-- **Time-based expiration** for most endpoints
-- **Event-based invalidation** for critical paths:
-  - Clear project cache on project create/update/delete
-  - Clear agent cache on agent status updates
-- **Namespace partitioning** by resource type (e.g., `lobs-cache:projects:*`)
+**Source:** Extracted from OpenClaw session JSONL transcripts post-completion
 
----
-
-### 2. LLM Prompt Caching (Anthropic)
-
-**Priority:** CRITICAL  
-**Estimated Cost Savings:** 40-60% on LLM costs  
-**Estimated Latency Reduction:** 75-85% time-to-first-token  
-
-#### Opportunity
-The orchestrator sends long prompts with static context to OpenClaw Gateway for agent tasks:
-- Agent identity files (AGENTS.md, SOUL.md) — unchanged between tasks
-- Project context (README, ARCHITECTURE) — rarely changes
-- Task execution templates — static across similar tasks
-- Conversation history in chat sessions — grows but earlier messages are static
-
-#### Solution
-Enable **Anthropic Prompt Caching** via OpenClaw Gateway:
-- Automatically caches prompt prefixes ≥1024 tokens
-- **Cache write:** 25% markup over base input cost
-- **Cache read:** 90% discount (10% of base input cost)
-- **TTL:** 5 minutes (auto-refreshed on cache hit)
-- **Supported models:** Claude 3.5 Sonnet, Claude 3 Opus, Claude 3 Haiku
-
-**Source:** [anthropic.com/blog/prompt-caching](https://www.anthropic.com/news/prompt-caching)
-
-#### Implementation Details
-
-**Current Prompt Structure (Estimated):**
-```
-System Context (5,000-10,000 tokens):
-- Agent identity (AGENTS.md) — ~1,500 tokens
-- Project context (README, ARCHITECTURE) — ~2,000 tokens
-- Task type instructions — ~1,000 tokens
-- Memory context — ~2,000 tokens
-
-Task-Specific (500-2,000 tokens):
-- Current task description
-- User input
-- Recent conversation
-```
-
-**Cacheable Segments:**
-1. **Agent identity + project context** — ~3,500-4,000 tokens (cache for all tasks in same project)
-2. **Conversation history** — grows over chat sessions (cache all but latest message)
-3. **Code context** — entire codebase snapshots for code analysis tasks
-
-#### Cost Analysis (Claude 3.5 Sonnet)
-
-**Without Caching:**
-- Input: $3.00 per million tokens
-- Output: $15.00 per million tokens
-- Typical task: 8,000 input + 1,500 output = $0.0465
-
-**With Caching (60% hit rate):**
-- Cache write (40%): 8,000 × $3.75/M = $0.03
-- Cache read (60%): 4,500 cached × $0.30/M + 3,500 uncached × $3.00/M = $0.0119
-- Output: 1,500 × $15/M = $0.0225
-- **Average per task: $0.0253 (46% savings)**
-
-**For 1,000 tasks/month:**
-- Without caching: $46.50
-- With caching: $25.30
-- **Monthly savings: $21.20**
-
-**For higher-volume systems (10,000 tasks/month):**
-- Monthly savings: $212.00
-
-#### Latency Improvements
-Based on Anthropic data:
-- **Long prompts (10K tokens):** 1.6s → 1.1s (31% faster)
-- **Very long prompts (100K tokens):** 11.5s → 2.4s (79% faster)
-
-#### Implementation Path
-1. **Check OpenClaw Gateway support** — Verify if gateway exposes Anthropic's `cache_control` parameter
-2. **Mark cacheable blocks** — Add `cache_control: {"type": "ephemeral"}` to static prompt sections
-3. **Monitor cache metrics** — Track cache_read_tokens and cache_write_tokens in usage tracking
-4. **Optimize cache boundaries** — Place cache breakpoints at logical boundaries (after agent identity, after project context)
-
-**OpenClaw Integration Check Required:**
+**Example data:**
 ```python
-# In worker.py or OpenClaw client
-# Check if this structure is supported:
-payload = {
-    "system": [
-        {
-            "type": "text",
-            "text": agent_identity_content,
-            "cache_control": {"type": "ephemeral"}  # <-- Cache this
-        },
-        {
-            "type": "text",
-            "text": project_context,
-            "cache_control": {"type": "ephemeral"}  # <-- And this
-        }
-    ],
-    "messages": [...]
+SessionTokenUsage(
+    input_tokens=1250,
+    output_tokens=890,
+    cache_read_tokens=450,
+    estimated_cost_usd=0.0245,
+    message_count=3,
+    model="claude-sonnet-4-5",
+    provider="anthropic"
+)
+```
+
+### 3. Failure Tracking & Escalation ✅
+**Location:** `app/orchestrator/escalation_enhanced.py`, `app/orchestrator/circuit_breaker.py`
+
+**What's tracked:**
+- Escalation tier (0-4: none → retry → agent_switch → diagnostic → human)
+- Retry count per task
+- Failure reason text
+- Circuit breaker state (tracks infrastructure vs task failures)
+- Provider health (error types: rate_limit, auth_error, quota_exceeded, timeout, server_error)
+
+**Stored in:** `Task.escalation_tier`, `Task.retry_count`, `Task.failure_reason`
+
+### 4. Logging Infrastructure ✅
+**Location:** `app/logging_config.py`
+
+**Implementation:**
+- Structured JSON logging with `JSONFormatter`
+- Console output with colored formatting
+- Rotating file handlers (10MB chunks, 5 backups)
+- Separate error log stream
+- Module-level log level control
+
+**Example output:**
+```json
+{
+  "timestamp": "2026-02-23T20:00:15.123Z",
+  "level": "INFO",
+  "logger": "app.orchestrator.worker",
+  "message": "[WORKER] Spawned worker...",
+  "extra": {
+    "model_router": {...}
+  }
 }
 ```
 
 ---
 
-### 3. Database Query Result Caching
+## Gap #1: No Distributed Tracing 🔴 CRITICAL
 
-**Priority:** MEDIUM  
-**Estimated Cost Savings:** Minimal (reduces DB load)  
-**Estimated Latency Reduction:** 60-80% for expensive queries  
+### What's Missing
 
-#### Opportunity
-Several endpoints perform expensive aggregation queries:
-- `/api/status/overview` — 5+ queries with COUNT/SUM aggregations
-- `/api/usage/summary` — Complex GROUP BY queries with window functions
-- `/api/orchestrator/reflections` — Multi-table joins
+**No span hierarchy** — Operations are logged as flat events with no parent-child relationships. Can't answer:
+- "Which LLM calls happened during this retrieval step?"
+- "How long did the tool selection phase take vs. execution?"
+- "What was the full call stack when this error occurred?"
 
-#### Solution
-Two-tier caching strategy:
-1. **Application-level cache** — Use fastapi-cache2 as described in Opportunity #1
-2. **Query-level cache** — For very expensive queries, add manual caching logic
+**No trace context propagation** — When a task spawns sub-agents or makes external calls, there's no trace ID linking them together.
 
-**Pattern:**
-```python
-from fastapi_cache import FastAPICache
+**No timing breakdown** — Worker runtime is tracked as a single duration. Can't identify which operation was slow (prompt building, model inference, tool execution, result parsing).
 
-async def get_usage_summary_expensive(db: AsyncSession) -> dict:
-    cache_key = "usage:summary:last_30_days"
-    
-    # Try cache first
-    cached = await FastAPICache.get(cache_key)
-    if cached:
-        return cached
-    
-    # Expensive query
-    result = await db.execute(complex_aggregation_query)
-    data = process_results(result)
-    
-    # Cache for 5 minutes
-    await FastAPICache.set(cache_key, data, expire=300)
-    return data
+### Industry Standard: OpenTelemetry Tracing
+
+**LangSmith approach** (source: https://docs.smith.langchain.com/observability):
+- Every operation creates a **span** (e.g., "llm_call", "retriever", "tool_use", "chain")
+- Spans have:
+  - `trace_id`: Groups all operations in a request
+  - `span_id`: Unique identifier for this operation
+  - `parent_span_id`: Links to parent operation
+  - Start/end timestamps
+  - Attributes: model, tokens, cost, error message, etc.
+  - Events: Sub-events within a span (e.g., "cache_hit", "retry_attempt")
+
+**Phoenix approach** (source: https://docs.arize.com/phoenix/tracing/llm-traces):
+- Uses **OpenTelemetry (OTLP)** protocol standard
+- Auto-instrumentation for popular frameworks (LlamaIndex, LangChain, OpenAI SDK)
+- Captures:
+  - Model calls with prompt/response
+  - Retrieval steps with documents and scores
+  - Tool invocations with inputs/outputs
+  - Custom logic with timing
+
+**Example trace hierarchy:**
+```
+Task: "Research auth libraries"  [trace_id=abc123, duration=145s]
+  ├─ Span: agent.plan  [15s]
+  ├─ Span: tool.web_search [query="oauth libraries python"]  [8s]
+  ├─ Span: llm.call [model=gpt-4, tokens=450/230]  [3s]
+  │   └─ Event: cache_hit [saved 120 tokens]
+  ├─ Span: tool.web_fetch [url="..."]  [12s]
+  └─ Span: agent.synthesize  [25s]
+      └─ Span: llm.call [model=claude-sonnet, tokens=2100/890]  [22s]
 ```
 
-#### Cost/Latency Estimates
-- **Setup cost:** 2-4 hours (identify slow queries, add caching)
-- **Latency improvement:**
-  - Uncached complex query: 100-500ms
-  - Cached: 2-10ms
-  - **Reduction: 95-98%**
-- **Database load reduction:** 30-50% on aggregation-heavy endpoints
+### Recommendation
 
-#### Recommended Queries
-1. Usage summary aggregations (highest impact)
-2. Task statistics by project/agent
-3. Agent activity timelines
-4. Cost projections and budgets
+**Implement OpenTelemetry-based tracing:**
 
----
+1. **Add tracing instrumentation to worker spawning:**
+   ```python
+   # In worker.py
+   from opentelemetry import trace
+   
+   tracer = trace.get_tracer(__name__)
+   
+   async def spawn_worker(self, task, project_id, agent_type):
+       with tracer.start_as_current_span(
+           "worker.spawn",
+           attributes={
+               "task.id": task["id"],
+               "project.id": project_id,
+               "agent.type": agent_type,
+           }
+       ) as span:
+           # ... existing spawn logic ...
+           span.set_attribute("worker.id", worker_id)
+           span.set_attribute("model.selected", chosen_model)
+   ```
 
-## Additional Caching Opportunities
+2. **Instrument OpenClaw Gateway calls:**
+   - Propagate trace context via HTTP headers (`traceparent`)
+   - Extract span IDs from session transcripts
+   - Link worker spans to OpenClaw internal spans
 
-### 4. Static File Caching
-**Priority:** LOW  
-**Impact:** Minimal (API-focused system, few static assets)
+3. **Add custom spans for key operations:**
+   - Task scanning and routing
+   - Model selection fallback chain
+   - Prompt building
+   - Result extraction
+   - Git commit/push
 
-- Add `Cache-Control` headers to any static documentation or exported reports
-- Use CDN if serving large assets (transcripts, logs)
+4. **Export traces to a backend:**
+   - **Short-term:** File-based OTLP exporter (JSON files in `logs/traces/`)
+   - **Medium-term:** Phoenix (open-source, self-hosted)
+   - **Long-term:** LangSmith or Arize (managed SaaS)
 
-### 5. Semantic Caching (Advanced)
-**Priority:** LOW (Future consideration)  
-**Estimated Setup:** 20-40 hours  
-
-For advanced LLM caching beyond Anthropic's prompt caching:
-- **GPTCache** or **LangChain SemanticCache** — Cache responses based on semantic similarity
-- Use embedding models to find similar prompts → return cached responses
-- **Use case:** When users ask similar questions ("What's my task status?" vs "Show me my tasks")
-- **Complexity:** High (requires vector database, embedding pipeline, similarity tuning)
-- **ROI:** Low for current system (most LLM calls are unique agent tasks, not user queries)
-
-**Source:** LangChain documentation mentions semantic caching with Redis/vector stores
-
----
-
-## Implementation Roadmap
-
-### Phase 1: Quick Wins (Week 1)
-1. **Install fastapi-cache2**
-   - Add to requirements.txt: `fastapi-cache2[redis]` or `fastapi-cache2` (in-memory)
-   - Set up Redis (Docker or managed service) or use InMemoryBackend for testing
-2. **Cache status endpoints**
-   - `/api/status/overview` (10s TTL)
-   - `/api/agents` (30s TTL)
-3. **Add cache monitoring**
-   - Log cache hit/miss rates
-   - Monitor Redis memory usage
-
-**Estimated time:** 8-12 hours  
-**Impact:** Immediate 50-80% latency reduction on cached endpoints
-
-### Phase 2: LLM Optimization (Week 2)
-1. **Investigate OpenClaw Gateway prompt caching support**
-   - Check if gateway exposes Anthropic's `cache_control` parameter
-   - Review gateway API documentation
-2. **Instrument current prompts**
-   - Add logging to measure current prompt sizes
-   - Identify static vs dynamic sections
-3. **Enable prompt caching** (if supported)
-   - Mark agent identity and project context as cacheable
-   - Test cache effectiveness in orchestrator
-4. **Monitor cost savings**
-   - Track `cache_read_tokens` and `cache_write_tokens`
-   - Calculate actual cost reduction
-
-**Estimated time:** 12-16 hours  
-**Impact:** 40-60% cost reduction on LLM calls, 75-85% latency reduction
-
-### Phase 3: Advanced Optimizations (Week 3-4)
-1. **Expand HTTP caching**
-   - Add caching to remaining read-heavy endpoints
-   - Implement cache invalidation hooks
-2. **Optimize cache configuration**
-   - Tune TTLs based on actual usage patterns
-   - Add namespace-based cache clearing
-3. **Database query optimization**
-   - Profile slow queries
-   - Add selective manual caching for expensive aggregations
-
-**Estimated time:** 8-12 hours  
-**Impact:** Additional 10-20% overall system performance improvement
+**Effort:** Medium (2-3 days)  
+**Impact:** High — Unlocks detailed performance analysis and debugging
 
 ---
 
-## Risks & Considerations
+## Gap #2: Limited Agent Reasoning Visibility 🟡 HIGH
 
-### Cache Invalidation
-- **Stale data risk:** Users may see outdated information during cache window
-- **Mitigation:** 
-  - Keep TTLs short for critical data (10-30s)
-  - Add event-based invalidation for writes
-  - Document cache behavior in API docs
+### What's Missing
 
-### LLM Prompt Caching
-- **Gateway dependency:** Requires OpenClaw Gateway to support Anthropic's `cache_control`
-- **Cache warming:** First request with new prompt still pays full cost + 25% cache write markup
-- **5-minute TTL:** Cache expires if unused for >5 minutes (good for active sessions, less useful for sporadic tasks)
-- **Mitigation:** 
-  - Profile actual cache hit rates after implementation
-  - Consider pre-warming cache for common prompts
-  - Only cache prompts >1024 tokens (Anthropic's minimum)
+**No decision path tracking** — Can't see:
+- Why agent chose tool A over tool B
+- What prompted a retry vs. giving up
+- How the agent interpreted ambiguous instructions
+- Which examples from memory influenced behavior
 
-### Redis Infrastructure
-- **Operational overhead:** Adds Redis as a dependency
-- **Memory management:** Need to monitor Redis memory usage and eviction
-- **Mitigation:**
-  - Start with InMemoryBackend for testing
-  - Use managed Redis service (AWS ElastiCache, Redis Cloud) for production
-  - Set max memory limits and LRU eviction policy
+**No intermediate outputs** — Currently only track:
+- Final summary (from `.work-summary` or session transcript)
+- Commit SHAs and modified files
+- Binary success/failure
+
+**Missing:**
+- Agent's plan before execution
+- Tool selection rationale
+- Partial results from failed attempts
+- Self-correction reasoning ("I tried X, it failed, so now trying Y")
+
+### Industry Standard: Structured Outputs & Metadata
+
+**LangSmith approach:**
+- Captures **full prompt** and **full response** for every LLM call
+- Stores **tool inputs/outputs** as structured data
+- Allows **annotations** on spans (human feedback, scores, tags)
+- Supports **custom metadata** (e.g., `reasoning_type: "chain_of_thought"`)
+
+**Phoenix approach:**
+- **Embeddings visualization** — See which examples were retrieved
+- **Prompt templates** — View the actual template + variables
+- **LLM function calls** — Inspect tool selection and arguments
+- **Evaluation scores** — Attach quality metrics to traces
+
+### Example: What Good Reasoning Capture Looks Like
+
+```json
+{
+  "trace_id": "task-abc123",
+  "spans": [
+    {
+      "name": "agent.plan",
+      "attributes": {
+        "agent.goal": "Research auth libraries and recommend one",
+        "agent.plan": [
+          "Search for popular Python auth libraries",
+          "Compare OAuth 2.0 support",
+          "Check maintenance status",
+          "Evaluate security track record"
+        ],
+        "reasoning": "User needs production-ready auth. Prioritizing security over ease-of-use."
+      }
+    },
+    {
+      "name": "tool.select",
+      "attributes": {
+        "tools.available": ["web_search", "web_fetch", "code_read"],
+        "tool.selected": "web_search",
+        "selection.reasoning": "Need broad overview before diving into specific library docs",
+        "confidence": 0.85
+      }
+    },
+    {
+      "name": "agent.self_correct",
+      "attributes": {
+        "error": "Search returned outdated results",
+        "correction": "Retry with date filter 'after:2024'",
+        "reasoning": "Initial results from 2020, need current info"
+      }
+    }
+  ]
+}
+```
+
+### Recommendation
+
+**Phase 1: Capture reasoning in structured metadata (low-hanging fruit)**
+
+1. **Modify agent prompts to output reasoning:**
+   ```python
+   # In prompter.py
+   system_prompt += """
+   
+   When making decisions, output your reasoning in this format:
+   <reasoning>
+   - Goal: [what you're trying to achieve]
+   - Options: [available choices]
+   - Selection: [your choice and why]
+   </reasoning>
+   """
+   ```
+
+2. **Extract reasoning from assistant responses:**
+   ```python
+   # New module: app/orchestrator/reasoning_extractor.py
+   def extract_reasoning(assistant_text: str) -> dict:
+       """Parse <reasoning> blocks from agent responses."""
+       import re
+       match = re.search(r'<reasoning>(.*?)</reasoning>', assistant_text, re.DOTALL)
+       if match:
+           return {"raw": match.group(1), "parsed": parse_reasoning_lines(match.group(1))}
+       return {}
+   ```
+
+3. **Store reasoning in WorkerRun.task_log:**
+   ```python
+   task_log = {
+       "model_router": model_audit,
+       "reasoning": {
+           "plan": extracted_plan,
+           "tool_selections": extracted_tool_choices,
+           "self_corrections": extracted_corrections
+       }
+   }
+   ```
+
+**Phase 2: Capture full tool I/O (requires OpenClaw changes)**
+
+- Modify OpenClaw Gateway to expose tool calls in transcript
+- Store tool name, arguments, result, and duration
+- Link to parent span in distributed trace
+
+**Effort:** Phase 1: Low (1 day), Phase 2: Medium (3-4 days, requires OpenClaw changes)  
+**Impact:** High — Dramatically improves debugging failed tasks
 
 ---
 
-## Monitoring & Metrics
+## Gap #3: No Real-Time Observability Dashboard 🟡 HIGH
 
-Track these metrics to measure caching effectiveness:
+### What's Missing
 
-### HTTP Cache Metrics
-- Cache hit rate (target: >60%)
-- Cache miss rate
-- Average response time (cached vs uncached)
-- Redis memory usage
-- Cache key distribution (which endpoints benefit most)
+**No visual monitoring** — Logs and DB tables exist, but no way to:
+- See active workers at a glance
+- Monitor queue depth over time
+- Track success/failure rates by agent type
+- Identify performance regressions (e.g., "researcher agent 20% slower this week")
 
-### LLM Cache Metrics
-- `cache_read_tokens` vs `cache_write_tokens` ratio
-- Cost per task (before/after caching)
-- Time to first token (before/after caching)
-- Cache hit rate by agent type
-- Cache hit rate by task type
+**No alerting** — System creates inbox alerts for stuck tasks, but:
+- No Slack/email notifications
+- No anomaly detection (e.g., "failure rate jumped 3x")
+- No SLO tracking (e.g., "95% of tasks complete within 5 minutes")
 
-### Database Metrics
-- Query execution time (P50, P95, P99)
-- Database connection pool usage
-- Number of queries per request
+**No historical analysis** — Can query DB, but no:
+- Time-series charts
+- Aggregated metrics (p50/p95/p99 latency)
+- Correlation analysis (e.g., "failures spike when using model X on project Y")
+
+### Industry Standard: Observability Platforms
+
+**LangSmith:**
+- **Trace search & filtering** — Query by metadata, error status, latency, cost
+- **Dashboards** — Custom charts for throughput, latency, cost, errors
+- **Alerts** — Trigger on conditions (e.g., "error rate > 5%")
+- **Comparison view** — Side-by-side trace comparison for debugging regressions
+
+**Phoenix:**
+- **Real-time trace viewer** — Live feed of incoming traces
+- **Metrics page** — Latency histograms, token usage trends, error rates
+- **Projects & sessions** — Group traces by application and conversation
+- **Annotations** — Tag traces with human feedback for evaluation
+
+**Grafana + Prometheus (self-hosted alternative):**
+- Export OpenTelemetry metrics to Prometheus
+- Build dashboards with Grafana
+- Set up alerting rules
+- Integrate with PagerDuty/Slack
+
+### Recommendation
+
+**Phase 1: Extend `/api/orchestrator/status` endpoint (quick win)**
+
+Add detailed metrics to existing status endpoint:
+
+```python
+# In app/routers/orchestrator.py
+@router.get("/status/detailed")
+async def get_detailed_status(db: AsyncSession = Depends(get_db)):
+    """Extended status with performance metrics."""
+    
+    # Current metrics (already tracked)
+    active_workers = await get_active_worker_count(db)
+    queue_depth = await get_eligible_task_count(db)
+    
+    # New metrics to add
+    last_hour = datetime.now(timezone.utc) - timedelta(hours=1)
+    recent_runs = await db.execute(
+        select(WorkerRun).where(WorkerRun.ended_at >= last_hour)
+    )
+    runs = recent_runs.scalars().all()
+    
+    return {
+        "active_workers": active_workers,
+        "queue_depth": queue_depth,
+        "last_hour": {
+            "total_tasks": len(runs),
+            "success_rate": sum(1 for r in runs if r.succeeded) / len(runs) if runs else 0,
+            "avg_duration_seconds": sum((r.ended_at - r.started_at).total_seconds() for r in runs) / len(runs) if runs else 0,
+            "total_cost_usd": sum(r.total_cost_usd or 0 for r in runs),
+            "by_agent": _group_by_agent(runs),
+            "by_model": _group_by_model(runs),
+        },
+        "provider_health": await get_provider_health_summary(db),
+    }
+```
+
+**Phase 2: Build a simple dashboard (static HTML + Chart.js)**
+
+Create `app/static/dashboard.html` served at `/dashboard`:
+
+- Live metrics (refreshes every 10s via `/api/orchestrator/status/detailed`)
+- Charts: Task throughput, success rate, avg duration, cost over time
+- Active workers table with real-time progress
+- Recent failures list with links to logs
+
+**Effort:** Low-Medium (1-2 days per phase)
+
+**Phase 3: Integrate with Phoenix (long-term)**
+
+1. Deploy Phoenix (Docker container or self-hosted)
+2. Export OpenTelemetry traces to Phoenix
+3. Use Phoenix UI for trace visualization and analysis
+4. Build custom dashboards in Phoenix for lobs-specific metrics
+
+**Effort:** Medium (2-3 days setup + ongoing maintenance)  
+**Impact:** High — Enables proactive monitoring and faster incident response
 
 ---
 
-## Alternative Approaches Considered
+## Summary: Top 3 Gaps & Recommended Solutions
 
-### 1. Query Result Memoization (Rejected)
-- **Approach:** Use Python's `@lru_cache` decorator on database query functions
-- **Rejected because:** 
-  - Doesn't work well with async functions
-  - No TTL support
-  - Memory leaks with unbounded cache
-  - Better to use proper cache backend (Redis)
-
-### 2. Full Page Caching with Varnish/Nginx (Not applicable)
-- **Approach:** HTTP reverse proxy caching
-- **Not applicable because:**
-  - Most endpoints require authentication (Bearer token)
-  - Need fine-grained cache control
-  - Application-level caching is more flexible
-
-### 3. SQLite Query Cache Extension (Not pursued)
-- **Approach:** Enable SQLite's query result caching
-- **Not pursued because:**
-  - Limited control over cache invalidation
-  - Application-level caching provides better observability
-  - Doesn't help with LLM costs (primary expense)
+| Gap | Severity | Current Impact | Recommended Solution | Effort | ROI |
+|-----|----------|----------------|---------------------|---------|-----|
+| **1. No distributed tracing** | 🔴 Critical | Can't debug slow tasks or trace errors to root cause | Implement OpenTelemetry spans with trace_id/span_id hierarchy | Medium (2-3 days) | **Very High** — Unlocks detailed performance analysis |
+| **2. Limited reasoning visibility** | 🟡 High | Can't understand why agents made specific decisions or failed | Extract reasoning blocks from responses + store tool I/O | Low-Med (1-4 days) | **High** — Dramatically improves debugging |
+| **3. No real-time dashboard** | 🟡 High | Blind to system health, can't spot regressions quickly | Build `/dashboard` endpoint + Phoenix integration | Low-Med (1-5 days) | **High** — Enables proactive monitoring |
 
 ---
 
-## Cost-Benefit Summary
+## Industry Patterns Summary
 
-| Opportunity | Implementation Time | Cost Reduction | Latency Reduction | Priority |
-|-------------|---------------------|----------------|-------------------|----------|
-| HTTP Response Caching | 8-12 hours | Low (hosting) | 50-80% | HIGH |
-| LLM Prompt Caching | 12-16 hours | 40-60% LLM costs | 75-85% TTFT | CRITICAL |
-| DB Query Caching | 2-4 hours | Minimal | 60-80% | MEDIUM |
+### Common Observability Features Across Platforms
 
-**Total estimated implementation time:** 22-32 hours (1-2 weeks)  
-**Total estimated cost savings:** 40-60% on LLM calls (largest expense), 50-80% latency reduction on cached endpoints
+| Feature | LangSmith | Phoenix | CrewAI | lobs-server |
+|---------|-----------|---------|--------|-------------|
+| **Distributed tracing** | ✅ Spans with parent-child | ✅ OpenTelemetry | ❌ | ❌ **Gap** |
+| **Trace search & filtering** | ✅ Rich query UI | ✅ Metadata tags | ❌ | ❌ **Gap** |
+| **Token usage tracking** | ✅ Per-span | ✅ Per-trace | ⚠️ Basic | ✅ **Good** |
+| **Cost tracking** | ✅ Per-trace | ✅ Per-model | ❌ | ✅ **Good** |
+| **Error traces** | ✅ Full context | ✅ Exception details | ⚠️ Basic | ⚠️ **Partial** |
+| **Real-time dashboards** | ✅ | ✅ | ❌ | ❌ **Gap** |
+| **Alerting** | ✅ Rules engine | ✅ Webhooks | ❌ | ⚠️ **Inbox only** |
+| **Human feedback** | ✅ Annotations | ✅ Annotations | ❌ | ❌ **Gap** |
+| **Session replay** | ✅ Step-by-step | ✅ Message history | ❌ | ⚠️ **Transcript only** |
+| **Performance metrics** | ✅ p50/p95/p99 | ✅ Histograms | ❌ | ⚠️ **Basic avg only** |
+| **Tool I/O capture** | ✅ Structured | ✅ Structured | ⚠️ Via logs | ❌ **Gap** |
+| **Reasoning traces** | ⚠️ Via prompts | ⚠️ Via prompts | ❌ | ❌ **Gap** |
 
----
+**Legend:**
+- ✅ Full support
+- ⚠️ Partial support or workarounds
+- ❌ Not implemented
 
-## References
+### Key Insights from Research
 
-1. **fastapi-cache2** — GitHub repository: https://github.com/long2ice/fastapi-cache
-2. **Anthropic Prompt Caching** — Blog post: https://www.anthropic.com/news/prompt-caching (Dec 17, 2024 update)
-3. **FastAPI Middleware Documentation** — https://fastapi.tiangolo.com/advanced/middleware/
-4. **LangChain Caching** — Provider integrations overview (mentions caching capabilities)
+1. **OpenTelemetry is the industry standard** — Both LangSmith and Phoenix use OTLP as their trace protocol. This enables interoperability and vendor portability.
+
+2. **Trace visualization is critical** — Flat logs aren't enough. Hierarchical span trees with timing breakdowns are essential for debugging complex agent behaviors.
+
+3. **Metadata-driven filtering** — Successful platforms allow querying traces by custom tags (e.g., `agent_type=researcher`, `error=rate_limit`, `cost>$1.00`).
+
+4. **Human feedback loops** — Production systems need a way to mark traces as "good" or "bad" and feed that signal back into evaluation pipelines.
+
+5. **Cost is a first-class metric** — Token usage and cost tracking aren't optional — they're core observability signals for LLM applications.
 
 ---
 
 ## Next Steps
 
-1. **Validate assumptions**
-   - Profile actual API endpoint usage (which endpoints are hit most?)
-   - Measure current LLM prompt sizes and composition
-   - Check if OpenClaw Gateway supports Anthropic prompt caching
+### Immediate Actions (Week 1)
 
-2. **POC for HTTP caching**
-   - Set up fastapi-cache2 with InMemoryBackend
-   - Cache 2-3 high-traffic endpoints
-   - Measure hit rates and latency improvements
+1. ✅ **Document current state** (this document)
+2. ⏭️ **Prototype OpenTelemetry integration**
+   - Add `opentelemetry-api` and `opentelemetry-sdk` to `requirements.txt`
+   - Instrument `worker.spawn_worker()` with a single span
+   - Export traces to JSON files in `logs/traces/`
+   - Validate trace structure
 
-3. **Investigate LLM caching feasibility**
-   - Review OpenClaw Gateway API/code for `cache_control` support
-   - If not supported, file feature request or contribute PR
-   - Estimate ROI based on actual prompt structure
+3. ⏭️ **Add reasoning extraction**
+   - Update agent system prompts to include `<reasoning>` blocks
+   - Implement `reasoning_extractor.py`
+   - Store reasoning in `WorkerRun.task_log`
 
-4. **Create detailed implementation ticket**
-   - Break down work into incremental tasks
-   - Set up monitoring before rolling out caching
-   - Plan gradual rollout (start with non-critical endpoints)
+### Short-Term (Month 1)
+
+4. ⏭️ **Build comprehensive tracing**
+   - Instrument all major operations (task scanning, model selection, git operations)
+   - Propagate trace context to OpenClaw Gateway
+   - Link worker spans to sub-agent spans
+
+5. ⏭️ **Deploy Phoenix**
+   - Set up Phoenix Docker container
+   - Configure OTLP exporter to send traces to Phoenix
+   - Build initial dashboards
+
+6. ⏭️ **Extend status API**
+   - Add `/api/orchestrator/status/detailed` endpoint
+   - Track performance metrics over time
+   - Build simple HTML dashboard at `/dashboard`
+
+### Long-Term (Quarter 1)
+
+7. ⏭️ **Integrate human feedback**
+   - Add UI for marking task outcomes as "good"/"bad"
+   - Store feedback in `task_annotations` table
+   - Use feedback for model selection and prompt tuning
+
+8. ⏭️ **Advanced analytics**
+   - Build custom Phoenix dashboards for lobs-specific metrics
+   - Set up alerting for anomalies (failure spikes, cost overruns)
+   - Implement SLO tracking (e.g., "95% of tasks complete within target duration")
 
 ---
 
-**Conclusion:** The most impactful optimization is enabling **Anthropic prompt caching** (40-60% cost reduction, 75-85% latency reduction), followed by **HTTP response caching** (50-80% latency reduction on read-heavy endpoints). Combined, these changes could reduce total system costs by 30-50% and dramatically improve user-facing response times, especially for orchestrator tasks and dashboard queries.
+## Appendix: Implementation Examples
+
+### Example 1: OpenTelemetry Span Instrumentation
+
+```python
+# app/orchestrator/worker.py
+
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+
+tracer = trace.get_tracer("lobs.orchestrator.worker", version="1.0.0")
+
+async def spawn_worker(self, task, project_id, agent_type):
+    with tracer.start_as_current_span(
+        "worker.spawn",
+        kind=trace.SpanKind.INTERNAL,
+        attributes={
+            "task.id": task["id"],
+            "task.title": task.get("title", "")[:100],
+            "project.id": project_id,
+            "agent.type": agent_type,
+        }
+    ) as span:
+        try:
+            # Model selection
+            with tracer.start_as_current_span("model.select") as model_span:
+                choice = await chooser.choose(agent_type, task, purpose="execution")
+                model_span.set_attribute("model.selected", choice.candidates[0])
+                model_span.set_attribute("model.tier", choice.tier)
+                model_span.set_attribute("fallback.available", len(choice.candidates))
+            
+            # Gateway spawn
+            with tracer.start_as_current_span("gateway.spawn") as gateway_span:
+                spawn_result = await self._spawn_session(...)
+                gateway_span.set_attribute("gateway.run_id", spawn_result["runId"])
+            
+            span.set_attribute("worker.id", worker_id)
+            span.set_attribute("spawn.success", True)
+            span.set_status(Status(StatusCode.OK))
+            
+        except Exception as e:
+            span.set_status(Status(StatusCode.ERROR, str(e)))
+            span.record_exception(e)
+            raise
+```
+
+### Example 2: Reasoning Extraction
+
+```python
+# app/orchestrator/reasoning_extractor.py
+
+import re
+from typing import Dict, List, Optional
+
+def extract_reasoning(assistant_text: str) -> Dict[str, any]:
+    """Extract structured reasoning from agent responses."""
+    
+    reasoning = {}
+    
+    # Extract plan
+    plan_match = re.search(
+        r'<plan>(.*?)</plan>',
+        assistant_text,
+        re.DOTALL | re.IGNORECASE
+    )
+    if plan_match:
+        steps = [
+            line.strip('- ').strip()
+            for line in plan_match.group(1).strip().split('\n')
+            if line.strip()
+        ]
+        reasoning['plan'] = steps
+    
+    # Extract tool selections
+    tool_matches = re.finditer(
+        r'<tool_select>(.*?)</tool_select>',
+        assistant_text,
+        re.DOTALL | re.IGNORECASE
+    )
+    tool_selections = []
+    for match in tool_matches:
+        lines = match.group(1).strip().split('\n')
+        selection = {}
+        for line in lines:
+            if ':' in line:
+                key, value = line.split(':', 1)
+                selection[key.strip('- ').lower()] = value.strip()
+        tool_selections.append(selection)
+    if tool_selections:
+        reasoning['tool_selections'] = tool_selections
+    
+    # Extract self-corrections
+    correction_matches = re.finditer(
+        r'<correction>(.*?)</correction>',
+        assistant_text,
+        re.DOTALL | re.IGNORECASE
+    )
+    corrections = [match.group(1).strip() for match in correction_matches]
+    if corrections:
+        reasoning['self_corrections'] = corrections
+    
+    return reasoning
+
+
+# Usage in worker.py
+def _handle_worker_completion(...):
+    # ... existing code ...
+    
+    # Extract reasoning from session transcript
+    if result_summary:
+        from app.orchestrator.reasoning_extractor import extract_reasoning
+        reasoning = extract_reasoning(result_summary)
+        if reasoning:
+            task_log["reasoning"] = reasoning
+    
+    # Store in WorkerRun
+    run = WorkerRun(
+        ...,
+        task_log=task_log,
+    )
+```
+
+### Example 3: Enhanced Status Endpoint
+
+```python
+# app/routers/orchestrator.py
+
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+
+@router.get("/status/metrics")
+async def get_orchestrator_metrics(
+    window_hours: int = 1,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get detailed performance metrics over a time window."""
+    
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+    
+    # Fetch recent worker runs
+    result = await db.execute(
+        select(WorkerRun)
+        .where(WorkerRun.ended_at >= cutoff)
+        .order_by(WorkerRun.ended_at.desc())
+    )
+    runs = result.scalars().all()
+    
+    if not runs:
+        return {"message": "No data in time window", "window_hours": window_hours}
+    
+    # Calculate metrics
+    total = len(runs)
+    succeeded = sum(1 for r in runs if r.succeeded)
+    failed = total - succeeded
+    
+    durations = [
+        (r.ended_at - r.started_at).total_seconds()
+        for r in runs
+        if r.started_at and r.ended_at
+    ]
+    durations.sort()
+    
+    costs = [r.total_cost_usd for r in runs if r.total_cost_usd]
+    
+    # Group by agent type
+    by_agent = defaultdict(lambda: {"total": 0, "succeeded": 0, "failed": 0})
+    for r in runs:
+        task = await db.get(Task, r.task_id)
+        if task and task.agent:
+            by_agent[task.agent]["total"] += 1
+            if r.succeeded:
+                by_agent[task.agent]["succeeded"] += 1
+            else:
+                by_agent[task.agent]["failed"] += 1
+    
+    # Group by model
+    by_model = defaultdict(lambda: {"count": 0, "cost": 0.0})
+    for r in runs:
+        if r.model:
+            by_model[r.model]["count"] += 1
+            by_model[r.model]["cost"] += r.total_cost_usd or 0.0
+    
+    return {
+        "window_hours": window_hours,
+        "window_start": cutoff.isoformat(),
+        "window_end": datetime.now(timezone.utc).isoformat(),
+        "summary": {
+            "total_tasks": total,
+            "succeeded": succeeded,
+            "failed": failed,
+            "success_rate": round(succeeded / total * 100, 1) if total > 0 else 0,
+        },
+        "performance": {
+            "duration_p50": durations[len(durations)//2] if durations else 0,
+            "duration_p95": durations[int(len(durations)*0.95)] if durations else 0,
+            "duration_p99": durations[int(len(durations)*0.99)] if durations else 0,
+            "duration_avg": sum(durations) / len(durations) if durations else 0,
+            "duration_max": max(durations) if durations else 0,
+        },
+        "cost": {
+            "total_usd": sum(costs),
+            "avg_per_task": sum(costs) / len(costs) if costs else 0,
+            "max_per_task": max(costs) if costs else 0,
+        },
+        "by_agent": dict(by_agent),
+        "by_model": dict(by_model),
+    }
+```
+
+---
+
+## Sources
+
+- **LangSmith Observability Docs:** https://docs.smith.langchain.com/observability
+- **Phoenix Tracing Overview:** https://docs.arize.com/phoenix/tracing/llm-traces
+- **LangChain Agent Concepts:** https://docs.langchain.com/oss/python/langchain/overview
+- **CrewAI Tools Documentation:** https://docs.crewai.com/concepts/tools
+- **OpenTelemetry Specification:** https://opentelemetry.io/docs/specs/otel/
+- **lobs-server codebase analysis:** `app/orchestrator/`, `app/models.py`, `app/logging_config.py`
+
+---
+
+**End of Report**
