@@ -206,6 +206,30 @@ python3 -m pytest -m "not slow"
 
 **Known issues:** WebSocket tests broken (see [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md))
 
+### Security Scanning
+
+Security scanning runs automatically in CI but can be run locally:
+
+```bash
+# Install security tools
+pip install 'bandit[toml]' safety
+
+# Run Bandit security linter (checks for common Python security issues)
+bandit -r app/ -c .bandit --severity-level high --confidence-level medium -f screen
+
+# Run Safety dependency scanner (checks for known vulnerabilities)
+safety check --bare 2>/dev/null
+```
+
+**Configuration:**
+- Bandit config: `.bandit` (YAML format)
+- Configured to fail on high-severity issues only
+- Excludes: tests, .venv, migrations, cache directories
+
+**CI Integration:**
+- Runs automatically on all PRs and pushes to main
+- See `.github/workflows/validation.yml`
+
 ---
 
 ## Common Patterns

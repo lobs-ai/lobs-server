@@ -11,12 +11,13 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from app.database import engine_sync
+from app.config import settings
 
 
 def upgrade():
     """Create learning system tables."""
-    conn = sqlite3.connect(str(engine_sync.url).replace("sqlite:///", ""))
+    db_path = settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     # Create task_outcomes table
@@ -79,7 +80,8 @@ def upgrade():
 
 def downgrade():
     """Drop learning system tables."""
-    conn = sqlite3.connect(str(engine_sync.url).replace("sqlite:///", ""))
+    db_path = settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     
     cursor.execute("DROP TABLE IF EXISTS outcome_learnings")

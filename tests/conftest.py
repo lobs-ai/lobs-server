@@ -190,3 +190,41 @@ def project_id(sample_project):
 # Import additional fixtures from helpers module
 # This makes them available to all tests automatically
 pytest_plugins = ["tests.helpers.fixtures"]
+
+
+# ============================================================================
+# Schema Validators (for API contract tests)
+# ============================================================================
+
+def validate_task_schema(task: dict) -> None:
+    """Validate task schema matches API contract."""
+    # TODO: Implement full JSON schema validation
+    assert "id" in task
+    assert "title" in task
+    assert "status" in task
+
+
+def validate_chat_session_schema(session: dict) -> None:
+    """Validate chat session schema matches API contract."""
+    # TODO: Implement full JSON schema validation
+    assert "id" in session
+
+
+def validate_chat_message_schema(message: dict) -> None:
+    """Validate chat message schema matches API contract."""
+    # TODO: Implement full JSON schema validation
+    assert "id" in message
+    assert "content" in message
+
+
+def validate_memory_schema(memory: dict) -> None:
+    """Validate memory schema matches API contract."""
+    # TODO: Implement full JSON schema validation
+    assert "id" in memory
+
+
+def validate_project_schema(project: dict) -> None:
+    """Validate project schema matches API contract."""
+    # TODO: Implement full JSON schema validation
+    assert "id" in project
+    assert "name" in project

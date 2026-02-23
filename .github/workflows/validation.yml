@@ -70,3 +70,50 @@ jobs:
           echo "Tests must not use time.sleep(), datetime.now(), or date.today() without @freeze_time decorator."
           echo "See https://github.com/spulec/freezegun for proper time mocking."
           exit 1
+  
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Install security tools
+        run: |
+          pip install 'bandit[toml]' safety
+      
+      - name: Run Bandit security linter
+        run: |
+          # Run bandit on all Python code using .bandit config
+          # -r: recursive scan
+          # -c: use config file
+          # --severity-level high: only fail on high-severity issues
+          # --confidence-level medium: filter to medium+ confidence
+          bandit -r app/ -c .bandit --severity-level high --confidence-level medium -f screen
+      
+      - name: Run Safety dependency scanner
+        run: |
+          # Check for known vulnerabilities in dependencies
+          # Using deprecated 'check' command as 'scan' requires authentication
+          # Redirect deprecation warnings to stderr, check exit code for vulnerabilities
+          safety check --bare 2>/dev/null || {
+            echo "⚠️  Known vulnerabilities detected in dependencies"
+            exit 1
+          }
+      
+      - name: Report scan completion
+        if: success()
+        run: |
+          echo "✅ Security scans passed - no high-severity issues found"

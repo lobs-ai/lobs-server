@@ -15,6 +15,7 @@ Key changes from subprocess version:
 import asyncio
 import json
 import logging
+import subprocess
 import time
 import uuid
 from dataclasses import dataclass
@@ -954,7 +955,7 @@ class WorkerManager:
             )
             if not commit_sha and not modified_files and not is_internal_task:
                 # Check if it's a non-code task (writer/researcher docs go to shared memory)
-                if agent_type not in ("writer", "researcher", "reviewer"):
+                if agent_type not in ("writer", "researcher", "reviewer", "architect"):
                     logger.warning(
                         "[WORKER] Worker %s completed but produced no file changes "
                         "(task=%s). Marking as failed.",
