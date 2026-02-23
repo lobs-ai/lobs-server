@@ -1,389 +1,483 @@
-# Memory Retrieval Quality Audit
+# Post-Refactor Code Review: Orchestrator Modules
 
-**Date:** 2026-02-23  
 **Reviewer:** reviewer  
-**Task:** Audit memory retrieval quality  
-**Database:** 253 memories across multiple agents
-
----
+**Date:** 2026-02-23  
+**Task ID:** 661e7dc4-269e-44f0-a314-23157252a9a3  
+**Focus:** worker.py and engine.py split review
 
 ## Executive Summary
 
-The memory search implementation uses **simple substring matching (ILIKE)** which provides adequate results for basic single-term queries (70% success rate) but fails completely on multi-word phrases (20% failure rate). The system shows **NO semantic understanding** and cannot match queries where words are separated or appear in different order.
+Reviewed the refactored split between `worker.py` (1916 LOC) and `engine.py` (915 LOC). Overall, the separation of concerns is **sound**, with no circular imports detected. However, several **important issues** were found:
 
-**Overall Metrics:**
-- ✅ **7/10 queries** performed well (≥50% precision)
-- ⚠️ **1/10 queries** had poor relevance (0% precision)
-- ❌ **2/10 queries** returned zero results despite relevant content existing
-- 📊 Average precision@10: **68%**
+- 🔴 **2 Critical** — Missing error handling, potential data loss
+- 🟡 **5 Important** — Missing tests, unclear patterns, scalability concerns
+- 🔵 **3 Suggestions** — Code quality improvements
 
----
-
-## 🔴 Critical Issues
-
-### 1. Multi-Word Query Failure (Zero Recall)
-
-**Query:** `"orchestrator task routing"`  
-**Expected:** Memories about orchestrator, task delegation, routing logic  
-**Actual:** 0 results
-
-**Root Cause:** ILIKE requires exact substring match. Query looks for literal string "orchestrator task routing" but content contains these words separated:
-- "orchestrator handles task assignment"  
-- "routing tasks to agents"  
-- "task orchestrator logic"
-
-**Impact:** Users cannot find relevant information using natural multi-word queries. This is a **fundamental usability issue**.
-
-**Evidence:**
-```python
-# Current implementation (app/routers/memories.py:95-98)
-query = select(MemoryModel).where(
-    or_(
-        MemoryModel.title.ilike(f"%{q}%"),
-        MemoryModel.content.ilike(f"%{q}%")
-    )
-)
-```
-
-This looks for exact substring `%orchestrator task routing%` which doesn't exist.
-
----
-
-### 2. Recent Feature Not Discoverable
-
-**Query:** `"learning feedback outcome"`  
-**Expected:** Memories about the agent learning system (documented in ARCHITECTURE.md as recent change)  
-**Actual:** 0 results
-
-**Root Cause:** Same substring matching limitation. Even though the learning system is documented, the exact phrase isn't used.
-
-**Impact:** **New architectural features are not discoverable** through search, forcing users to manually browse or rely on external documentation.
-
----
-
-## 🟡 Important Issues
-
-### 3. Generic Query Poor Relevance
-
-**Query:** `"how to"`  
-**Expected:** Tutorials, guides, procedural documentation  
-**Actual:** 27 results, 0% relevant (0/10 in top 10)
-
-**Root Cause:** Over-matching on common phrase "how to" appearing in random contexts:
-- "...clients know **how to** use safely..."  
-- "...overview ✓ **How to** improve SWE-bench..."
-
-**Impact:** High-frequency phrases pollute results with false positives. **No ranking by relevance** beyond title/content distinction.
-
-**Example False Positive:**
-```
-"...standard tool interface that LLM clients know how to use safely and consistently."
-```
-This matches "how to" but is NOT a tutorial/guide.
-
----
-
-### 4. No Semantic Understanding
-
-**Observation:** Search cannot match:
-- **Synonyms:** "authentication" won't find "login", "auth", "security"
-- **Related concepts:** "bug" won't find "error", "crash", "failure" (unless explicitly mentioned)
-- **Paraphrased queries:** Different wording of the same concept
-
-**Current workaround:** Users must guess exact terminology used in memories.
-
----
-
-### 5. Primitive Scoring Algorithm
-
-**Current scoring (app/routers/memories.py:107-111):**
-```python
-score = 0.0
-if query_lower in memory.title.lower():
-    score += 2.0
-if query_lower in memory.content.lower():
-    score += 1.0
-```
-
-**Problems:**
-1. **Binary scoring:** Either matches or doesn't, no partial credit
-2. **No term frequency consideration:** 1 mention = 100 mentions
-3. **No position weighting:** Match at start vs. end treated equally
-4. **No recency bias:** Old memories rank same as new ones
-5. **Ties not broken meaningfully:** Many results have same score
-
-**Evidence:** 17 results for "authentication" all scored 1.0 (tied), order is essentially random among ties.
+**Verdict:** The refactor improves modularity, but needs fixes before production use.
 
 ---
 
 ## ✅ What Works Well
 
-### Strong Single-Term Performance
+### 1. Clear Separation of Concerns
+- **engine.py**: Orchestration loop, scheduling, coordination
+- **worker.py**: Worker lifecycle, Gateway API integration, session management
+- No circular imports: engine imports WorkerManager, worker doesn't import engine
 
-**Queries with 100% precision:**
-- `"authentication"` → 17 results, 10/10 relevant
-- `"API endpoint"` → 22 results, 10/10 relevant
-- `"database migration"` → 3 results, 3/3 relevant
-- `"memory system"` → 9 results, 9/9 relevant
-- `"test coverage"` → 22 results, 10/10 relevant
+### 2. Persistent State Management
+- `WorkerManager` instance reused across ticks (good for stateful tracking)
+- Provider health registry shared properly
+- Worker info properly encapsulated in `WorkerInfo` dataclass
 
-**Why it works:** Single terms or exact 2-word phrases that appear as-is in content. Substring matching is sufficient for literal matches.
-
-### Good Error Handling
-
-- Empty queries return empty results (correct behavior)
-- Agent filtering works correctly
-- No crashes or exceptions during testing
+### 3. Comprehensive Error Handling (mostly)
+- 25+ try/except blocks in worker.py
+- Proper logging levels (debug/info/warning/error)
+- Graceful degradation (e.g., transcript file lookup with multiple fallbacks)
 
 ---
 
-## 📊 Detailed Test Results
+## 🔴 Critical Issues
 
-| Query | Results | Relevant/10 | Precision | Status |
-|-------|---------|-------------|-----------|--------|
-| authentication | 17 | 10 | 100% | ✅ Good |
-| bug | 72 | 8 | 80% | ✅ Good |
-| API endpoint | 22 | 10 | 100% | ✅ Good |
-| database migration | 3 | 3 | 100% | ✅ Good |
-| **orchestrator task routing** | **0** | **0** | **N/A** | ❌ **Failed** |
-| memory system | 9 | 9 | 100% | ✅ Good |
-| how to | 27 | 0 | 0% | ⚠️ Poor |
-| performance optimization | 2 | 2 | 100% | ✅ Good |
-| test coverage | 22 | 10 | 100% | ✅ Good |
-| **learning feedback outcome** | **0** | **0** | **N/A** | ❌ **Failed** |
+### 1. **Race Condition in Worker Completion Handling**
+**Location:** `worker.py:_handle_worker_completion()` (line ~883)
 
----
-
-## 🎯 Recommendations
-
-### Priority 1: Multi-Word Query Support (Critical)
-
-**Problem:** 20% of queries return zero results due to word separation.
-
-**Solutions (pick one):**
-
-#### Option A: Token-Based Search (Quick Fix)
-Split query into tokens, match ANY token:
-```python
-tokens = q.lower().split()
-conditions = []
-for token in tokens:
-    conditions.append(MemoryModel.title.ilike(f"%{token}%"))
-    conditions.append(MemoryModel.content.ilike(f"%{token}%"))
-query = select(MemoryModel).where(or_(*conditions))
-```
-
-**Pros:** Easy to implement, immediate improvement  
-**Cons:** Will over-match, lots of false positives  
-**Effort:** 1-2 hours
-
-#### Option B: SQLite FTS5 (Better Solution)
-Use SQLite's full-text search with `MATCH`:
-```python
-# Requires FTS5 virtual table
-# CREATE VIRTUAL TABLE memories_fts USING fts5(title, content);
-query = "SELECT * FROM memories_fts WHERE memories_fts MATCH ?"
-```
-
-**Pros:** 
-- Built-in ranking (BM25)
-- Handles multi-word queries properly
-- Phrase queries with quotes
-- Boolean operators (AND, OR, NOT)
-
-**Cons:** Requires schema migration, index maintenance  
-**Effort:** 4-8 hours (migration + testing)
-
-#### Option C: Vector/Semantic Search (Future)
-Use embeddings for semantic similarity:
-- Requires embedding model (OpenAI, local Sentence Transformers)
-- Vector database (pgvector, ChromaDB, Qdrant)
-- Async embedding generation
-
-**Pros:** True semantic search, synonym matching  
-**Cons:** Complex infrastructure, cost/latency  
-**Effort:** 2-3 days
-
-**Recommendation:** Start with **Option B (FTS5)** for immediate multi-word support with good ranking. Consider Option C for future semantic capabilities.
-
----
-
-### Priority 2: Improve Scoring Algorithm (Important)
-
-**Current scoring is too simplistic.** Implement TF-IDF or BM25-style scoring:
+**Issue:** The function reads and modifies task state without transaction isolation. If two workers complete simultaneously and both check `db_task.work_state`, they could both set contradictory states.
 
 ```python
-# Pseudo-code for better scoring
-score = 0.0
-
-# Term frequency (multiple mentions = higher score)
-title_matches = title.lower().count(query_lower)
-content_matches = content.lower().count(query_lower)
-
-score += title_matches * 5.0  # Title matches worth more
-score += content_matches * 1.0
-
-# Position bonus (earlier = better)
-first_pos = content.lower().find(query_lower)
-if first_pos >= 0:
-    position_score = 1.0 / (1.0 + first_pos / 1000.0)
-    score += position_score
-
-# Recency bonus (newer = slightly better)
-age_days = (now - memory.updated_at).days
-recency_score = 1.0 / (1.0 + age_days / 30.0)
-score += recency_score
+# UNSAFE: No transaction isolation
+db_task = await self.db.get(Task, task_id)
+if db_task:
+    db_task.work_state = "completed"
+    db_task.status = "completed"
+    # ... more updates
+    await self.db.commit()
 ```
 
-**Effort:** 2-3 hours
-
----
-
-### Priority 3: Add Query Preprocessing (Quick Win)
-
-Clean and normalize queries:
+**Fix:**
 ```python
-def preprocess_query(q: str) -> str:
-    q = q.strip().lower()
-    q = re.sub(r'\s+', ' ', q)  # Normalize whitespace
-    q = re.sub(r'[^\w\s-]', '', q)  # Remove special chars
-    return q
+# Use optimistic locking with updated_at check
+async with self.db.begin_nested():
+    db_task = await self.db.get(Task, task_id, with_for_update=True)
+    if db_task:
+        # Verify task hasn't been modified by another process
+        if db_task.work_state == "in_progress":
+            db_task.work_state = "completed"
+            # ... rest of updates
 ```
 
-Add common expansions:
+**Risk:** Task state corruption, lost updates, inconsistent DB state  
+**Priority:** HIGH — create programmer handoff
+
+---
+
+### 2. **DB Session Management Violation**
+**Location:** `worker.py:_persist_reflection_output()` (line ~1299) and `_process_sweep_review_results()` (line ~1432)
+
+**Issue:** These methods create independent DB sessions (`_get_independent_session()`) to avoid conflicts with engine's session, but then commit changes that may conflict with engine's in-flight transaction. If engine's session is rolled back after worker commits, data becomes inconsistent.
+
 ```python
-SYNONYMS = {
-    "auth": ["authentication", "login", "token"],
-    "bug": ["error", "issue", "problem", "fix"],
-    "api": ["endpoint", "route", "REST"],
-}
+async def _persist_reflection_output(self, ...):
+    try:
+        async with self._get_independent_session() as db:
+            await self._persist_reflection_output_impl(db, ...)
+            await db.commit()  # ⚠️ Commits independently of engine session
+    except Exception as e:
+        logger.warning(...)
 ```
 
-**Effort:** 1-2 hours
+**Fix:** Either:
+1. **Option A (Recommended):** Queue reflection results in-memory and let engine commit them on next tick
+2. **Option B:** Use proper two-phase commit pattern with savepoints
+
+**Risk:** Data inconsistency, lost reflections, orphaned initiatives  
+**Priority:** HIGH — create programmer handoff
 
 ---
 
-### Priority 4: Add Search Analytics (Monitoring)
+## 🟡 Important Issues
 
-Track search quality over time:
+### 3. **Missing Tests for Critical Paths**
+**Location:** `tests/test_worker.py`
+
+**Issue:** Tests only cover basic API endpoints and session termination. Missing tests for:
+- Worker spawning with model fallback chains
+- Concurrent worker completion handling
+- Reflection output persistence
+- Sweep review processing
+- Circuit breaker integration
+- Provider health tracking
+
+**Fix:** Add integration tests for:
 ```python
-class SearchLog(Base):
-    query = Column(String)
-    result_count = Column(Integer)
-    clicked_result_id = Column(Integer, nullable=True)
-    timestamp = Column(DateTime)
+# Example needed test
+async def test_worker_completion_concurrent():
+    """Verify concurrent completion doesn't corrupt task state."""
+    # Spawn 2 workers for different tasks
+    # Complete both simultaneously
+    # Verify both tasks marked completed correctly
 ```
 
-**Metrics to track:**
-- Zero-result queries (should be <5%)
-- Click-through rate (users finding what they need?)
-- Most common queries (optimize for these)
-
-**Effort:** 2-3 hours
+**Risk:** Bugs in production, regressions on refactors  
+**Priority:** MEDIUM — create programmer handoff
 
 ---
 
-## 🔬 Testing Gaps
+### 4. **Unclear Responsibility: Git Operations in WorkerManager**
+**Location:** `worker.py:_push_project_repo_if_needed()` (line ~1608)
 
-### Missing Test Coverage
+**Issue:** WorkerManager handles Git operations (commit, push, rebase). This violates single responsibility principle — worker management should not own version control logic.
 
-**Current tests (test_memories.py):**
-- ✅ Basic CRUD operations
-- ✅ Search with single terms
-- ✅ Agent filtering
-- ✅ Pagination
+**Current Pattern:**
+```
+WorkerManager
+  └─ _push_project_repo_if_needed()  # 80+ lines of git logic
+      └─ subprocess.run(["git", ...])
+```
 
-**Missing tests:**
-- ❌ Multi-word phrase queries
-- ❌ Search result ranking/scoring
-- ❌ Search relevance (precision/recall)
-- ❌ Query edge cases (special chars, very long queries)
-- ❌ Performance with large result sets
-
-**Recommendation:** Add `test_search_relevance.py` with:
+**Recommendation:** Extract to `app/orchestrator/git_operations.py`:
 ```python
-@pytest.mark.asyncio
-async def test_multiword_query():
-    """Multi-word queries should match words in any order."""
-    # Create memory with "orchestrator handles task routing"
-    # Query "task routing orchestrator"
-    # Should return the memory
-
-@pytest.mark.asyncio
-async def test_search_ranking():
-    """Results should be ranked by relevance."""
-    # Create 3 memories with different match quality
-    # Verify best match comes first
+class GitOperations:
+    async def auto_commit_and_push(project_path, task_id, agent_type, ...):
+        # All git logic here
 ```
 
----
+Then worker calls: `await GitOperations.auto_commit_and_push(...)`
 
-## 💡 Future Enhancements
-
-### 1. Faceted Search
-- Filter by agent, date range, memory_type
-- Sort by date, relevance, length
-
-### 2. Query Suggestions
-- "Did you mean..." for typos
-- "Related searches" based on query patterns
-
-### 3. Search Highlighting
-- Return match positions for highlighting in UI
-- Show multiple snippets per result
-
-### 4. Advanced Syntax
-- Boolean operators: `+required -excluded "exact phrase"`
-- Field-specific: `title:bug agent:programmer`
-- Date filters: `after:2026-02-01`
+**Risk:** Testing difficulty, unclear ownership, hard to mock  
+**Priority:** MEDIUM — consider architect handoff if refactor needed
 
 ---
 
-## 📝 Implementation Checklist
+### 5. **No Timeout/Retry for Gateway API Calls**
+**Location:** `worker.py:_spawn_session()` (line ~416), `_check_session_status()` (line ~732)
 
-If implementing FTS5 (recommended):
+**Issue:** Gateway API calls use `aiohttp.ClientTimeout(total=10)` or `total=30`, but no retry logic. A transient network failure means task fails permanently.
 
-- [ ] Create migration script for FTS5 virtual table
-- [ ] Add triggers to keep FTS5 in sync with memories table
-- [ ] Update search endpoint to use FTS5 MATCH
-- [ ] Implement BM25 ranking
-- [ ] Add phrase query support (quotes)
-- [ ] Write integration tests for multi-word queries
-- [ ] Update API documentation
-- [ ] Add search analytics logging
-- [ ] Monitor zero-result rate in production
+**Current:**
+```python
+resp = await session.post(
+    f"{GATEWAY_URL}/tools/invoke",
+    timeout=aiohttp.ClientTimeout(total=30)
+)
+# If timeout, exception propagates up and task marked failed
+```
 
-**Estimated effort:** 1-2 days for full implementation + testing
+**Fix:** Add exponential backoff retry wrapper:
+```python
+async def _gateway_call_with_retry(url, json_data, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(url, json=json_data, timeout=...)
+                return resp
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if attempt == max_retries - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+```
+
+**Risk:** Task failures due to transient network issues  
+**Priority:** MEDIUM — create programmer handoff
 
 ---
 
-## 🎓 Lessons Learned
+### 6. **Potential Memory Leak: Unbounded Active Workers Dict**
+**Location:** `worker.py:WorkerManager.active_workers` (line ~136)
 
-1. **Simple substring matching is insufficient** for production search - works for 70% of cases but fails catastrophically on the remaining 30%
+**Issue:** `active_workers` dict grows with each spawned worker. If worker completion handling fails (e.g., exception in `_handle_worker_completion`), workers are never removed from dict.
 
-2. **Multi-word queries are table stakes** - users expect this to work, it's not an advanced feature
+**Current:**
+```python
+self.active_workers[worker_id] = worker_info  # Added on spawn
+# ...
+self.active_workers.pop(worker_id, None)  # Removed on completion
+```
 
-3. **Search is a product feature, not just technical implementation** - requires ranking, relevance tuning, and analytics
+**If exception before pop:** Worker stays in dict forever, preventing new spawns (capacity check fails).
 
-4. **SQLite FTS5 is underutilized** - provides excellent full-text search without external dependencies
+**Fix:** Add cleanup mechanism:
+```python
+async def _cleanup_stale_workers(self):
+    """Remove workers older than 2x kill timeout."""
+    now = time.time()
+    stale = [
+        wid for wid, info in self.active_workers.items()
+        if now - info.start_time > WORKER_KILL_TIMEOUT * 2
+    ]
+    for wid in stale:
+        logger.error("[WORKER] Force-removing stale worker %s", wid)
+        self.active_workers.pop(wid, None)
+        # Also clear project lock
+```
 
-5. **Test with realistic queries** - single-word tests pass but don't represent actual usage patterns
+Call this in `check_workers()` periodically.
+
+**Risk:** Orchestrator stops spawning workers after failures accumulate  
+**Priority:** MEDIUM — create programmer handoff
 
 ---
 
-## Conclusion
+### 7. **Missing Error Code Classification Coverage**
+**Location:** `worker.py:classify_error_type()` (line ~67)
 
-The current memory search is **functional for basic single-term queries but inadequate for production use**. The 20% failure rate on multi-word queries and 0% precision on common phrases like "how to" indicate fundamental limitations.
+**Issue:** Function classifies Gateway API errors for provider health tracking, but doesn't handle:
+- Ollama-specific errors (context length exceeded, model not found)
+- OpenRouter errors (insufficient credits)
+- Network errors (DNS failure, connection refused)
 
-**Immediate action required:**
-1. Implement SQLite FTS5 for multi-word query support (1-2 days)
-2. Improve scoring beyond binary title/content matching (2-3 hours)
-3. Add search relevance tests (2-3 hours)
+All these fall into "unknown" category, making provider health tracking less useful.
 
-**Without these improvements, users will:**
-- Miss relevant memories due to phrasing differences
-- Get frustrated with zero-result searches
-- Resort to manual browsing or external grep searches
-- Lose confidence in the memory system
+**Fix:** Add patterns:
+```python
+def classify_error_type(error_message: str, response_data: dict | None = None) -> str:
+    error_lower = error_message.lower()
+    
+    # ... existing patterns ...
+    
+    # Ollama errors
+    if "context length" in error_lower or "too many tokens" in error_lower:
+        return "context_exceeded"
+    if "model not found" in error_lower or "model not available" in error_lower:
+        return "model_unavailable"
+    
+    # OpenRouter errors
+    if "insufficient credits" in error_lower or "balance too low" in error_lower:
+        return "quota_exceeded"
+    
+    # Network errors
+    if any(k in error_lower for k in ("dns", "connection refused", "network unreachable")):
+        return "network_error"
+    
+    return "unknown"
+```
 
-The good news: SQLite FTS5 provides a solid foundation for production-quality search without external dependencies. This is a solvable problem with well-established solutions.
+**Risk:** Poor provider health decisions, suboptimal fallback routing  
+**Priority:** LOW-MEDIUM — create programmer handoff
+
+---
+
+## 🔵 Suggestions
+
+### 8. **Inconsistent Logging Format**
+**Location:** Throughout worker.py
+
+**Issue:** Mix of f-strings, %-formatting, and `.format()`:
+```python
+logger.info(f"[WORKER] Spawned worker {worker_id}")  # f-string
+logger.info("[WORKER] Token usage for %s: %d in", worker_id, tokens)  # %-format
+logger.error("[GATEWAY] Error: {}".format(error))  # .format()
+```
+
+**Fix:** Standardize on one format (recommend %-formatting for structured logging):
+```python
+logger.info("[WORKER] Spawned worker %s", worker_id)
+```
+
+Benefits: Better performance (lazy evaluation), structured logging compatibility
+
+**Priority:** LOW — code quality improvement
+
+---
+
+### 9. **Magic Numbers in Transcript File Search**
+**Location:** `worker.py:_check_session_status()` (line ~751)
+
+**Issue:**
+```python
+if age_seconds < 15:  # Magic number
+    return {"completed": False, ...}
+if age_seconds > 300:  # Magic number
+    return {"completed": True, "error": "Session stale"}
+```
+
+**Fix:** Extract to constants:
+```python
+TRANSCRIPT_ACTIVE_THRESHOLD_SECONDS = 15  # Still being written
+TRANSCRIPT_STALE_THRESHOLD_SECONDS = 300  # No activity = stale
+```
+
+**Priority:** LOW — code quality improvement
+
+---
+
+### 10. **Opportunity: Extract Transcript Reading to Utility Class**
+**Location:** `worker.py:_find_transcript_file()` (line ~599), `_read_transcript_assistant_messages()` (line ~639)
+
+**Issue:** Transcript handling logic (finding files, parsing JSONL, extracting messages) is embedded in WorkerManager. This logic could be useful elsewhere (e.g., debugging tools, analytics).
+
+**Suggestion:** Extract to `app/orchestrator/transcript_utils.py`:
+```python
+class TranscriptReader:
+    @staticmethod
+    def find_transcript(session_key: str, hint: str | None = None) -> Path | None:
+        ...
+    
+    @staticmethod
+    def read_assistant_messages(transcript_path: Path) -> list[str]:
+        ...
+    
+    @staticmethod
+    def extract_summary(session_key: str) -> str | None:
+        ...
+```
+
+**Benefits:** Reusability, testability, clearer worker.py responsibilities
+
+**Priority:** LOW — nice-to-have refactor
+
+---
+
+## Test Coverage Gaps
+
+### Missing Tests (High Priority)
+- [ ] Concurrent worker completion (race conditions)
+- [ ] Model fallback chain with provider failures
+- [ ] Reflection output persistence error handling
+- [ ] Sweep review JSON parsing edge cases
+- [ ] Project lock enforcement (one worker per project)
+- [ ] Circuit breaker integration
+
+### Missing Tests (Medium Priority)
+- [ ] Git auto-commit/push with merge conflicts
+- [ ] Transcript file search with deleted files
+- [ ] Provider health error classification
+- [ ] Worker timeout handling
+- [ ] Session termination retry logic
+
+### Missing Tests (Low Priority)
+- [ ] Token usage extraction from various transcript formats
+- [ ] Work summary file reading
+- [ ] Diagnostic event outcome persistence
+
+---
+
+## Architecture Review
+
+### Boundaries Analysis
+
+| Responsibility | Current Owner | Correct? | Notes |
+|---------------|---------------|----------|-------|
+| Task scanning | Scanner | ✅ Yes | Well separated |
+| Worker spawning | WorkerManager | ✅ Yes | Core responsibility |
+| Session lifecycle | WorkerManager | ✅ Yes | Owns Gateway API calls |
+| Git operations | WorkerManager | ⚠️ No | Should be in GitOperations |
+| Reflection persistence | WorkerManager | ⚠️ Unclear | Mixing data and control logic |
+| Provider health | ProviderHealthRegistry | ✅ Yes | Well separated |
+| Circuit breaker | CircuitBreaker | ✅ Yes | Well separated |
+| Escalation | EscalationManagerEnhanced | ✅ Yes | Well separated |
+
+### Coupling Analysis
+
+```
+engine.py (coordinator)
+  ├─ imports WorkerManager ✓ (explicit dependency)
+  ├─ imports Scanner ✓
+  ├─ imports MonitorEnhanced ✓
+  └─ imports 15+ orchestrator modules ⚠️ (high coupling)
+
+worker.py (worker management)
+  ├─ imports EscalationManagerEnhanced ✓
+  ├─ imports CircuitBreaker ✓
+  ├─ imports AgentTracker ✓
+  ├─ imports ModelChooser ✓
+  ├─ imports Prompter ✓
+  ├─ imports PolicyEngine ✓
+  └─ NO imports from engine ✓ (good!)
+```
+
+**Finding:** Engine has high fan-out (imports many modules), which is acceptable for a coordinator. Worker has moderate coupling, acceptable for its complexity.
+
+**Recommendation:** Consider facade pattern if engine's import list grows beyond 20 modules.
+
+---
+
+## Duplicated Logic Analysis
+
+### Potential Duplication (Not Found)
+
+Checked for:
+- ❌ No duplicate Git operations across files
+- ❌ No duplicate session status checking
+- ❌ No duplicate transcript parsing
+- ❌ No duplicate error classification
+
+**Verdict:** No significant duplication found. Refactor did well here.
+
+---
+
+## Recommendations Summary
+
+### Immediate Fixes (Before Next Release)
+1. ✅ Fix race condition in `_handle_worker_completion()` (Critical)
+2. ✅ Fix DB session management in reflection persistence (Critical)
+3. ✅ Add retry logic to Gateway API calls (Important)
+4. ✅ Add cleanup for stale workers in active_workers dict (Important)
+
+### Next Sprint
+5. ✅ Write integration tests for critical paths (Important)
+6. ✅ Extract Git operations to separate class (Important)
+7. ✅ Expand error classification patterns (Medium)
+
+### Future Improvements
+8. Standardize logging format (Low)
+9. Extract transcript utilities to reusable class (Low)
+10. Extract magic numbers to constants (Low)
+
+---
+
+## Handoffs Created
+
+### Handoff 1: Fix Race Condition in Worker Completion
+**To:** programmer  
+**Priority:** HIGH  
+**Files:** `app/orchestrator/worker.py`  
+**Task:** Implement transaction isolation in `_handle_worker_completion()` using `with_for_update=True` or row-level locking to prevent concurrent updates to task state.  
+**Acceptance:** Concurrent worker completion test passes without state corruption.
+
+### Handoff 2: Fix DB Session Management in Reflection Persistence
+**To:** programmer  
+**Priority:** HIGH  
+**Files:** `app/orchestrator/worker.py`  
+**Task:** Refactor `_persist_reflection_output()` and `_process_sweep_review_results()` to either queue results for engine to commit, or use proper two-phase commit.  
+**Acceptance:** No DB session conflicts, reflections always persisted correctly.
+
+### Handoff 3: Add Missing Integration Tests
+**To:** programmer  
+**Priority:** MEDIUM  
+**Files:** `tests/test_worker.py`, `tests/test_orchestrator_integration.py`  
+**Task:** Add integration tests for worker spawning, concurrent completion, reflection persistence, sweep review, circuit breaker integration, and provider health tracking.  
+**Acceptance:** Test coverage for worker.py critical paths reaches 80%+.
+
+### Handoff 4: Add Gateway API Retry Logic
+**To:** programmer  
+**Priority:** MEDIUM  
+**Files:** `app/orchestrator/worker.py`  
+**Task:** Implement exponential backoff retry wrapper for all Gateway API calls in `_spawn_session()`, `_check_session_status()`, `_get_session_history()`, `_fetch_session_summary()`.  
+**Acceptance:** Transient network failures trigger retry, permanent failures escalate after 3 attempts.
+
+### Handoff 5: Add Stale Worker Cleanup
+**To:** programmer  
+**Priority:** MEDIUM  
+**Files:** `app/orchestrator/worker.py`  
+**Task:** Implement `_cleanup_stale_workers()` method and call it periodically in `check_workers()` to remove workers that exceed 2x kill timeout without completing.  
+**Acceptance:** Orchestrator recovers from worker completion handler exceptions without manual intervention.
+
+---
+
+## Final Assessment
+
+**Refactor Quality:** 7/10  
+- ✅ Clear module separation  
+- ✅ No circular imports  
+- ✅ Good use of dependency injection  
+- ⚠️ Critical bugs in concurrent handling  
+- ⚠️ Missing tests for complex paths  
+- ⚠️ Some responsibility bleed (Git in WorkerManager)
+
+**Recommendation:** Merge after fixing critical issues (handoffs 1-2). Address important issues in next sprint.
+
+---
+
+**Review completed:** 2026-02-23  
+**Reviewer:** reviewer  
+**Next steps:** Create 5 programmer handoffs, schedule fix review
