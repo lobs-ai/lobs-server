@@ -934,15 +934,35 @@ class WorkerManager:
                     success=True,
                 )
 
-            # Auto-push any commits the worker produced.
-            #
-            # Sub-agents (OpenClaw sessions) generally commit directly in the repo,
-            # but the server used to *not* push those commits, leaving origin behind.
-            await self._push_project_repo_if_needed(
+            # Auto-commit and push any changes the worker produced.
+            db_task_for_title = await self.db.get(Task, task_id)
+            _task_title = db_task_for_title.title if db_task_for_title else ""
+            commit_sha, modified_files = await self._push_project_repo_if_needed(
                 project_id=project_id,
                 task_id=task_id,
                 agent_type=agent_type,
+                task_title=_task_title,
             )
+
+            # If worker produced no file changes and no commits, mark as failed
+            # (the agent ran but didn't actually do anything)
+            if not commit_sha and not modified_files:
+                # Check if it's a non-code task (writer/researcher docs go to shared memory)
+                if agent_type not in ("writer", "researcher", "reviewer"):
+                    logger.warning(
+                        "[WORKER] Worker %s completed but produced no file changes "
+                        "(task=%s). Marking as failed.",
+                        worker_id, task_id_short,
+                    )
+                    # Revert task to todo so it can be retried
+                    if db_task_for_title:
+                        db_task_for_title.work_state = "not_started"
+                        db_task_for_title.status = "active"
+                        db_task_for_title.finished_at = None
+                        db_task_for_title.updated_at = datetime.now(timezone.utc)
+                        db_task_for_title.failure_reason = "No file changes produced"
+                        await self.db.commit()
+                    succeeded = False
 
         else:
             # Failure
@@ -1054,7 +1074,9 @@ class WorkerManager:
         if worker_info.label.startswith("sweep-review-") and summary and succeeded:
             await self._process_sweep_review_results(summary)
         
-        # Record worker run
+        # Record worker run with actual commit/file info
+        _commit_sha = locals().get("commit_sha")
+        _modified_files = locals().get("modified_files")
         await self._record_worker_run(
             worker_id=worker_id,
             task_id=task_id,
@@ -1065,8 +1087,8 @@ class WorkerManager:
             summary=summary,
             model=worker_info.model,
             model_audit=worker_info.model_audit,
-            commit_sha=None,  # Sub-agents handle their own commits
-            files_modified=None,
+            commit_sha=_commit_sha,
+            files_modified=_modified_files,
             session_key=worker_info.child_session_key,
         )
 
@@ -1657,25 +1679,30 @@ class WorkerManager:
         project_id: str,
         task_id: str,
         agent_type: str,
-    ) -> None:
-        """Push worker-produced commits to origin.
+        task_title: str = "",
+    ) -> tuple[Optional[str], Optional[list[str]]]:
+        """Auto-commit and push worker-produced changes to origin.
 
-        Workers operate in the project repo; they may commit changes, but without
-        an explicit push step the remote never updates.
+        Workers operate in the project repo; they write files but often don't
+        commit. This method:
+        1. Auto-commits any uncommitted changes with a descriptive message.
+        2. Pushes to origin (rebasing if behind).
+        3. Returns (commit_sha, files_modified) for tracking.
 
-        Behavior:
-        - If there are uncommitted changes, we do nothing (don't guess).
-        - If HEAD is ahead of upstream, attempt `git pull --rebase` then push.
-        - On failure, create a simple alert so it shows up for the human.
+        Returns:
+            Tuple of (commit_sha, files_modified) or (None, None) if no changes.
         """
+        commit_sha = None
+        files_modified = None
+
         try:
             project = await self.db.get(Project, project_id)
             if not project:
-                return
+                return None, None
 
             repo_path = Path(project.repo_path) if project.repo_path else (BASE_DIR / project_id)
             if not repo_path.exists():
-                return
+                return None, None
 
             def run_git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
                 return subprocess.run(
@@ -1687,34 +1714,69 @@ class WorkerManager:
 
             inside = run_git("rev-parse", "--is-inside-work-tree")
             if inside.returncode != 0 or inside.stdout.strip() != "true":
-                return
+                return None, None
 
-            # Don't attempt to push if the repo is dirty.
+            # Check for uncommitted changes and auto-commit them.
             dirty = run_git("status", "--porcelain")
             if dirty.returncode == 0 and dirty.stdout.strip():
-                logger.info(
-                    "[WORKER] Repo has uncommitted changes; skipping auto-push (%s)",
-                    repo_path,
-                )
-                return
+                # Collect list of changed files
+                changed_lines = [
+                    line[3:].strip() for line in dirty.stdout.strip().split("\n")
+                    if line.strip()
+                ]
+                files_modified = changed_lines
 
-            # Ensure upstream exists; if not, skip.
+                # Stage all changes
+                run_git("add", "-A")
+
+                # Build commit message
+                short_title = (task_title or task_id[:8])[:72]
+                commit_msg = (
+                    f"agent({agent_type}): {short_title}\n\n"
+                    f"Task: {task_id}\n"
+                    f"Agent: {agent_type}\n"
+                    f"Auto-committed by orchestrator after task completion."
+                )
+
+                commit_result = run_git(
+                    "commit", "-m", commit_msg,
+                    "--author", f"lobs-{agent_type} <thelobsbot@gmail.com>",
+                )
+                if commit_result.returncode != 0:
+                    logger.warning(
+                        "[WORKER] Auto-commit failed for project %s: %s",
+                        project_id, commit_result.stderr.strip(),
+                    )
+                    return None, files_modified
+                else:
+                    logger.info(
+                        "[WORKER] Auto-committed %d changed files for task %s",
+                        len(files_modified), task_id[:8],
+                    )
+
+            # Get current commit SHA (whether we just committed or it was already committed)
+            sha_result = run_git("rev-parse", "HEAD")
+            if sha_result.returncode == 0:
+                commit_sha = sha_result.stdout.strip()
+
+            # If no files were modified and no commits ahead, nothing to push
+            # Ensure upstream exists; if not, skip push.
             upstream = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
             if upstream.returncode != 0:
-                return
+                return commit_sha, files_modified
 
             run_git("fetch", "--prune", "origin")
 
             counts = run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
             if counts.returncode != 0:
-                return
+                return commit_sha, files_modified
 
             behind_str, ahead_str = (counts.stdout.strip().split() + ["0", "0"])[:2]
             behind = int(behind_str)
             ahead = int(ahead_str)
 
             if ahead <= 0 and behind <= 0:
-                return
+                return commit_sha, files_modified
 
             # If we're behind, try to rebase first.
             if behind > 0:
@@ -1733,9 +1795,11 @@ class WorkerManager:
                 ahead,
             )
 
+            return commit_sha, files_modified
+
         except Exception as e:
             logger.warning(
-                "[WORKER] Auto-push failed for project %s after task %s: %s",
+                "[WORKER] Auto-commit/push failed for project %s after task %s: %s",
                 project_id,
                 task_id[:8],
                 e,
@@ -1744,12 +1808,14 @@ class WorkerManager:
                 await EscalationManagerEnhanced(self.db).create_simple_alert(
                     task_id=task_id,
                     project_id=project_id,
-                    error_log=f"Auto-push failed: {e}",
+                    error_log=f"Auto-commit/push failed: {e}",
                     severity="medium",
                 )
             except Exception:
                 # Never let alerting failures break completion handling.
                 logger.debug("[WORKER] Failed to create auto-push alert", exc_info=True)
+
+            return commit_sha, files_modified
 
     async def _read_work_summary(self, project_id: str) -> str | None:
         """Read .work-summary file from project directory."""
