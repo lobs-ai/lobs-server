@@ -68,23 +68,59 @@ class WorkerGateway:
                 
                 if not data.get("ok"):
                     error_msg = f"sessions_spawn_failed: {data}"
-                    error_type = classify_error_type(error_msg, data)
+                    error_str = str(data)
                     
-                    await safe_log_usage_event(
-                        self.db,
-                        source="orchestrator-spawn",
-                        model=model,
-                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                        task_type="inbox" if "inbox" in label else "task_execution",
-                        status="error",
-                        error_code="sessions_spawn_failed",
-                        metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
-                    )
-                    logger.error(
-                        "[GATEWAY] sessions_spawn failed",
-                        extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
-                    )
-                    return None, error_msg, error_type
+                    # Handle "label already in use" by cleaning up stale session and retrying once
+                    if "label already in use" in error_str:
+                        logger.warning(
+                            "[GATEWAY] Label %s already in use, attempting cleanup and retry",
+                            label,
+                        )
+                        # Find and delete the stale session with this label
+                        await self._cleanup_stale_label(label, agent_id)
+                        # Retry spawn once
+                        retry_resp = await session.post(
+                            f"{GATEWAY_URL}/tools/invoke",
+                            headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                            json={
+                                "tool": "sessions_spawn",
+                                "sessionKey": parent_session_key + "-retry",
+                                "args": {
+                                    "task": task_prompt,
+                                    "agentId": agent_id,
+                                    "model": model,
+                                    "runTimeoutSeconds": 900,
+                                    "cleanup": "keep",
+                                    "label": label,
+                                }
+                            },
+                            timeout=aiohttp.ClientTimeout(total=30)
+                        )
+                        data = await retry_resp.json()
+                        if data.get("ok"):
+                            # Retry succeeded, continue to result extraction below
+                            logger.info("[GATEWAY] Retry after label cleanup succeeded for %s", label)
+                        else:
+                            error_msg = f"sessions_spawn_failed_after_retry: {data}"
+                    
+                    if not data.get("ok"):
+                        error_type = classify_error_type(error_msg, data)
+                        
+                        await safe_log_usage_event(
+                            self.db,
+                            source="orchestrator-spawn",
+                            model=model,
+                            route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
+                            task_type="inbox" if "inbox" in label else "task_execution",
+                            status="error",
+                            error_code="sessions_spawn_failed",
+                            metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
+                        )
+                        logger.error(
+                            "[GATEWAY] sessions_spawn failed",
+                            extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
+                        )
+                        return None, error_msg, error_type
                 
                 result = data.get("result", {})
                 # Gateway wraps tool results in {content, details}
@@ -316,6 +352,70 @@ class WorkerGateway:
             logger.warning("[WORKER] Error checking session status: %s", e)
             return None
     
+    async def _cleanup_stale_label(self, label: str, agent_id: str) -> None:
+        """Find and delete sessions with a specific label to resolve conflicts."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_list",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-label-cleanup",
+                        "args": {"limit": 100, "messageLimit": 0}
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                data = await resp.json()
+                if data.get("ok"):
+                    result = data.get("result", {})
+                    details = result.get("details", result)
+                    for s in details.get("sessions", []):
+                        if s.get("label") == label:
+                            await self.delete_session(s["key"])
+        except Exception as e:
+            logger.warning("[GATEWAY] Error cleaning up stale label %s: %s", label, e)
+
+    async def delete_session(self, session_key: str) -> bool:
+        """Delete a completed worker session to prevent session leak.
+        
+        Uses Gateway WebSocket API (sessions.delete) via aiohttp.
+        """
+        import aiohttp
+        ws_url = GATEWAY_URL.replace("http://", "ws://").replace("https://", "wss://")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.ws_connect(
+                    ws_url,
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as ws:
+                    request_id = uuid.uuid4().hex[:12]
+                    await ws.send_json({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "sessions.delete",
+                        "params": {"key": session_key},
+                    })
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if data.get("id") == request_id:
+                                if "error" in data:
+                                    logger.warning(
+                                        "[GATEWAY] sessions.delete error for %s: %s",
+                                        session_key, data["error"],
+                                    )
+                                    return False
+                                logger.info("[GATEWAY] Deleted session %s", session_key)
+                                return True
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            return False
+        except Exception as e:
+            logger.warning("[GATEWAY] Error deleting session %s: %s", session_key, e)
+            return False
+
     @staticmethod
     def find_transcript_file(session_key: str, transcript_hint: Optional[str] = None) -> Optional[pathlib.Path]:
         """Find a transcript file on disk for the given session key.

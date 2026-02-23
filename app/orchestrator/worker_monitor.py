@@ -341,6 +341,16 @@ class WorkerMonitor:
             session_key=worker_info.child_session_key,
         )
 
+        # Clean up the completed session to prevent session leak
+        if worker_info.child_session_key:
+            try:
+                await self.gateway.delete_session(worker_info.child_session_key)
+            except Exception as e:
+                logger.warning(
+                    "[WORKER] Failed to clean up session %s: %s",
+                    worker_info.child_session_key, e,
+                )
+
         # Mark agent idle
         await AgentTracker(self.db).mark_idle(agent_type)
 
