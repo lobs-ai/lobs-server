@@ -144,7 +144,7 @@ class InitiativeDecisionEngine:
 
         # Standard approve/defer/reject flow
         if decision == "approve":
-            if initiative.status not in {"lobs_review", "proposed", "awaiting_rafe"}:
+            if initiative.status not in {"lobs_review", "proposed", "awaiting_rafe", "deferred"}:
                 raise ValueError(f"initiative in status '{initiative.status}' is not approvable")
             # Rafe approval required for tier-C in awaiting_rafe
             if initiative.status == "awaiting_rafe" and decided_by != "rafe":
