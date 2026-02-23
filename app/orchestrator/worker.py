@@ -946,7 +946,14 @@ class WorkerManager:
 
             # If worker produced no file changes and no commits, mark as failed
             # (the agent ran but didn't actually do anything)
-            if not commit_sha and not modified_files:
+            # Skip this check for: reflections, sweeps, non-code agents, diagnostic tasks
+            is_internal_task = (
+                worker_info.label.startswith("reflection-")
+                or worker_info.label.startswith("sweep-")
+                or worker_info.label.startswith("diagnostic-")
+                or worker_info.label.startswith("inbox-")
+            )
+            if not commit_sha and not modified_files and not is_internal_task:
                 # Check if it's a non-code task (writer/researcher docs go to shared memory)
                 if agent_type not in ("writer", "researcher", "reviewer"):
                     logger.warning(
