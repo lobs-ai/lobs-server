@@ -132,6 +132,60 @@ class OrchestratorEngine:
         logger.info("[ENGINE] Orchestrator started%s", " (monitoring-only, no OpenClaw)" if not self._openclaw_available else "")
         logger.info("=" * 60)
 
+    async def _startup_recovery(self) -> None:
+        """Run once on startup: ensure default project exists and reset orphaned in_progress tasks."""
+        try:
+            async with self._session_factory() as db:
+                # 1. Ensure default project exists
+                default_project = await db.get(ProjectModel, "default")
+                if not default_project:
+                    default_project = ProjectModel(
+                        id="default",
+                        title="General",
+                        notes="Default project for tasks not tied to a specific project",
+                        archived=False,
+                        type="kanban",
+                        sort_order=99,
+                        tracking="local",
+                    )
+                    db.add(default_project)
+                    await db.commit()
+                    logger.info("[ENGINE] Created default project 'General'")
+
+                # 2. Reset orphaned in_progress tasks (no worker alive after restart)
+                result = await db.execute(
+                    select(TaskModel).where(TaskModel.work_state == "in_progress")
+                )
+                orphaned = result.scalars().all()
+
+                if orphaned:
+                    for task in orphaned:
+                        task.work_state = "not_started"
+                        task.updated_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    logger.info(
+                        "[ENGINE] Startup recovery: reset %d orphaned in_progress task(s) to not_started",
+                        len(orphaned),
+                    )
+
+                # 3. Clear stale worker_status
+                from app.models import WorkerStatus
+                ws_result = await db.execute(
+                    select(WorkerStatus).where(WorkerStatus.id == 1)
+                )
+                ws = ws_result.scalar_one_or_none()
+                if ws and ws.active:
+                    ws.active = False
+                    ws.worker_id = None
+                    ws.current_task = None
+                    ws.current_project = None
+                    ws.ended_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    logger.info("[ENGINE] Startup recovery: cleared stale worker_status")
+
+        except Exception as e:
+            logger.error("[ENGINE] Startup recovery failed: %s", e, exc_info=True)
+
     async def stop(self, timeout: Optional[float] = None) -> None:
         """Stop the orchestrator engine."""
         if not self._running:
