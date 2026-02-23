@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 from app.database import AsyncSessionLocal
 from app.orchestrator.scanner import Scanner
 from app.orchestrator.capability_registry import CapabilityRegistrySync
-from app.orchestrator.worker_manager import WorkerManager
+from app.orchestrator.worker import WorkerManager
 from app.orchestrator.monitor_enhanced import MonitorEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker

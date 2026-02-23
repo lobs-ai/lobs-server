@@ -15,7 +15,7 @@ from app.orchestrator.config import CONTROL_PLANE_AGENTS
 from app.orchestrator.context_packets import ContextPacketBuilder
 from app.orchestrator.model_chooser import ModelChooser
 from app.orchestrator.registry import AgentRegistry
-from app.orchestrator.worker_manager import WorkerManager
+from app.orchestrator.worker import WorkerManager
 
 logger = logging.getLogger(__name__)
 
