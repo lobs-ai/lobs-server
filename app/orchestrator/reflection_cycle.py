@@ -562,7 +562,7 @@ For each proposed initiative:
 
 **CONTEXT:** We're building one of the best AI agent setups in the world. This isn't a maintenance project — it's an ambitious platform that will become PAW (Personal AI Workforce), a product people pay for. Think accordingly.
 
-**QUALITY > QUANTITY.** Propose 1-3 genuinely impactful ideas. An empty list is better than noise.
+**QUALITY MATTERS.** Propose as many ideas as you genuinely believe in. An empty list is better than noise, but don't hold back good ideas.
 
 **What we WANT to see:**
 1. **New features and capabilities** — things that make Lobs dramatically more useful
@@ -582,7 +582,7 @@ For each proposed initiative:
 - Lead with your BEST idea — the one that would make the biggest impact
 - Maintenance and fixes ARE welcome when they solve real problems (bugs, failures, reliability)
 - But don't ONLY propose maintenance — always be thinking about what's NEXT, not just what's broken
-- A good mix: 1 ambitious feature/product idea + 1 practical fix or improvement
+- Propose as many ideas as you have — no artificial limit. Quality matters, not quantity.
 
 **The bar for proposals:**
 - **Does the decision history show this was already rejected?** — don't re-propose.
