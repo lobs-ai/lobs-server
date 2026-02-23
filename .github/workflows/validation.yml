@@ -5,16 +5,22 @@ on:
     branches: [ main ]
     paths:
       - 'app/models.py'
+      - 'app/schemas.py'
       - 'app/database.py'
+      - 'migrations/**'
       - 'tests/**'
       - 'bin/validate_schema.py'
+      - 'bin/validate_api_schemas.py'
+      - 'bin/validate_migrations.py'
       - 'bin/detect_time_based_tests.py'
       - '.github/workflows/validation.yml'
   push:
     branches: [ main ]
     paths:
       - 'app/models.py'
+      - 'app/schemas.py'
       - 'app/database.py'
+      - 'migrations/**'
       - 'tests/**'
 
 jobs:
@@ -45,6 +51,59 @@ jobs:
       - name: Run schema validator
         run: |
           python bin/validate_schema.py --check
+  
+  api-schema-validation:
+    name: Validate API Schemas
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Run API schema validator
+        run: |
+          python bin/validate_api_schemas.py --check
+      
+      - name: Export schemas for documentation
+        if: success()
+        run: |
+          python bin/validate_api_schemas.py --export api-schemas.json
+      
+      - name: Upload schema artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-schemas
+          path: api-schemas.json
+          retention-days: 30
+  
+  migration-validation:
+    name: Validate Database Migrations
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Run migration validator
+        run: |
+          python bin/validate_migrations.py --check --dir migrations
   
   test-time-detector:
     name: Detect Time-Based Test Issues
