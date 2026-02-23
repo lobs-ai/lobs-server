@@ -2,54 +2,61 @@
 
 import pytest
 from httpx import AsyncClient
+from tests.helpers import (
+    create_template_data,
+    assert_created,
+    assert_list_response,
+    assert_response_success,
+    assert_not_found,
+    assert_updated,
+    assert_deleted,
+)
 
 
 @pytest.mark.asyncio
 async def test_create_template(client: AsyncClient):
     """Test creating a template."""
-    template_data = {
-        "id": "template-1",
-        "name": "Test Template",
-        "description": "A test template",
-        "items": [
+    template_data = create_template_data(
+        id="template-1",
+        name="Test Template",
+        description="A test template",
+        items=[
             {"title": "Task 1", "status": "inbox"},
             {"title": "Task 2", "status": "inbox"}
         ]
-    }
+    )
     response = await client.post("/api/templates", json=template_data)
-    assert response.status_code == 200
-    data = response.json()
+    data = assert_created(response, expected_fields=["name", "items"])
     assert data["id"] == "template-1"
     assert data["name"] == "Test Template"
-    assert data["description"] == "A test template"
     assert len(data["items"]) == 2
-    assert "created_at" in data
 
 
 @pytest.mark.asyncio
 async def test_list_templates(client: AsyncClient, sample_template):
     """Test listing templates."""
     response = await client.get("/api/templates")
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
-    assert data[0]["id"] == sample_template["id"]
+    templates = assert_list_response(
+        response,
+        min_length=1,
+        item_schema=["id", "name"]
+    )
+    assert templates[0]["id"] == sample_template["id"]
 
 
 @pytest.mark.asyncio
 async def test_list_templates_empty(client: AsyncClient):
     """Test listing templates when empty."""
     response = await client.get("/api/templates")
-    assert response.status_code == 200
-    assert response.json() == []
+    templates = assert_list_response(response, min_length=0)
+    assert templates == []
 
 
 @pytest.mark.asyncio
 async def test_get_template(client: AsyncClient, sample_template):
     """Test getting a single template."""
     response = await client.get(f"/api/templates/{sample_template['id']}")
-    assert response.status_code == 200
+    assert_response_success(response)
     data = response.json()
     assert data["id"] == sample_template["id"]
     assert data["name"] == sample_template["name"]
@@ -59,8 +66,7 @@ async def test_get_template(client: AsyncClient, sample_template):
 async def test_get_template_not_found(client: AsyncClient):
     """Test getting a non-existent template returns 404."""
     response = await client.get("/api/templates/nonexistent")
-    assert response.status_code == 404
-    assert "not found" in response.json()["detail"].lower()
+    assert_not_found(response, resource_type="template")
 
 
 @pytest.mark.asyncio
@@ -75,10 +81,10 @@ async def test_update_template(client: AsyncClient, sample_template):
         f"/api/templates/{sample_template['id']}",
         json=update_data
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["name"] == "Updated Template"
-    assert data["description"] == "Updated description"
+    data = assert_updated(response, expected_changes={
+        "name": "Updated Template",
+        "description": "Updated description"
+    })
     assert len(data["items"]) == 1
 
 
@@ -89,23 +95,22 @@ async def test_update_template_not_found(client: AsyncClient):
         "/api/templates/nonexistent",
         json={"name": "Updated"}
     )
-    assert response.status_code == 404
+    assert_not_found(response)
 
 
 @pytest.mark.asyncio
 async def test_delete_template(client: AsyncClient, sample_template):
     """Test deleting a template."""
     response = await client.delete(f"/api/templates/{sample_template['id']}")
-    assert response.status_code == 200
-    assert response.json() == {"status": "deleted"}
+    assert_deleted(response)
     
     # Verify it's deleted
     get_response = await client.get(f"/api/templates/{sample_template['id']}")
-    assert get_response.status_code == 404
+    assert_not_found(get_response)
 
 
 @pytest.mark.asyncio
 async def test_delete_template_not_found(client: AsyncClient):
     """Test deleting a non-existent template returns 404."""
     response = await client.delete("/api/templates/nonexistent")
-    assert response.status_code == 404
+    assert_not_found(response)

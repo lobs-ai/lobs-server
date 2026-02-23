@@ -1,289 +1,350 @@
-# Security Review: Intelligence Dashboard Authorization
+# Error Handling Review — Orchestrator Modules
 
+**Review Date:** 2026-02-23  
 **Reviewer:** reviewer  
-**Date:** 2026-02-23  
-**Scope:** Authorization logic in Mission Control Intelligence view  
-**Risk Tier:** A (Security)
+**Task:** Audit error handling in refactored server modules  
+**Files Reviewed:**
+- `app/orchestrator/worker.py`
+- `app/orchestrator/monitor_enhanced.py`
+- `app/orchestrator/sweep_arbitrator.py`
+- `app/orchestrator/monitor.py`
 
 ---
 
-## Executive Summary
+## Summary
 
-**Overall Assessment:** ✅ **AUTH PROPERLY CONFIGURED** with 🟡 **MINOR TEST GAPS**
-
-The Intelligence dashboard endpoints are **properly protected** with Bearer token authentication. Both the Swift client and server-side API correctly implement auth validation. However, test coverage for auth failures is missing, and there are minor improvements that could enhance security monitoring.
+Reviewed error handling patterns across recently refactored orchestrator modules. Found **5 high-priority issues** related to swallowed errors, missing context, and inconsistent error recovery patterns. Overall code quality is good with comprehensive logging, but several patterns need hardening for production reliability.
 
 ---
 
-## Findings
+## 🔴 Critical Issues (2)
 
-### ✅ PASS: Server-Side Authentication
+### 1. Bare `except Exception` without error type specification — swallows critical errors
 
-**Location:** `/Users/lobs/lobs-server/app/main.py` (line 169)
+**Location:** `worker.py:110-111`
 
 ```python
-app.include_router(orchestrator_reflections.router, prefix=settings.API_PREFIX, 
-                   dependencies=[Depends(require_auth)])
+except Exception as e:
+    logger.warning("[USAGE] Skipping usage event due to DB/logging error: %s", e)
+    try:
+        await db.rollback()
+    except Exception:
+        pass  # ❌ Swallowed silently
 ```
 
-**Status:** ✅ Correct
+**Issue:** The nested `except Exception: pass` swallows all errors during rollback, including `CancelledError`, `KeyboardInterrupt` (via BaseException), and critical DB failures. This makes debugging impossible when rollback fails.
 
-All intelligence endpoints are protected at the router level with `require_auth` dependency:
-- `/api/orchestrator/intelligence/summary`
-- `/api/orchestrator/intelligence/initiatives`
-- `/api/orchestrator/intelligence/initiatives/{id}/decide`
-- `/api/orchestrator/intelligence/initiatives/batch-decide`
-- `/api/orchestrator/intelligence/reflections`
-- `/api/orchestrator/intelligence/sweeps`
-- `/api/orchestrator/intelligence/budgets`
+**Impact:** Critical DB state corruption could be masked. If rollback fails due to connection issues, the system will continue with potentially inconsistent state.
 
-**Authentication Flow:**
-1. `require_auth` dependency extracts Bearer token from `Authorization` header
-2. Token validated against `APIToken` table (active tokens only)
-3. `last_used_at` timestamp updated on valid access
-4. 401 Unauthorized returned if token missing/invalid
-
----
-
-### ✅ PASS: Client-Side Token Transmission
-
-**Location:** `/Users/lobs/lobs-mission-control/Sources/LobsMissionControl/APIService.swift`
-
-**Status:** ✅ Correct
-
-The Swift `APIService` properly adds the Authorization header:
-
-```swift
-if let token = apiToken {
-    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-}
-```
-
-This is applied to ALL requests in both:
-- `request<T: Decodable>()` method (line ~148)
-- `requestVoid()` method (line ~238)
-
-The token is initialized from config in `AppViewModel.swift`:
-
-```swift
-let apiToken = loadedConfig?.apiToken
-api = (try? APIService(baseURLString: baseURL, apiToken: apiToken)) ?? ...
-```
-
----
-
-### ✅ PASS: Data Exposure Prevention
-
-**Sensitive Data Reviewed:**
-- Initiative descriptions, rationales, learning feedback
-- Agent names and reflection cycle details
-- Decision summaries and approval notes
-- Sweep arbitration results
-
-**Status:** ✅ No unauthorized exposure
-
-All endpoints require authentication. No sensitive data is:
-- Logged to console without auth checks
-- Exposed via error messages
-- Cached insecurely client-side
-- Transmitted without HTTPS in production
-
----
-
-### 🟡 IMPROVEMENT: Missing Auth Failure Tests
-
-**Location:** `/Users/lobs/lobs-server/tests/`
-
-**Status:** 🟡 Test gap (non-blocking)
-
-**Issue:**  
-No tests verify that intelligence endpoints reject unauthenticated requests.
-
-**Current test setup:**
+**Fix Required:**
 ```python
-@pytest_asyncio.fixture
-async def client(test_token):
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-        headers={"Authorization": f"Bearer {test_token}"}  # Always authenticated
-    ) as ac:
-        yield ac
+except Exception as e:
+    logger.warning("[USAGE] Skipping usage event due to DB/logging error: %s", e)
+    try:
+        await db.rollback()
+    except Exception as rollback_err:
+        logger.error("[USAGE] Rollback failed during error recovery: %s", rollback_err, exc_info=True)
+        # Re-raise if it's a critical error type
+        if isinstance(rollback_err, (asyncio.CancelledError, KeyboardInterrupt)):
+            raise
 ```
 
-**What's missing:**
-- Test case for missing `Authorization` header → expect 401
-- Test case for invalid Bearer token → expect 401
-- Test case for expired/inactive token → expect 401
+**Priority:** 🔴 **High** — Can mask critical DB failures
 
-**Recommendation:**  
-Add negative test cases to `tests/test_reflections_api.py` and `tests/test_batch_initiative_api.py`.
+---
 
-**Example test to add:**
+### 2. Missing error context in DB rollback patterns — hard to diagnose
+
+**Locations:**
+- `worker.py:1232-1233`
+- `worker.py:1339-1340`
+- `monitor_enhanced.py:196-197`
+- `monitor_enhanced.py:300-301`
+
+**Example:** `worker.py:1232-1233`
 
 ```python
-@pytest.mark.asyncio
-async def test_intelligence_endpoints_require_auth(db_session):
-    """Verify intelligence endpoints reject unauthenticated requests."""
-    # Create client WITHOUT auth header
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test"
-    ) as client:
-        # Test each intelligence endpoint
-        endpoints = [
-            "/api/orchestrator/intelligence/summary",
-            "/api/orchestrator/intelligence/initiatives",
-            "/api/orchestrator/intelligence/reflections",
-        ]
-        
-        for endpoint in endpoints:
-            response = await client.get(endpoint)
-            assert response.status_code == 401, f"{endpoint} should require auth"
+except Exception as e:
+    logger.error(f"Failed to update worker status: {e}", exc_info=True)
+    await self.db.rollback()  # ❌ No error handling
 ```
 
----
+**Issue:** DB rollback operations are called without error handling. If rollback fails, the exception propagates up and crashes the calling code without proper cleanup. No context about what operation was being rolled back.
 
-### 🔵 SUGGESTION: Token Expiry Handling in Swift Client
+**Impact:** Unhandled rollback failures can crash the orchestrator engine. When reviewing logs, it's unclear which task/worker/project the rollback was for.
 
-**Location:** `/Users/lobs/lobs-mission-control/Sources/LobsMissionControl/IntelligenceView.swift`
-
-**Status:** 🔵 Enhancement opportunity
-
-**Current behavior:**  
-When auth fails (401), error is shown to user via `vm.flashError()`, but no automatic retry or token refresh.
-
-**Code:**
-```swift
-do {
-    initiatives = try await vm.apiService?.loadInitiatives() ?? []
-} catch {
-    await MainActor.run {
-        vm.flashError("Failed to load initiatives: \(error.localizedDescription)")
-    }
-}
-```
-
-**Suggestion:**  
-Add specific handling for `.notAuthenticated` error to prompt user to re-enter token:
-
-```swift
-} catch APIError.notAuthenticated {
-    await MainActor.run {
-        vm.flashError("Session expired. Please check your API token in Settings.")
-        // Optional: Navigate to settings or show token input dialog
-    }
-} catch {
-    await MainActor.run {
-        vm.flashError("Failed to load initiatives: \(error.localizedDescription)")
-    }
-}
-```
-
-**Rationale:**  
-Better UX for expired sessions. Currently relies on generic error message.
-
----
-
-### 🔵 SUGGESTION: Security Logging for Failed Auth Attempts
-
-**Location:** `/Users/lobs/lobs-server/app/auth.py`
-
-**Status:** 🔵 Enhancement opportunity
-
-**Current code:**
+**Fix Required:**
 ```python
-if not api_token:
-    raise HTTPException(status_code=401, detail="Invalid or inactive token")
+except Exception as e:
+    logger.error(
+        f"Failed to update worker status (worker={worker_id}, task={task_id}): {e}",
+        exc_info=True
+    )
+    try:
+        await self.db.rollback()
+    except Exception as rollback_err:
+        logger.critical(
+            f"DB rollback failed after worker status update failure "
+            f"(worker={worker_id}, task={task_id}): {rollback_err}",
+            exc_info=True
+        )
 ```
 
-**Suggestion:**  
-Log failed auth attempts for security monitoring:
+**Priority:** 🔴 **High** — Can crash engine loop, missing diagnostic context
+
+---
+
+## 🟡 Important Issues (3)
+
+### 3. Inconsistent error handling in session status checks
+
+**Location:** `worker.py:784-786`
 
 ```python
-if not api_token:
-    logger.warning(f"Failed auth attempt with token: {token[:8]}...")
-    raise HTTPException(status_code=401, detail="Invalid or inactive token")
+except Exception as e:
+    logger.warning("[WORKER] Error checking session status: %s", e)
+    return None  # ❌ Silently returns None, caller must handle
 ```
 
-**Rationale:**  
-Enables detection of:
-- Brute force attacks
-- Token theft/misuse
-- Misconfigured clients
+**Issue:** Error is logged as warning but returns `None`, forcing caller to check for both "session not completed" and "error checking status". This pattern is inconsistent with other methods that raise exceptions on critical failures.
+
+**Comparison with similar pattern in `_get_session_history` (line 812-814):**
+```python
+except Exception as e:
+    logger.debug("[WORKER] Error querying Gateway sessions_history: %s", e)
+    return None  # ✅ OK for fallback, but inconsistent logging level
+```
+
+**Issue:** Both methods have the same error handling but use different log levels (`warning` vs `debug`). It's unclear which failures are expected vs. unexpected.
+
+**Impact:** Inconsistent error semantics make it hard to distinguish between "operation not possible" vs. "operation failed". Callers must defensively handle `None` returns even for unexpected errors.
+
+**Fix Required:**
+1. Document which errors are expected (use `logger.debug`)
+2. Document which errors are unexpected (use `logger.warning` or `logger.error`)
+3. Consider raising exceptions for unexpected errors rather than returning `None`
+4. Add docstring to clarify: "Returns None if status cannot be determined (expected for recently spawned sessions)"
+
+**Example fix:**
+```python
+async def _check_session_status(...) -> Optional[dict[str, Any]]:
+    """Check if a worker session has completed.
+    
+    Returns:
+        Status dict if check succeeded, None if temporary check failure
+        (e.g., transcript not yet written, network timeout).
+    
+    Raises:
+        RuntimeError: If session is permanently lost or Gateway is unreachable.
+    """
+    try:
+        # ... existing logic ...
+    except aiohttp.ClientError as e:
+        # Network errors are temporary, return None
+        logger.debug("[WORKER] Gateway unreachable during status check: %s", e)
+        return None
+    except Exception as e:
+        # Unexpected errors should be visible
+        logger.error("[WORKER] Unexpected error checking session status: %s", e, exc_info=True)
+        return None
+```
+
+**Priority:** 🟡 **Medium** — Inconsistent error semantics, hard to debug
 
 ---
 
-## Security Checklist
+### 4. Nested exception handlers without context propagation
 
-- [x] All intelligence endpoints require authentication
-- [x] Bearer token properly validated against database
-- [x] Swift client sends Authorization header on all requests
-- [x] No sensitive data exposed without auth
-- [x] Tokens stored securely (not hardcoded)
-- [x] HTTPS enforced in production (via CORS/middleware)
-- [x] Token activity tracked (`last_used_at`)
-- [ ] **Missing:** Auth failure tests
-- [ ] **Missing:** Token expiry handling in client
-- [ ] **Missing:** Security logging for failed auth
+**Location:** `worker.py:1615-1633` (in `_process_sweep_review_results`)
+
+```python
+for d in decisions:
+    # ... initiative processing ...
+    try:
+        result = await engine.decide(...)
+        # ... success handling ...
+    except Exception as e:
+        logger.error(
+            "[SWEEP_REVIEW] Failed to process initiative %s: %s",
+            initiative_id[:8], e, exc_info=True
+        )
+        # ❌ Loop continues, error swallowed
+
+# ... after loop ...
+try:
+    await self.db.commit()
+except Exception as e:
+    logger.error("[SWEEP_REVIEW] Failed to process sweep review results: %s", e, exc_info=True)
+    await self.db.rollback()
+```
+
+**Issue:** Individual initiative processing errors are logged but swallowed — loop continues. The final `commit()` might fail due to earlier errors, but the error message doesn't indicate which initiative caused the issue.
+
+**Impact:** Partial batch processing can leave DB in inconsistent state. If 3 out of 10 initiatives fail, the final commit will fail, but it's unclear why. No way to track which initiatives succeeded vs. failed.
+
+**Fix Required:**
+```python
+failed_initiatives = []
+for d in decisions:
+    try:
+        result = await engine.decide(...)
+        # ... success handling ...
+    except Exception as e:
+        failed_initiatives.append({
+            "initiative_id": initiative_id,
+            "error": str(e),
+        })
+        logger.error(
+            "[SWEEP_REVIEW] Failed to process initiative %s: %s",
+            initiative_id[:8], e, exc_info=True
+        )
+
+# After loop, report failures
+if failed_initiatives:
+    logger.warning(
+        "[SWEEP_REVIEW] %d initiative(s) failed to process: %s",
+        len(failed_initiatives),
+        [f["initiative_id"][:8] for f in failed_initiatives]
+    )
+
+try:
+    await self.db.commit()
+except Exception as e:
+    logger.error(
+        "[SWEEP_REVIEW] Failed to commit batch (processed=%d, failed=%d): %s",
+        processed, len(failed_initiatives), e, exc_info=True
+    )
+    await self.db.rollback()
+```
+
+**Priority:** 🟡 **Medium** — Partial failure handling, missing diagnostic context
 
 ---
 
-## Recommendations Priority
+### 5. Missing timezone awareness checks in monitor time calculations
 
-### Critical (Security Issues)
-None found. ✅
+**Location:** `monitor_enhanced.py:40-48`, `monitor.py:40-48`
 
-### High Priority (Missing Protections)
-None found. ✅
+```python
+now = datetime.now(timezone.utc)
+stuck_cutoff = now - timedelta(seconds=self.stuck_timeout)
 
-### Medium Priority (Test Coverage)
-1. **Add auth failure test cases** — Verify 401 responses for unauthenticated requests
-   - Estimated effort: 30 minutes
-   - File: `tests/test_reflections_api.py`
+# ... query tasks ...
 
-### Low Priority (Enhancements)
-2. **Improve client-side error handling** — Better UX for expired tokens
-   - Estimated effort: 1 hour
-   - File: `Sources/LobsMissionControl/IntelligenceView.swift`
+for task in tasks:
+    updated_at = task.updated_at.replace(tzinfo=timezone.utc) if task.updated_at.tzinfo is None else task.updated_at
+    age_seconds = (now - updated_at).total_seconds()  # ⚠️ Can crash if timezone-naive
+```
 
-3. **Add security logging** — Monitor failed auth attempts
-   - Estimated effort: 15 minutes
-   - File: `app/auth.py`
+**Issue:** Code assumes `task.updated_at` might be timezone-naive and defensively adds UTC timezone. However, this is done **after** the query, not during comparison. If SQLAlchemy returns naive datetimes and the `.replace()` happens too late, the subtraction will crash.
+
+**Impact:** Orchestrator engine will crash with `TypeError: can't subtract offset-naive and offset-aware datetimes` if the DB migration state is inconsistent (some tables have timezone-aware columns, some don't).
+
+**Fix Required:**
+
+1. **Immediate fix** — move timezone normalization before calculation:
+```python
+for task in tasks:
+    # Normalize timezone BEFORE any operations
+    if task.updated_at is None:
+        continue
+    updated_at = (
+        task.updated_at.replace(tzinfo=timezone.utc)
+        if task.updated_at.tzinfo is None
+        else task.updated_at
+    )
+    age_seconds = (now - updated_at).total_seconds()
+```
+
+2. **Long-term fix** — add DB-level timezone validation:
+```python
+# In models.py, ensure all datetime columns use timezone-aware types
+updated_at: Mapped[datetime] = mapped_column(
+    DateTime(timezone=True),  # Enforce timezone-aware
+    default=lambda: datetime.now(timezone.utc),
+    nullable=False,
+)
+```
+
+**Priority:** 🟡 **Medium** — Can crash monitor, but rare (depends on DB state)
 
 ---
 
-## Related Code Paths Verified
+## 🔵 Suggestions (minor improvements)
 
-### Server-side
-- ✅ `app/main.py` — Router registration with auth dependency
-- ✅ `app/auth.py` — Token validation logic
-- ✅ `app/routers/orchestrator_reflections.py` — Intelligence endpoints
-- ✅ `app/models.py` — APIToken model (active flag, last_used_at)
+### Additional observations:
 
-### Client-side
-- ✅ `APIService.swift` — HTTP client with auth headers
-- ✅ `IntelligenceView.swift` — Dashboard view making API calls
-- ✅ `AppViewModel.swift` — APIService initialization with token
-- ✅ `Intelligence/IntelligenceModels.swift` — Data models (no sensitive defaults)
+1. **Good:** Comprehensive logging with structured log keys (`[WORKER]`, `[MONITOR]`, `[SWEEP]`)
+2. **Good:** Most error handlers include `exc_info=True` for stack traces
+3. **Good:** DB rollback is called in most error paths (but see issue #2)
+4. **Suggestion:** Consider using custom exception types for different failure modes:
+   - `WorkerSpawnError` — failed to spawn worker
+   - `SessionStatusError` — failed to check session status
+   - `DBRollbackError` — rollback failed during recovery
 
-### Tests
-- ✅ `tests/conftest.py` — Test client with auth header
-- ✅ `tests/test_reflections_api.py` — Reflection endpoint tests (all authenticated)
-- ✅ `tests/test_batch_initiative_api.py` — Batch decision tests (all authenticated)
-- 🟡 **No negative auth tests** — Gap identified above
+5. **Suggestion:** Add error counters/metrics for monitoring:
+   ```python
+   # Track error rates for alerting
+   self.error_counter = {"spawn_failures": 0, "session_check_failures": 0}
+   ```
+
+6. **Suggestion:** In `worker.py:_spawn_session`, the error type classification is good (`classify_error_type`), but results are only used for provider health tracking. Consider exposing error types in API responses for better client-side error handling.
+
+---
+
+## Test Coverage Gaps
+
+**Missing tests for error scenarios:**
+1. ❌ No tests for DB rollback failures
+2. ❌ No tests for timezone-naive datetime handling in monitor
+3. ❌ No tests for partial batch processing failures in sweep review
+4. ❌ No tests for worker kill scenarios
+5. ❌ No tests for Gateway API failures (rate limits, auth errors)
+
+**Recommendation:** Add integration tests for these failure modes to catch regressions.
+
+---
+
+## Recommended Actions
+
+**Priority order:**
+
+1. **Fix issue #1** (bare except pass) — 30 minutes
+2. **Fix issue #2** (missing rollback error handling) — 1 hour (affects 4+ locations)
+3. **Fix issue #5** (timezone handling) — 30 minutes
+4. **Fix issue #3** (inconsistent error handling) — 1 hour (requires API design decision)
+5. **Fix issue #4** (nested exception handling) — 45 minutes
+
+**Total estimated effort:** ~4 hours
+
+---
+
+## Files Requiring Changes
+
+| File | Lines to Change | Estimated Time |
+|------|-----------------|----------------|
+| `worker.py` | 110-111, 1232-1233, 1339-1340, 784-786, 1615-1633 | 2.5 hours |
+| `monitor_enhanced.py` | 40-48, 196-197, 300-301 | 1 hour |
+| `monitor.py` | 40-48 | 15 minutes |
+| `sweep_arbitrator.py` | (minor, no changes required) | — |
 
 ---
 
 ## Conclusion
 
-The Intelligence dashboard is **properly secured** with Bearer token authentication at both the API and client level. The implementation follows FastAPI best practices and correctly enforces auth on all sensitive endpoints.
+The refactored orchestrator modules have **solid error handling foundations** with comprehensive logging and rollback logic. However, there are **5 high-priority issues** that should be addressed before production deployment:
 
-The missing test coverage for auth failures is a **quality gap, not a security vulnerability** — the auth is working correctly in production. Adding these tests would improve confidence and prevent future regressions.
+- 2 critical issues (swallowed errors, missing rollback handling)
+- 3 important issues (inconsistent patterns, missing context, timezone bugs)
 
-No code changes are required for security. Test coverage improvements are recommended as routine hygiene.
+All issues are **fixable in ~4 hours** with targeted changes. No architectural changes required.
+
+**Overall assessment:** ✅ **Good** — Production-ready after fixing the 5 issues identified above.
 
 ---
 
-**Sign-off:**  
-Authorization logic verified correct. No security vulnerabilities found. System is production-ready with auth properly configured.
+**Next Steps:**
+
+1. Create programmer handoffs for the top 5 issues
+2. Add integration tests for error scenarios
+3. Review similar patterns in other orchestrator modules (router, engine, scanner)
