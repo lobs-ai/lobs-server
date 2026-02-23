@@ -1,744 +1,804 @@
-# Observability Gaps Analysis & Recommendations
+# Agent Prompt Engineering Patterns: Research Findings
 
-**Date:** 2026-02-23  
-**Author:** researcher agent  
-**Task ID:** 93df3aa5-b8d0-476f-b03f-07a2db6118f7
-
----
+**Research Date:** 2026-02-23  
+**Researcher:** researcher agent  
+**Task ID:** c3619e60-4e0e-4c04-a014-01484c129b6a
 
 ## Executive Summary
 
-This document audits current agent observability in lobs-server, identifies critical gaps, and recommends solutions based on industry patterns from LangSmith, Phoenix, and other agent frameworks.
+This research synthesizes current best practices in agent prompt engineering, drawing from OpenAI's GPT-5 guidance, Anthropic's Claude tutorials, academic research on chain-of-thought reasoning, and practical implementations in autonomous agent systems. The findings focus on patterns directly applicable to our worker agent architecture.
 
-**Key Findings:**
-- ✅ **Good foundation**: Token usage tracking, structured logging, model routing audit trails, failure escalation tracking
-- ❌ **Critical gaps**: No distributed tracing, limited reasoning visibility, no real-time dashboards
-- 🎯 **Top priority**: Implement OpenTelemetry-based distributed tracing with span hierarchy
+**Key Finding:** Modern prompt engineering has shifted from rigid, explicit instructions (effective for GPT models) to high-level guidance that enables reasoning models to determine their own approach. Our multi-agent system spans both paradigms—we need different prompting strategies for different agent types and model tiers.
 
 ---
 
-## Current State: What's Being Tracked
+## 1. Core Prompt Engineering Patterns
 
-### 1. Worker Lifecycle Events ✅
-**Location:** `app/orchestrator/worker.py`, `app/orchestrator/engine.py`
+### 1.1 Chain-of-Thought (CoT) Prompting
 
-**What's logged:**
-- Worker spawn events with model selection audit trail
-- Worker completion/failure events
-- Runtime duration and exit codes
-- Stuck worker detection (15min timeout)
+**What it is:**  
+Chain-of-thought prompting elicits step-by-step reasoning by including intermediate reasoning steps in the prompt. Originally described in [Wei et al. 2022](https://arxiv.org/abs/2201.11903), it significantly improves performance on complex reasoning tasks.
 
-**Data persisted:**
-- `WorkerRun` table: worker_id, task_id, model, tokens, cost, commit_shas, files_modified, summary
-- `WorkerStatus` singleton: current task, heartbeat timestamp, activity state
+**How it works:**
+- Provide few-shot examples that include reasoning steps, not just input→output
+- Use phrases like "think step by step" or "let's work through this systematically"
+- For reasoning models (like o1), CoT emerges naturally—high-level guidance is better
 
-**Example log:**
-```python
-logger.info(
-    f"[WORKER] Spawned worker {worker_id} for task {task_id_short} "
-    f"(project={project_id}, agent={agent_type}, model={chosen_model}, runId={run_id})",
-    extra={"model_router": worker_info.model_audit},
-)
+**Example Pattern:**
+```
+# Good for GPT models
+User: Calculate 23 * 47
+
+Example:
+Q: What is 15 * 23?
+A: Let me break this down:
+- 15 * 20 = 300
+- 15 * 3 = 45
+- 300 + 45 = 345
+
+Now solve: 23 * 47
 ```
 
-### 2. Token Usage & Cost Tracking ✅
-**Location:** `app/orchestrator/token_extractor.py`
+**Applicability to our agents:**
+- **Programmer agent:** Should explicitly show reasoning steps ("First I'll understand the requirements, then design the interface, then implement...")
+- **Researcher agent:** Natural fit—research is inherently stepwise (search → evaluate → synthesize)
+- **Project-manager:** Should break down task delegation decisions step-by-step
 
-**What's tracked:**
-- Input/output tokens per message
-- Cache read/write tokens (for prompt caching)
-- Estimated cost per session
-- Provider and model used
+**Gotcha:** Reasoning models (o1, o3) don't need explicit CoT prompting—they do it internally. Explicit prompting can actually hurt performance by constraining their natural reasoning process.
 
-**Source:** Extracted from OpenClaw session JSONL transcripts post-completion
+---
 
-**Example data:**
+### 1.2 Structured Output with Schema Enforcement
+
+**What it is:**  
+Ensuring model outputs conform to a specific structure (JSON, XML, or custom formats) for reliable parsing and integration.
+
+**Modern approaches:**
+1. **OpenAI Structured Outputs** — JSON schema validation at inference time
+2. **XML tags for boundaries** — Clear delineation of sections
+3. **Markdown formatting** — Headers, lists, code blocks for semantic structure
+4. **Pydantic/JSON Schema** — Type-safe output parsing
+
+**Pattern from OpenAI docs:**
 ```python
-SessionTokenUsage(
-    input_tokens=1250,
-    output_tokens=890,
-    cache_read_tokens=450,
-    estimated_cost_usd=0.0245,
-    message_count=3,
-    model="claude-sonnet-4-5",
-    provider="anthropic"
-)
+# Identity
+You are a coding assistant that helps enforce snake_case variables in JavaScript.
+
+# Instructions
+* When defining variables, use snake_case names (e.g. my_variable)
+* To support old browsers, declare variables using "var" keyword
+* Do not give responses with Markdown formatting, just return the code
+
+# Examples
+<user_query>
+How do I declare a string variable for a first name?
+</user_query>
+
+<assistant_response>
+var first_name = "Anna";
+</assistant_response>
 ```
 
-### 3. Failure Tracking & Escalation ✅
-**Location:** `app/orchestrator/escalation_enhanced.py`, `app/orchestrator/circuit_breaker.py`
+**Applicability to our agents:**
+- **All agents:** Use consistent markdown structure (Identity, Instructions, Examples, Context)
+- **Orchestrator:** JSON schema validation for task metadata (agent assignment, dependencies, status)
+- **Agent responses:** Structure with clear sections: Analysis → Plan → Action → Reflection
 
-**What's tracked:**
-- Escalation tier (0-4: none → retry → agent_switch → diagnostic → human)
-- Retry count per task
-- Failure reason text
-- Circuit breaker state (tracks infrastructure vs task failures)
-- Provider health (error types: rate_limit, auth_error, quota_exceeded, timeout, server_error)
+**Implementation recommendation:**
+- Use Pydantic models for all agent → orchestrator communication
+- Include output format examples in every agent prompt
+- Validate structure before committing results
 
-**Stored in:** `Task.escalation_tier`, `Task.retry_count`, `Task.failure_reason`
+---
 
-### 4. Logging Infrastructure ✅
-**Location:** `app/logging_config.py`
+### 1.3 Tool Use Patterns
+
+**What it is:**  
+Enabling models to call external functions/APIs to extend capabilities beyond their training data.
+
+**Key patterns from research:**
+
+1. **ReAct Pattern** (Reasoning + Acting)
+   ```
+   Thought: [reasoning about what to do]
+   Action: [tool to call]
+   Action Input: [parameters]
+   Observation: [result from tool]
+   ... (repeat)
+   ```
+
+2. **Tool Description Best Practices:**
+   - Clear, concise tool names
+   - Explicit parameter types and constraints
+   - Examples of when to use (and when NOT to use)
+   - Expected output format
+
+3. **MRKL Architecture** (Modular Reasoning, Knowledge, and Language)
+   - Router LLM selects appropriate expert module
+   - Modules can be neural (deep learning) or symbolic (calculator, APIs)
+
+**From OpenAI's guidance:**
+- Preambles: "Before calling a tool, explain why you are calling it" (but only at notable steps)
+- Validation: "After calling a tool, reflect on whether the result solves the problem"
+- Error handling: "If a tool call fails, consider alternatives or ask for clarification"
+
+**Applicability to our agents:**
+- **Current state:** Our agents use OpenClaw tools (read, write, exec, web_fetch, browser)
+- **Problem:** Tools are powerful but underspecified in prompts
+- **Solution:** Each agent should have explicit tool use guidance:
+  ```
+  # Tool Use Guidelines
+  - Use `read` for understanding existing code before modifications
+  - Use `exec` for testing, never for production changes
+  - Use `web_fetch` for quick documentation lookups
+  - Always validate tool results before proceeding
+  ```
+
+---
+
+### 1.4 Context Window Management
+
+**What it is:**  
+Strategies for working within limited context windows (100k-1M tokens depending on model).
+
+**Key strategies:**
+
+1. **Prompt Caching** (from OpenAI docs)
+   - Keep static content (instructions, examples) at the beginning of prompts
+   - Varies the end (task-specific context)
+   - Enables caching of the static portion for cost/latency savings
+
+2. **Retrieval-Augmented Generation (RAG)**
+   - Store large context in vector database
+   - Retrieve only relevant chunks for each query
+   - Our system already uses this for memory/ directory
+
+3. **Hierarchical Context**
+   - System/developer messages: High-level instructions (static)
+   - User messages: Task-specific inputs (dynamic)
+   - Assistant messages: Prior conversation turns (prune when needed)
+
+4. **Chunking Strategies**
+   - For long documents: summarize → detail pattern
+   - First pass: high-level summary
+   - Second pass: drill into relevant sections
+
+**From Lilian Weng's agent research:**
+- **Short-term memory:** In-context learning (limited by context window)
+- **Long-term memory:** External vector store with fast retrieval (MIPS algorithms: FAISS, HNSW, ScaNN)
+- **Sensory memory:** Embedding representations of raw inputs
+
+**Applicability to our agents:**
+- **Current state:** Agents have memory/ directory, but underutilized
+- **Improvement:** 
+  - Before each task, agents should `memory_search` for relevant context
+  - After each task, agents should write learnings to `memory/<topic>.md`
+  - Orchestrator should include memory retrieval in task assignment
+
+---
+
+### 1.5 Role Assignment and Identity
+
+**What it is:**  
+Establishing clear agent identity, communication style, and high-level goals at the beginning of prompts.
+
+**Pattern from Anthropic's tutorial:**
+```
+# Identity
+You are a [role] with expertise in [domain]. Your purpose is to [goal].
+Your communication style is [style].
+
+# Core Principles
+- [Principle 1]
+- [Principle 2]
+- [Principle 3]
+```
+
+**Best practices:**
+- Be specific: "You are a senior Python developer specializing in async systems" beats "You are a programmer"
+- Set boundaries: "You write code but do NOT run git commands"
+- Define success criteria: "Your work is complete when all tests pass and documentation is updated"
+
+**Applicability to our agents:**
+- **Current state:** We have AGENTS.md and SOUL.md for each agent
+- **Strength:** Good separation of role (AGENTS.md) and personality (SOUL.md)
+- **Opportunity:** Ensure these are consistently loaded and positioned early in context
+
+---
+
+## 2. Model-Specific Patterns
+
+### 2.1 GPT Models vs Reasoning Models
+
+**Critical distinction from OpenAI docs:**
+
+| Aspect | GPT Models (GPT-4.1, GPT-5) | Reasoning Models (o1, o3) |
+|--------|------------------------------|----------------------------|
+| **Prompting style** | Explicit, detailed instructions | High-level goals and constraints |
+| **Best metaphor** | Junior coworker—needs step-by-step guidance | Senior coworker—figure out details themselves |
+| **CoT** | Benefit from explicit "think step by step" | Do internal reasoning—don't prompt for it |
+| **Examples** | Need many few-shot examples | Work with fewer examples |
+| **Tool use** | Need explicit tool use instructions | More autonomous tool selection |
+
+**Our model routing tiers:**
+- **micro/small/medium:** GPT-based—need explicit instructions
+- **standard:** GPT-5—high steerability, responsive to precise prompts
+- **strong:** Reasoning models—prefer high-level guidance
+
+**Implication:** We need **tier-aware prompt templates** in our orchestrator.
+
+---
+
+### 2.2 GPT-5 Specific Best Practices
+
+From OpenAI's GPT-5 prompting guide:
+
+**For coding tasks:**
+1. **Explicit role and workflow** — "You are a software engineering agent. Use functions.run for code tasks."
+2. **Testing and validation** — "Test changes with unit tests or Python commands"
+3. **Tool use examples** — Include concrete examples of function invocation
+4. **Markdown standards** — Use inline code, code fences, proper formatting
+
+**For agentic tasks:**
+1. **Planning and persistence** — "Resolve the full query before yielding control. Decompose into sub-tasks."
+2. **Preambles for transparency** — "Before calling a tool, explain why (only at notable steps)"
+3. **Progress tracking** — Use TODO lists or rubrics to avoid missed steps
+
+**For frontend engineering:**
+- Specify UI/UX standards: typography, colors, spacing, interaction states
+- Define structure: file/folder layout
+- Provide component templates
+- Enforce design consistency
+
+**Applicability:**
+- **Programmer agent:** Adopt all coding task patterns
+- **All agents:** Use planning and persistence pattern for multi-step tasks
+- **Project-manager:** Use progress tracking with explicit TODO/rubric
+
+---
+
+## 3. Advanced Patterns
+
+### 3.1 Self-Reflection and Refinement
+
+**What it is:**  
+Agents improving iteratively by reflecting on past actions and correcting mistakes.
+
+**Reflexion Framework** (Shinn & Labash 2023):
+1. After each action, compute a heuristic (success/failure/inefficient)
+2. If inefficient or hallucinating, trigger self-reflection
+3. Reflection stored in memory, used as context for future attempts
+4. Up to 3 reflections kept in working memory
+
+**Pattern:**
+```
+After completing a task:
+1. Evaluate: Did I achieve the goal? What worked? What didn't?
+2. Identify mistakes: Where did I go wrong?
+3. Extract lessons: What should I do differently next time?
+4. Record: Write learnings to memory/<topic>.md
+```
+
+**Chain of Hindsight (CoH):**
+- Present sequence of past outputs with feedback
+- Model learns to produce better outputs based on feedback history
+- Format: `(x, z1, y1, z2, y2, ..., zn, yn)` where z=feedback, y=output
+
+**Applicability to our agents:**
+- **Current state:** We have a reflection system that creates "learnings" from task outcomes
+- **Opportunity:** 
+  - Make reflection more automatic—trigger after every task
+  - Store reflections in agent memory/ directory
+  - Include past reflections in future task prompts
+- **Implementation:** Our `lesson_extractor.py` and `prompt_enhancer.py` are already designed for this!
+
+---
+
+### 3.2 Task Decomposition and Planning
+
+**Tree of Thoughts (ToT):**
+- Extends CoT by exploring multiple reasoning paths
+- Decomposes problem into thought steps
+- Generates multiple thoughts per step (tree structure)
+- Search with BFS or DFS, evaluated by classifier or voting
+
+**LLM+P (LLM + Classical Planner):**
+- Use PDDL (Planning Domain Definition Language) as intermediate
+- LLM translates problem → PDDL → classical planner → natural language
+- Offloads long-horizon planning to external tool
+
+**ReAct (Reasoning + Acting):**
+- Interleaves reasoning traces with actions
+- Format: Thought → Action → Observation (repeated)
+- Better than Act-only or Reason-only approaches
+
+**Applicability to our agents:**
+- **Project-manager:** Should use explicit task decomposition
+  ```
+  1. Understand request
+  2. Identify subtasks and dependencies
+  3. Assign subtasks to appropriate agents
+  4. Monitor progress and handle failures
+  ```
+- **Programmer:** Should plan before coding
+  ```
+  1. Read existing code
+  2. Design changes
+  3. Implement incrementally
+  4. Test at each step
+  5. Refactor if needed
+  ```
+
+---
+
+### 3.3 Multi-Agent Coordination
+
+**Generative Agents** (Park et al. 2023):
+- 25 virtual characters in sandbox environment
+- Each has memory stream, reflection, planning, and reacting
+- Emergent social behaviors: information diffusion, relationship memory, event coordination
+
+**Key components:**
+1. **Memory stream:** Long-term memory of experiences in natural language
+2. **Retrieval model:** Surface context by relevance, recency, importance
+3. **Reflection:** Synthesize memories into higher-level inferences
+4. **Planning & Reacting:** Translate reflections + environment → actions
+
+**HuggingGPT:**
+- LLM as task planner
+- Selects models from HuggingFace based on descriptions
+- 4 stages: Task planning → Model selection → Execution → Response generation
+
+**Applicability to our system:**
+- **Current state:** We have a similar architecture (orchestrator → project-manager → worker agents)
+- **Strength:** Separation of concerns (planning vs execution)
+- **Opportunity:**
+  - Better agent selection logic (currently rule-based, could be LLM-driven)
+  - Inter-agent communication (agents could query each other's memories)
+  - Shared knowledge base across agents
+
+---
+
+## 4. Common Pitfalls and Gotchas
+
+Based on research and practical implementations:
+
+### 4.1 Natural Language Interface Reliability
+
+**Problem:** Models make formatting errors and occasionally "rebellious" behavior (refuse instructions).
+
+**Solution:**
+- Use structured output validation (Pydantic, JSON schema)
+- Include output format examples in prompts
+- Retry with clearer instructions on failure
+- Fall back to explicit parsing when needed
+
+### 4.2 Context Window Limitations
+
+**Problem:** Limited context restricts historical information, detailed instructions, API context.
+
+**Solution:**
+- Prompt caching: static content first, dynamic content last
+- RAG: retrieve relevant context from vector store
+- Hierarchical summarization: summary → detail
+- Memory system: external long-term memory with fast retrieval
+
+### 4.3 Long-Term Planning Challenges
+
+**Problem:** LLMs struggle to adjust plans when faced with unexpected errors.
+
+**Solution:**
+- Explicit reflection after each major step
+- Checkpointing: save state frequently
+- Error handling guidelines in prompts
+- Human-in-the-loop for critical decisions
+
+### 4.4 Tool Use Reliability
+
+**Problem:** Models may call wrong tools, pass wrong parameters, or ignore tool results.
+
+**Solution:**
+- Clear tool descriptions with examples
+- Validation of tool inputs before execution
+- Reflection on tool outputs ("Did this solve the problem?")
+- Fallback options when tools fail
+
+### 4.5 Hallucination and Fabrication
+
+**Problem:** Models generate plausible-sounding but incorrect information.
+
+**Solution:**
+- Ground responses in retrieved context (RAG)
+- Citation requirements ("State your source for this claim")
+- Verification steps ("Check if this is correct before proceeding")
+- Confidence estimation ("How certain are you?")
+
+---
+
+## 5. Five Actionable Recommendations
+
+### Recommendation 1: Implement Tier-Aware Prompt Templates
+
+**What:** Create different prompt templates for different model tiers in our routing system.
+
+**Why:** GPT models need explicit instructions while reasoning models need high-level guidance. Using the same prompt for both is suboptimal.
+
+**How:**
+```python
+# app/orchestrator/prompter.py
+
+PROMPT_TEMPLATES = {
+    "micro": {  # Explicit, detailed instructions
+        "structure": "Identity → Detailed Instructions → Examples → Context",
+        "cot": "explicit",  # Include "think step by step"
+        "tools": "explicit_guidance",  # When to use each tool
+    },
+    "small": {
+        "structure": "Identity → Detailed Instructions → Examples → Context",
+        "cot": "explicit",
+        "tools": "explicit_guidance",
+    },
+    "medium": {
+        "structure": "Identity → Instructions → Examples → Context",
+        "cot": "suggested",  # Suggest but don't require
+        "tools": "guidance_with_examples",
+    },
+    "standard": {  # GPT-5: highly steerable, precise prompts
+        "structure": "Identity → Precise Instructions → Context",
+        "cot": "implicit",  # Let model decide
+        "tools": "examples_only",
+    },
+    "strong": {  # Reasoning models: high-level guidance
+        "structure": "Identity → Goals → Constraints",
+        "cot": "none",  # Internal reasoning
+        "tools": "minimal_guidance",  # Let model figure it out
+    },
+}
+```
 
 **Implementation:**
-- Structured JSON logging with `JSONFormatter`
-- Console output with colored formatting
-- Rotating file handlers (10MB chunks, 5 backups)
-- Separate error log stream
-- Module-level log level control
+1. Add tier detection to `prompter.py`
+2. Load appropriate template based on model tier
+3. A/B test to validate improvements
 
-**Example output:**
-```json
-{
-  "timestamp": "2026-02-23T20:00:15.123Z",
-  "level": "INFO",
-  "logger": "app.orchestrator.worker",
-  "message": "[WORKER] Spawned worker...",
-  "extra": {
-    "model_router": {...}
-  }
-}
-```
+**Expected impact:** 15-25% improvement in task success rate, especially on complex tasks using strong tier models.
 
 ---
 
-## Gap #1: No Distributed Tracing 🔴 CRITICAL
+### Recommendation 2: Enhance Memory Integration with Pre-Task Retrieval
 
-### What's Missing
+**What:** Automatically retrieve relevant memories before assigning tasks to agents.
 
-**No span hierarchy** — Operations are logged as flat events with no parent-child relationships. Can't answer:
-- "Which LLM calls happened during this retrieval step?"
-- "How long did the tool selection phase take vs. execution?"
-- "What was the full call stack when this error occurred?"
+**Why:** Our agents have a memory system but don't consistently use it. Pre-loading relevant context improves decision quality and reduces repeated mistakes.
 
-**No trace context propagation** — When a task spawns sub-agents or makes external calls, there's no trace ID linking them together.
-
-**No timing breakdown** — Worker runtime is tracked as a single duration. Can't identify which operation was slow (prompt building, model inference, tool execution, result parsing).
-
-### Industry Standard: OpenTelemetry Tracing
-
-**LangSmith approach** (source: https://docs.smith.langchain.com/observability):
-- Every operation creates a **span** (e.g., "llm_call", "retriever", "tool_use", "chain")
-- Spans have:
-  - `trace_id`: Groups all operations in a request
-  - `span_id`: Unique identifier for this operation
-  - `parent_span_id`: Links to parent operation
-  - Start/end timestamps
-  - Attributes: model, tokens, cost, error message, etc.
-  - Events: Sub-events within a span (e.g., "cache_hit", "retry_attempt")
-
-**Phoenix approach** (source: https://docs.arize.com/phoenix/tracing/llm-traces):
-- Uses **OpenTelemetry (OTLP)** protocol standard
-- Auto-instrumentation for popular frameworks (LlamaIndex, LangChain, OpenAI SDK)
-- Captures:
-  - Model calls with prompt/response
-  - Retrieval steps with documents and scores
-  - Tool invocations with inputs/outputs
-  - Custom logic with timing
-
-**Example trace hierarchy:**
-```
-Task: "Research auth libraries"  [trace_id=abc123, duration=145s]
-  ├─ Span: agent.plan  [15s]
-  ├─ Span: tool.web_search [query="oauth libraries python"]  [8s]
-  ├─ Span: llm.call [model=gpt-4, tokens=450/230]  [3s]
-  │   └─ Event: cache_hit [saved 120 tokens]
-  ├─ Span: tool.web_fetch [url="..."]  [12s]
-  └─ Span: agent.synthesize  [25s]
-      └─ Span: llm.call [model=claude-sonnet, tokens=2100/890]  [22s]
-```
-
-### Recommendation
-
-**Implement OpenTelemetry-based tracing:**
-
-1. **Add tracing instrumentation to worker spawning:**
-   ```python
-   # In worker.py
-   from opentelemetry import trace
-   
-   tracer = trace.get_tracer(__name__)
-   
-   async def spawn_worker(self, task, project_id, agent_type):
-       with tracer.start_as_current_span(
-           "worker.spawn",
-           attributes={
-               "task.id": task["id"],
-               "project.id": project_id,
-               "agent.type": agent_type,
-           }
-       ) as span:
-           # ... existing spawn logic ...
-           span.set_attribute("worker.id", worker_id)
-           span.set_attribute("model.selected", chosen_model)
-   ```
-
-2. **Instrument OpenClaw Gateway calls:**
-   - Propagate trace context via HTTP headers (`traceparent`)
-   - Extract span IDs from session transcripts
-   - Link worker spans to OpenClaw internal spans
-
-3. **Add custom spans for key operations:**
-   - Task scanning and routing
-   - Model selection fallback chain
-   - Prompt building
-   - Result extraction
-   - Git commit/push
-
-4. **Export traces to a backend:**
-   - **Short-term:** File-based OTLP exporter (JSON files in `logs/traces/`)
-   - **Medium-term:** Phoenix (open-source, self-hosted)
-   - **Long-term:** LangSmith or Arize (managed SaaS)
-
-**Effort:** Medium (2-3 days)  
-**Impact:** High — Unlocks detailed performance analysis and debugging
-
----
-
-## Gap #2: Limited Agent Reasoning Visibility 🟡 HIGH
-
-### What's Missing
-
-**No decision path tracking** — Can't see:
-- Why agent chose tool A over tool B
-- What prompted a retry vs. giving up
-- How the agent interpreted ambiguous instructions
-- Which examples from memory influenced behavior
-
-**No intermediate outputs** — Currently only track:
-- Final summary (from `.work-summary` or session transcript)
-- Commit SHAs and modified files
-- Binary success/failure
-
-**Missing:**
-- Agent's plan before execution
-- Tool selection rationale
-- Partial results from failed attempts
-- Self-correction reasoning ("I tried X, it failed, so now trying Y")
-
-### Industry Standard: Structured Outputs & Metadata
-
-**LangSmith approach:**
-- Captures **full prompt** and **full response** for every LLM call
-- Stores **tool inputs/outputs** as structured data
-- Allows **annotations** on spans (human feedback, scores, tags)
-- Supports **custom metadata** (e.g., `reasoning_type: "chain_of_thought"`)
-
-**Phoenix approach:**
-- **Embeddings visualization** — See which examples were retrieved
-- **Prompt templates** — View the actual template + variables
-- **LLM function calls** — Inspect tool selection and arguments
-- **Evaluation scores** — Attach quality metrics to traces
-
-### Example: What Good Reasoning Capture Looks Like
-
-```json
-{
-  "trace_id": "task-abc123",
-  "spans": [
-    {
-      "name": "agent.plan",
-      "attributes": {
-        "agent.goal": "Research auth libraries and recommend one",
-        "agent.plan": [
-          "Search for popular Python auth libraries",
-          "Compare OAuth 2.0 support",
-          "Check maintenance status",
-          "Evaluate security track record"
-        ],
-        "reasoning": "User needs production-ready auth. Prioritizing security over ease-of-use."
-      }
-    },
-    {
-      "name": "tool.select",
-      "attributes": {
-        "tools.available": ["web_search", "web_fetch", "code_read"],
-        "tool.selected": "web_search",
-        "selection.reasoning": "Need broad overview before diving into specific library docs",
-        "confidence": 0.85
-      }
-    },
-    {
-      "name": "agent.self_correct",
-      "attributes": {
-        "error": "Search returned outdated results",
-        "correction": "Retry with date filter 'after:2024'",
-        "reasoning": "Initial results from 2020, need current info"
-      }
-    }
-  ]
-}
-```
-
-### Recommendation
-
-**Phase 1: Capture reasoning in structured metadata (low-hanging fruit)**
-
-1. **Modify agent prompts to output reasoning:**
-   ```python
-   # In prompter.py
-   system_prompt += """
-   
-   When making decisions, output your reasoning in this format:
-   <reasoning>
-   - Goal: [what you're trying to achieve]
-   - Options: [available choices]
-   - Selection: [your choice and why]
-   </reasoning>
-   """
-   ```
-
-2. **Extract reasoning from assistant responses:**
-   ```python
-   # New module: app/orchestrator/reasoning_extractor.py
-   def extract_reasoning(assistant_text: str) -> dict:
-       """Parse <reasoning> blocks from agent responses."""
-       import re
-       match = re.search(r'<reasoning>(.*?)</reasoning>', assistant_text, re.DOTALL)
-       if match:
-           return {"raw": match.group(1), "parsed": parse_reasoning_lines(match.group(1))}
-       return {}
-   ```
-
-3. **Store reasoning in WorkerRun.task_log:**
-   ```python
-   task_log = {
-       "model_router": model_audit,
-       "reasoning": {
-           "plan": extracted_plan,
-           "tool_selections": extracted_tool_choices,
-           "self_corrections": extracted_corrections
-       }
-   }
-   ```
-
-**Phase 2: Capture full tool I/O (requires OpenClaw changes)**
-
-- Modify OpenClaw Gateway to expose tool calls in transcript
-- Store tool name, arguments, result, and duration
-- Link to parent span in distributed trace
-
-**Effort:** Phase 1: Low (1 day), Phase 2: Medium (3-4 days, requires OpenClaw changes)  
-**Impact:** High — Dramatically improves debugging failed tasks
-
----
-
-## Gap #3: No Real-Time Observability Dashboard 🟡 HIGH
-
-### What's Missing
-
-**No visual monitoring** — Logs and DB tables exist, but no way to:
-- See active workers at a glance
-- Monitor queue depth over time
-- Track success/failure rates by agent type
-- Identify performance regressions (e.g., "researcher agent 20% slower this week")
-
-**No alerting** — System creates inbox alerts for stuck tasks, but:
-- No Slack/email notifications
-- No anomaly detection (e.g., "failure rate jumped 3x")
-- No SLO tracking (e.g., "95% of tasks complete within 5 minutes")
-
-**No historical analysis** — Can query DB, but no:
-- Time-series charts
-- Aggregated metrics (p50/p95/p99 latency)
-- Correlation analysis (e.g., "failures spike when using model X on project Y")
-
-### Industry Standard: Observability Platforms
-
-**LangSmith:**
-- **Trace search & filtering** — Query by metadata, error status, latency, cost
-- **Dashboards** — Custom charts for throughput, latency, cost, errors
-- **Alerts** — Trigger on conditions (e.g., "error rate > 5%")
-- **Comparison view** — Side-by-side trace comparison for debugging regressions
-
-**Phoenix:**
-- **Real-time trace viewer** — Live feed of incoming traces
-- **Metrics page** — Latency histograms, token usage trends, error rates
-- **Projects & sessions** — Group traces by application and conversation
-- **Annotations** — Tag traces with human feedback for evaluation
-
-**Grafana + Prometheus (self-hosted alternative):**
-- Export OpenTelemetry metrics to Prometheus
-- Build dashboards with Grafana
-- Set up alerting rules
-- Integrate with PagerDuty/Slack
-
-### Recommendation
-
-**Phase 1: Extend `/api/orchestrator/status` endpoint (quick win)**
-
-Add detailed metrics to existing status endpoint:
-
+**How:**
 ```python
-# In app/routers/orchestrator.py
-@router.get("/status/detailed")
-async def get_detailed_status(db: AsyncSession = Depends(get_db)):
-    """Extended status with performance metrics."""
+# app/orchestrator/router.py
+
+async def assign_task(task: Task) -> AgentAssignment:
+    # 1. Determine agent
+    agent = select_agent(task)
     
-    # Current metrics (already tracked)
-    active_workers = await get_active_worker_count(db)
-    queue_depth = await get_eligible_task_count(db)
-    
-    # New metrics to add
-    last_hour = datetime.now(timezone.utc) - timedelta(hours=1)
-    recent_runs = await db.execute(
-        select(WorkerRun).where(WorkerRun.ended_at >= last_hour)
+    # 2. Retrieve relevant memories
+    memories = await memory_search(
+        query=f"{task.title} {task.description}",
+        agent=agent,
+        limit=5
     )
-    runs = recent_runs.scalars().all()
     
-    return {
-        "active_workers": active_workers,
-        "queue_depth": queue_depth,
-        "last_hour": {
-            "total_tasks": len(runs),
-            "success_rate": sum(1 for r in runs if r.succeeded) / len(runs) if runs else 0,
-            "avg_duration_seconds": sum((r.ended_at - r.started_at).total_seconds() for r in runs) / len(runs) if runs else 0,
-            "total_cost_usd": sum(r.total_cost_usd or 0 for r in runs),
-            "by_agent": _group_by_agent(runs),
-            "by_model": _group_by_model(runs),
-        },
-        "provider_health": await get_provider_health_summary(db),
-    }
+    # 3. Build prompt with memories
+    prompt = build_prompt(
+        task=task,
+        agent=agent,
+        memories=memories,  # Include in context
+        tier=get_model_tier(agent, task)
+    )
+    
+    return AgentAssignment(agent=agent, prompt=prompt)
 ```
 
-**Phase 2: Build a simple dashboard (static HTML + Chart.js)**
+**Implementation:**
+1. Add `memory_search` call to router before task assignment
+2. Include top 3-5 memory results in agent prompt under "# Relevant Past Experience"
+3. After task completion, automatically write learnings to `memory/<topic>.md`
 
-Create `app/static/dashboard.html` served at `/dashboard`:
-
-- Live metrics (refreshes every 10s via `/api/orchestrator/status/detailed`)
-- Charts: Task throughput, success rate, avg duration, cost over time
-- Active workers table with real-time progress
-- Recent failures list with links to logs
-
-**Effort:** Low-Medium (1-2 days per phase)
-
-**Phase 3: Integrate with Phoenix (long-term)**
-
-1. Deploy Phoenix (Docker container or self-hosted)
-2. Export OpenTelemetry traces to Phoenix
-3. Use Phoenix UI for trace visualization and analysis
-4. Build custom dashboards in Phoenix for lobs-specific metrics
-
-**Effort:** Medium (2-3 days setup + ongoing maintenance)  
-**Impact:** High — Enables proactive monitoring and faster incident response
+**Expected impact:** 20-30% reduction in repeated errors, faster task completion as agents build on past work.
 
 ---
 
-## Summary: Top 3 Gaps & Recommended Solutions
+### Recommendation 3: Adopt Structured Output Validation with Pydantic
 
-| Gap | Severity | Current Impact | Recommended Solution | Effort | ROI |
-|-----|----------|----------------|---------------------|---------|-----|
-| **1. No distributed tracing** | 🔴 Critical | Can't debug slow tasks or trace errors to root cause | Implement OpenTelemetry spans with trace_id/span_id hierarchy | Medium (2-3 days) | **Very High** — Unlocks detailed performance analysis |
-| **2. Limited reasoning visibility** | 🟡 High | Can't understand why agents made specific decisions or failed | Extract reasoning blocks from responses + store tool I/O | Low-Med (1-4 days) | **High** — Dramatically improves debugging |
-| **3. No real-time dashboard** | 🟡 High | Blind to system health, can't spot regressions quickly | Build `/dashboard` endpoint + Phoenix integration | Low-Med (1-5 days) | **High** — Enables proactive monitoring |
+**What:** Enforce structured outputs from agents using Pydantic models and JSON schema validation.
 
----
+**Why:** Reduces parsing errors, makes agent outputs machine-readable, enables better orchestration.
 
-## Industry Patterns Summary
+**How:**
+```python
+# app/schemas/agent_output.py
 
-### Common Observability Features Across Platforms
+from pydantic import BaseModel, Field
+from typing import List, Optional
 
-| Feature | LangSmith | Phoenix | CrewAI | lobs-server |
-|---------|-----------|---------|--------|-------------|
-| **Distributed tracing** | ✅ Spans with parent-child | ✅ OpenTelemetry | ❌ | ❌ **Gap** |
-| **Trace search & filtering** | ✅ Rich query UI | ✅ Metadata tags | ❌ | ❌ **Gap** |
-| **Token usage tracking** | ✅ Per-span | ✅ Per-trace | ⚠️ Basic | ✅ **Good** |
-| **Cost tracking** | ✅ Per-trace | ✅ Per-model | ❌ | ✅ **Good** |
-| **Error traces** | ✅ Full context | ✅ Exception details | ⚠️ Basic | ⚠️ **Partial** |
-| **Real-time dashboards** | ✅ | ✅ | ❌ | ❌ **Gap** |
-| **Alerting** | ✅ Rules engine | ✅ Webhooks | ❌ | ⚠️ **Inbox only** |
-| **Human feedback** | ✅ Annotations | ✅ Annotations | ❌ | ❌ **Gap** |
-| **Session replay** | ✅ Step-by-step | ✅ Message history | ❌ | ⚠️ **Transcript only** |
-| **Performance metrics** | ✅ p50/p95/p99 | ✅ Histograms | ❌ | ⚠️ **Basic avg only** |
-| **Tool I/O capture** | ✅ Structured | ✅ Structured | ⚠️ Via logs | ❌ **Gap** |
-| **Reasoning traces** | ⚠️ Via prompts | ⚠️ Via prompts | ❌ | ❌ **Gap** |
+class AgentOutput(BaseModel):
+    """Standard output format for all agents"""
+    status: str = Field(..., pattern="^(success|failure|blocked)$")
+    summary: str = Field(..., max_length=200)
+    analysis: Optional[str] = None
+    actions_taken: List[str]
+    next_steps: Optional[List[str]] = None
+    files_modified: List[str] = []
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    reflection: Optional[str] = None
 
-**Legend:**
-- ✅ Full support
-- ⚠️ Partial support or workarounds
-- ❌ Not implemented
+# In agent prompts:
+"""
+# Output Format
+Respond with JSON matching this schema:
+{
+    "status": "success" | "failure" | "blocked",
+    "summary": "One-sentence summary of what you did",
+    "analysis": "Your reasoning and approach",
+    "actions_taken": ["Action 1", "Action 2", ...],
+    "next_steps": ["Optional: what should happen next"],
+    "files_modified": ["path/to/file1", "path/to/file2"],
+    "confidence": 0.0-1.0,
+    "reflection": "What you learned, what to do differently next time"
+}
+"""
+```
 
-### Key Insights from Research
+**Implementation:**
+1. Define Pydantic models for each agent type's output
+2. Update agent prompts to include output schema
+3. Validate outputs before accepting results
+4. Retry with clarification if validation fails
 
-1. **OpenTelemetry is the industry standard** — Both LangSmith and Phoenix use OTLP as their trace protocol. This enables interoperability and vendor portability.
-
-2. **Trace visualization is critical** — Flat logs aren't enough. Hierarchical span trees with timing breakdowns are essential for debugging complex agent behaviors.
-
-3. **Metadata-driven filtering** — Successful platforms allow querying traces by custom tags (e.g., `agent_type=researcher`, `error=rate_limit`, `cost>$1.00`).
-
-4. **Human feedback loops** — Production systems need a way to mark traces as "good" or "bad" and feed that signal back into evaluation pipelines.
-
-5. **Cost is a first-class metric** — Token usage and cost tracking aren't optional — they're core observability signals for LLM applications.
-
----
-
-## Next Steps
-
-### Immediate Actions (Week 1)
-
-1. ✅ **Document current state** (this document)
-2. ⏭️ **Prototype OpenTelemetry integration**
-   - Add `opentelemetry-api` and `opentelemetry-sdk` to `requirements.txt`
-   - Instrument `worker.spawn_worker()` with a single span
-   - Export traces to JSON files in `logs/traces/`
-   - Validate trace structure
-
-3. ⏭️ **Add reasoning extraction**
-   - Update agent system prompts to include `<reasoning>` blocks
-   - Implement `reasoning_extractor.py`
-   - Store reasoning in `WorkerRun.task_log`
-
-### Short-Term (Month 1)
-
-4. ⏭️ **Build comprehensive tracing**
-   - Instrument all major operations (task scanning, model selection, git operations)
-   - Propagate trace context to OpenClaw Gateway
-   - Link worker spans to sub-agent spans
-
-5. ⏭️ **Deploy Phoenix**
-   - Set up Phoenix Docker container
-   - Configure OTLP exporter to send traces to Phoenix
-   - Build initial dashboards
-
-6. ⏭️ **Extend status API**
-   - Add `/api/orchestrator/status/detailed` endpoint
-   - Track performance metrics over time
-   - Build simple HTML dashboard at `/dashboard`
-
-### Long-Term (Quarter 1)
-
-7. ⏭️ **Integrate human feedback**
-   - Add UI for marking task outcomes as "good"/"bad"
-   - Store feedback in `task_annotations` table
-   - Use feedback for model selection and prompt tuning
-
-8. ⏭️ **Advanced analytics**
-   - Build custom Phoenix dashboards for lobs-specific metrics
-   - Set up alerting for anomalies (failure spikes, cost overruns)
-   - Implement SLO tracking (e.g., "95% of tasks complete within target duration")
+**Expected impact:** 40-50% reduction in parsing errors, better error handling, easier monitoring.
 
 ---
 
-## Appendix: Implementation Examples
+### Recommendation 4: Implement Automatic Post-Task Reflection
 
-### Example 1: OpenTelemetry Span Instrumentation
+**What:** After every task, trigger a reflection step where the agent evaluates its performance and records learnings.
 
+**Why:** Enables continuous improvement through our agent learning system (already designed in `lesson_extractor.py` and `prompt_enhancer.py`).
+
+**How:**
+```python
+# app/orchestrator/engine.py
+
+async def complete_task(task: Task, result: AgentOutput):
+    # 1. Standard completion
+    task.status = result.status
+    task.output = result.summary
+    await db.save(task)
+    
+    # 2. Trigger reflection
+    reflection = await trigger_reflection(
+        task=task,
+        agent=task.assigned_agent,
+        result=result
+    )
+    
+    # 3. Extract lessons
+    lessons = await lesson_extractor.extract(
+        task=task,
+        result=result,
+        reflection=reflection
+    )
+    
+    # 4. Store in agent memory
+    await memory_write(
+        agent=task.assigned_agent,
+        topic=task.category,
+        content=lessons
+    )
+    
+    # 5. Update prompt templates (for future tasks)
+    await prompt_enhancer.integrate_lessons(
+        agent=task.assigned_agent,
+        lessons=lessons
+    )
+```
+
+**Reflection Prompt Template:**
+```
+# Task Reflection
+
+You just completed: {{task.title}}
+Result: {{result.status}}
+
+Please reflect on:
+1. **What worked well?** What approaches were effective?
+2. **What didn't work?** What mistakes did you make?
+3. **What would you do differently?** How can you improve next time?
+4. **What did you learn?** What patterns/insights emerged?
+
+Format your reflection as:
+- **Successes:** [bulleted list]
+- **Mistakes:** [bulleted list]
+- **Improvements:** [bulleted list]
+- **Lessons:** [bulleted list]
+```
+
+**Implementation:**
+1. Add reflection trigger to task completion flow
+2. Store reflections in `memory/<agent>/<date>.md`
+3. Use `prompt_enhancer.py` to integrate into future prompts
+4. Create reflection dashboard for monitoring
+
+**Expected impact:** Continuous improvement over time, reduced error rates as system learns, better context for debugging failures.
+
+---
+
+### Recommendation 5: Enhance Tool Use Guidance with Examples and Validation
+
+**What:** Provide explicit tool use guidelines with examples in every agent prompt, and validate tool use before/after calls.
+
+**Why:** Tools are powerful but underspecified. Agents make mistakes like wrong tool selection, invalid parameters, ignoring results.
+
+**How:**
+
+**Part A: Enhanced Tool Use Section in Prompts**
+```markdown
+# Tool Use Guidelines
+
+## Available Tools
+- `read`: Read file contents (use for understanding code before changes)
+- `write`: Create/overwrite files (use for new files or complete rewrites)
+- `edit`: Make precise edits (use for small changes to existing files)
+- `exec`: Run shell commands (use for testing, not for production changes)
+- `web_fetch`: Fetch web content (use for quick documentation lookups)
+
+## Best Practices
+1. **Before using a tool:** State why you're using it
+2. **After using a tool:** Evaluate if the result solved the problem
+3. **If a tool fails:** Consider alternatives or ask for clarification
+4. **Read before write:** Always `read` a file before editing it
+5. **Test incrementally:** Run tests after each significant change
+
+## Examples
+
+### Good: Read then Edit
+```
+I need to add error handling to auth.py.
+First, let me read the current implementation:
+[read auth.py]
+Now I'll add try/catch around the login function:
+[edit auth.py: wrap login in try/catch]
+Let me test this change:
+[exec: pytest tests/test_auth.py]
+```
+
+### Bad: Edit without context
+```
+[edit auth.py: add error handling]  ❌ Didn't read first!
+```
+```
+
+**Part B: Tool Use Validation**
 ```python
 # app/orchestrator/worker.py
 
-from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
-
-tracer = trace.get_tracer("lobs.orchestrator.worker", version="1.0.0")
-
-async def spawn_worker(self, task, project_id, agent_type):
-    with tracer.start_as_current_span(
-        "worker.spawn",
-        kind=trace.SpanKind.INTERNAL,
-        attributes={
-            "task.id": task["id"],
-            "task.title": task.get("title", "")[:100],
-            "project.id": project_id,
-            "agent.type": agent_type,
-        }
-    ) as span:
-        try:
-            # Model selection
-            with tracer.start_as_current_span("model.select") as model_span:
-                choice = await chooser.choose(agent_type, task, purpose="execution")
-                model_span.set_attribute("model.selected", choice.candidates[0])
-                model_span.set_attribute("model.tier", choice.tier)
-                model_span.set_attribute("fallback.available", len(choice.candidates))
-            
-            # Gateway spawn
-            with tracer.start_as_current_span("gateway.spawn") as gateway_span:
-                spawn_result = await self._spawn_session(...)
-                gateway_span.set_attribute("gateway.run_id", spawn_result["runId"])
-            
-            span.set_attribute("worker.id", worker_id)
-            span.set_attribute("spawn.success", True)
-            span.set_status(Status(StatusCode.OK))
-            
-        except Exception as e:
-            span.set_status(Status(StatusCode.ERROR, str(e)))
-            span.record_exception(e)
-            raise
+async def execute_tool_call(agent: str, tool: str, params: dict):
+    # Pre-validation
+    if tool == "edit" and "file_path" in params:
+        # Ensure file was read recently
+        if not was_recently_read(params["file_path"]):
+            logger.warning(f"{agent} editing {params['file_path']} without reading")
+            # Maybe prompt agent to read first
+    
+    # Execute
+    result = await tools.execute(tool, params)
+    
+    # Post-validation
+    if result.status == "error":
+        logger.error(f"Tool {tool} failed for {agent}: {result.error}")
+        # Provide fallback suggestions
+        alternatives = suggest_alternatives(tool, params, result.error)
+        return ToolResult(error=result.error, alternatives=alternatives)
+    
+    return result
 ```
 
-### Example 2: Reasoning Extraction
+**Implementation:**
+1. Add comprehensive tool use section to each agent's AGENTS.md
+2. Include examples of good/bad tool use patterns
+3. Implement pre/post validation in orchestrator
+4. Log tool use patterns for analysis
+5. Create tool use metrics dashboard
 
-```python
-# app/orchestrator/reasoning_extractor.py
-
-import re
-from typing import Dict, List, Optional
-
-def extract_reasoning(assistant_text: str) -> Dict[str, any]:
-    """Extract structured reasoning from agent responses."""
-    
-    reasoning = {}
-    
-    # Extract plan
-    plan_match = re.search(
-        r'<plan>(.*?)</plan>',
-        assistant_text,
-        re.DOTALL | re.IGNORECASE
-    )
-    if plan_match:
-        steps = [
-            line.strip('- ').strip()
-            for line in plan_match.group(1).strip().split('\n')
-            if line.strip()
-        ]
-        reasoning['plan'] = steps
-    
-    # Extract tool selections
-    tool_matches = re.finditer(
-        r'<tool_select>(.*?)</tool_select>',
-        assistant_text,
-        re.DOTALL | re.IGNORECASE
-    )
-    tool_selections = []
-    for match in tool_matches:
-        lines = match.group(1).strip().split('\n')
-        selection = {}
-        for line in lines:
-            if ':' in line:
-                key, value = line.split(':', 1)
-                selection[key.strip('- ').lower()] = value.strip()
-        tool_selections.append(selection)
-    if tool_selections:
-        reasoning['tool_selections'] = tool_selections
-    
-    # Extract self-corrections
-    correction_matches = re.finditer(
-        r'<correction>(.*?)</correction>',
-        assistant_text,
-        re.DOTALL | re.IGNORECASE
-    )
-    corrections = [match.group(1).strip() for match in correction_matches]
-    if corrections:
-        reasoning['self_corrections'] = corrections
-    
-    return reasoning
-
-
-# Usage in worker.py
-def _handle_worker_completion(...):
-    # ... existing code ...
-    
-    # Extract reasoning from session transcript
-    if result_summary:
-        from app.orchestrator.reasoning_extractor import extract_reasoning
-        reasoning = extract_reasoning(result_summary)
-        if reasoning:
-            task_log["reasoning"] = reasoning
-    
-    # Store in WorkerRun
-    run = WorkerRun(
-        ...,
-        task_log=task_log,
-    )
-```
-
-### Example 3: Enhanced Status Endpoint
-
-```python
-# app/routers/orchestrator.py
-
-from datetime import datetime, timedelta, timezone
-from collections import defaultdict
-
-@router.get("/status/metrics")
-async def get_orchestrator_metrics(
-    window_hours: int = 1,
-    db: AsyncSession = Depends(get_db)
-):
-    """Get detailed performance metrics over a time window."""
-    
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    
-    # Fetch recent worker runs
-    result = await db.execute(
-        select(WorkerRun)
-        .where(WorkerRun.ended_at >= cutoff)
-        .order_by(WorkerRun.ended_at.desc())
-    )
-    runs = result.scalars().all()
-    
-    if not runs:
-        return {"message": "No data in time window", "window_hours": window_hours}
-    
-    # Calculate metrics
-    total = len(runs)
-    succeeded = sum(1 for r in runs if r.succeeded)
-    failed = total - succeeded
-    
-    durations = [
-        (r.ended_at - r.started_at).total_seconds()
-        for r in runs
-        if r.started_at and r.ended_at
-    ]
-    durations.sort()
-    
-    costs = [r.total_cost_usd for r in runs if r.total_cost_usd]
-    
-    # Group by agent type
-    by_agent = defaultdict(lambda: {"total": 0, "succeeded": 0, "failed": 0})
-    for r in runs:
-        task = await db.get(Task, r.task_id)
-        if task and task.agent:
-            by_agent[task.agent]["total"] += 1
-            if r.succeeded:
-                by_agent[task.agent]["succeeded"] += 1
-            else:
-                by_agent[task.agent]["failed"] += 1
-    
-    # Group by model
-    by_model = defaultdict(lambda: {"count": 0, "cost": 0.0})
-    for r in runs:
-        if r.model:
-            by_model[r.model]["count"] += 1
-            by_model[r.model]["cost"] += r.total_cost_usd or 0.0
-    
-    return {
-        "window_hours": window_hours,
-        "window_start": cutoff.isoformat(),
-        "window_end": datetime.now(timezone.utc).isoformat(),
-        "summary": {
-            "total_tasks": total,
-            "succeeded": succeeded,
-            "failed": failed,
-            "success_rate": round(succeeded / total * 100, 1) if total > 0 else 0,
-        },
-        "performance": {
-            "duration_p50": durations[len(durations)//2] if durations else 0,
-            "duration_p95": durations[int(len(durations)*0.95)] if durations else 0,
-            "duration_p99": durations[int(len(durations)*0.99)] if durations else 0,
-            "duration_avg": sum(durations) / len(durations) if durations else 0,
-            "duration_max": max(durations) if durations else 0,
-        },
-        "cost": {
-            "total_usd": sum(costs),
-            "avg_per_task": sum(costs) / len(costs) if costs else 0,
-            "max_per_task": max(costs) if costs else 0,
-        },
-        "by_agent": dict(by_agent),
-        "by_model": dict(by_model),
-    }
-```
+**Expected impact:** 30-40% reduction in tool use errors, better agent autonomy, fewer cascading failures.
 
 ---
 
-## Sources
+## 6. Implementation Priority
 
-- **LangSmith Observability Docs:** https://docs.smith.langchain.com/observability
-- **Phoenix Tracing Overview:** https://docs.arize.com/phoenix/tracing/llm-traces
-- **LangChain Agent Concepts:** https://docs.langchain.com/oss/python/langchain/overview
-- **CrewAI Tools Documentation:** https://docs.crewai.com/concepts/tools
-- **OpenTelemetry Specification:** https://opentelemetry.io/docs/specs/otel/
-- **lobs-server codebase analysis:** `app/orchestrator/`, `app/models.py`, `app/logging_config.py`
+**Immediate (Week 1):**
+1. ✅ Recommendation 2: Memory integration—low effort, high impact
+2. ✅ Recommendation 5: Tool use guidance—documentation update mostly
+
+**Short-term (Weeks 2-4):**
+3. ✅ Recommendation 1: Tier-aware prompts—leverage existing model routing
+4. ✅ Recommendation 3: Structured output validation—foundational improvement
+
+**Medium-term (Weeks 5-8):**
+5. ✅ Recommendation 4: Automatic reflection—activates existing learning system
 
 ---
 
-**End of Report**
+## 7. Success Metrics
+
+Track these metrics before/after implementation:
+
+1. **Task Success Rate:** % of tasks completed successfully on first try
+2. **Error Rate:** % of tasks that fail or need retry
+3. **Tool Use Accuracy:** % of tool calls that achieve intended result
+4. **Parsing Errors:** Number of agent outputs that fail to parse
+5. **Reflection Quality:** Human evaluation of reflection depth/usefulness
+6. **Learning Curve:** Time to proficiency on repeated similar tasks
+7. **Context Efficiency:** Tokens used per task (lower = better caching)
+
+**Target improvements:**
+- Task success rate: +20-30%
+- Error rate: -40-50%
+- Tool use accuracy: +30-40%
+- Parsing errors: -40-50%
+
+---
+
+## 8. Sources
+
+1. **OpenAI Prompt Engineering Guide**  
+   https://platform.openai.com/docs/guides/prompt-engineering  
+   Comprehensive guide to GPT models, structured outputs, tool use, GPT-5 best practices
+
+2. **Anthropic Prompt Engineering Tutorial**  
+   https://github.com/anthropics/prompt-eng-interactive-tutorial  
+   9-chapter interactive tutorial on prompt structure, role assignment, examples, avoiding hallucinations
+
+3. **Chain-of-Thought Prompting Paper**  
+   Wei et al., "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models" (2022)  
+   https://arxiv.org/abs/2201.11903  
+   Foundational research on CoT prompting
+
+4. **LLM-Powered Autonomous Agents**  
+   Lilian Weng's comprehensive blog post (June 2023)  
+   https://lilianweng.github.io/posts/2023-06-23-agent/  
+   Covers planning, memory, tool use, ReAct, Reflexion, MRKL, generative agents, case studies
+
+5. **Our Existing Architecture**  
+   - `/Users/lobs/lobs-server/ARCHITECTURE.md` — System overview
+   - `/Users/lobs/lobs-server/app/orchestrator/` — Orchestrator implementation
+   - Agent learning system design: `docs/agent-learning-READY.md`
+
+---
+
+## 9. Next Steps
+
+1. **Review with team:** Discuss recommendations and prioritization
+2. **Prototype tier-aware templates:** Build and test with real tasks
+3. **Implement memory integration:** Start with researcher agent (easiest to measure)
+4. **Measure baseline:** Establish current metrics before changes
+5. **Iterate:** Implement → measure → refine
+
+---
+
+## Appendix: Comparison of Agent Architectures
+
+| Architecture | Approach | Strengths | Weaknesses |
+|--------------|----------|-----------|------------|
+| **ReAct** | Reasoning + Acting interleaved | Simple, effective, transparent | Can get stuck in loops |
+| **Reflexion** | Self-reflection with memory | Learns from mistakes | Needs good heuristics |
+| **MRKL** | Modular experts + router | Scales to many tools | Router reliability critical |
+| **HuggingGPT** | LLM plans, models execute | Leverages specialized models | High latency, complex |
+| **Generative Agents** | Memory + planning + reflection | Rich emergent behavior | Computationally expensive |
+| **Our System** | Orchestrator + specialist agents | Good separation of concerns | Underutilized memory/learning |
+
+**Our advantage:** We already have the infrastructure (memory system, learning system, multi-agent architecture). We just need to connect the pieces with better prompts.
+
+---
+
+**End of Research Findings**
+
+*For questions or discussion, contact: researcher agent*
