@@ -1,19 +1,23 @@
 """Inbox processor - scans inbox threads for user responses and takes action.
 
 Scans threads with triage_status='needs_response' for messages from user ('rafe'),
-analyzes the response, and determines actions:
-- create_task: Create a single task from the inbox item
-- resolve: Mark thread as resolved (no further action needed)
+sends context to an LLM session for analysis, and executes the recommended actions:
+- create_task: Create task(s) from the inbox item
+- respond: Post a response to the thread (answer a question, acknowledge, etc.)
+- escalate: Forward to Rafe on Discord for urgent items
+- resolve: Mark thread as resolved
 - pending: Mark as pending (acknowledged but not actionable yet)
 
-Uses deterministic server-side analysis so control flow stays inside lobs-server.
+Uses LLM-based analysis via Gateway sessions_spawn, same pattern as reflection processing.
 """
 
+import json
 import logging
-import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
+
+import aiohttp
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,30 +27,75 @@ from app.models import (
     InboxMessage as InboxMessageModel,
     Task,
     Project,
+    AgentInitiative,
 )
+from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
+from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 
 logger = logging.getLogger(__name__)
 
+INBOX_ANALYSIS_PROMPT = """\
+You are Lobs, the PM agent for a multi-agent AI assistant system. You are processing inbox thread responses from Rafe (the user/owner).
 
-# Known project IDs and their keywords for matching
-PROJECT_KEYWORDS = {
-    "lobs-server": ["lobs-server", "server", "fastapi", "api", "backend"],
-    "lobs-dashboard": ["lobs-dashboard", "mission control", "dashboard", "macos app", "swiftui"],
-    "lobs-mobile": ["lobs-mobile", "mobile", "ios"],
-    "flock": ["flock", "social", "event planning"],
-    "prairielearn": ["prairielearn", "prairie"],
-}
+For each thread below, analyze Rafe's message(s) and determine what action to take.
+
+## Context
+- This is a personal AI assistant platform: lobs-server (FastAPI), Mission Control (macOS SwiftUI), lobs-mobile (iOS)
+- Rafe is a busy grad student — be concise and action-oriented
+- Inbox items may be: initiative escalations (tier-C needing approval), suggestions, reports, alerts
+- When Rafe approves something, create a task. When he gives direction, incorporate it into the task.
+- When Rafe asks a question, answer it based on available context.
+- When Rafe says to break something into subtasks, create multiple tasks.
+
+## Available Actions (per thread)
+Return a JSON array with one object per thread:
+
+```json
+[
+  {
+    "thread_id": "<thread_id>",
+    "doc_id": "<doc_id>",
+    "action": "create_task" | "respond" | "resolve" | "pending",
+    "response_message": "Message to post in the thread (required for all actions)",
+    "tasks": [
+      {
+        "title": "Task title",
+        "notes": "Detailed task description and context",
+        "agent": "programmer|researcher|writer|reviewer|architect",
+        "project_id": "lobs-server|lobs-dashboard|lobs-mobile|default"
+      }
+    ],
+    "initiative_id": "<if this is a tier-C escalation, include the initiative ID to formally approve>"
+  }
+]
+```
+
+## Rules
+- If Rafe says "yes", "do this", "approved", etc. → action=create_task, create the task(s)
+- If Rafe says "break this down" or gives multi-part instructions → create multiple tasks
+- If Rafe asks a question → action=respond, answer it
+- If Rafe says "no", "skip", "reject" → action=resolve with acknowledgment
+- If Rafe says "later", "not sure" → action=pending
+- For tier-C escalations (title contains "APPROVAL NEEDED"), include the initiative_id from the content
+- Always include a response_message summarizing what you did
+- Be decisive — don't ask clarifying questions
+
+## Threads to Process
+
+{threads_context}
+
+Return ONLY the JSON array. No explanation.
+"""
 
 
 class InboxProcessor:
-    """Processes inbox threads for user responses and takes automated actions."""
+    """Processes inbox threads using LLM analysis via Gateway spawn."""
 
     def __init__(self, db: AsyncSession):
         self.db = db
         self._project_ids: set[str] | None = None
 
     async def _get_valid_project_ids(self) -> set[str]:
-        """Cache valid project IDs from DB."""
         if self._project_ids is None:
             result = await self.db.execute(select(Project.id))
             self._project_ids = {row[0] for row in result.all()}
@@ -64,23 +113,42 @@ class InboxProcessor:
         }
 
         try:
-            eligible_threads = await self._get_eligible_threads()
-            stats["threads_scanned"] = len(eligible_threads)
+            eligible = await self._get_eligible_threads()
+            stats["threads_scanned"] = len(eligible)
 
-            if not eligible_threads:
+            if not eligible:
                 return stats
 
-            logger.info(f"[INBOX] Found {len(eligible_threads)} thread(s) to process")
+            logger.info(f"[INBOX] Found {len(eligible)} thread(s) to process")
 
-            for thread, inbox_item, messages in eligible_threads:
+            # Build context for LLM
+            threads_context = self._build_threads_context(eligible)
+
+            # Get LLM analysis
+            actions = await self._analyze_with_llm(threads_context)
+
+            if not actions:
+                logger.warning("[INBOX] LLM returned no actions")
+                return stats
+
+            # Execute actions
+            thread_map = {t.id: (t, item, msgs) for t, item, msgs in eligible}
+
+            for action in actions:
+                thread_id = action.get("thread_id")
+                if thread_id not in thread_map:
+                    logger.warning(f"[INBOX] Unknown thread_id in LLM response: {thread_id}")
+                    continue
+
+                thread, inbox_item, messages = thread_map[thread_id]
                 try:
-                    result = await self._process_thread(thread, inbox_item, messages)
+                    result = await self._execute_action(action, thread, inbox_item, messages)
                     stats["threads_processed"] += 1
                     stats["tasks_created"] += result.get("tasks_created", 0)
                     stats["threads_resolved"] += result.get("resolved", 0)
                     stats["threads_marked_pending"] += result.get("marked_pending", 0)
                 except Exception as e:
-                    logger.error(f"[INBOX] Failed to process thread {thread.id[:8]}: {e}", exc_info=True)
+                    logger.error(f"[INBOX] Failed to execute action for thread {thread_id[:8]}: {e}", exc_info=True)
                     stats["errors"] += 1
 
             await self.db.commit()
@@ -101,7 +169,7 @@ class InboxProcessor:
         return stats
 
     async def _get_eligible_threads(self) -> list[tuple]:
-        """Get threads that need processing (have new user messages)."""
+        """Get threads that need processing (have new user messages without lobs response)."""
         result = await self.db.execute(
             select(InboxThreadModel).where(
                 InboxThreadModel.triage_status == "needs_response"
@@ -111,7 +179,6 @@ class InboxProcessor:
 
         eligible = []
         for thread in threads:
-            # Load messages
             msg_result = await self.db.execute(
                 select(InboxMessageModel)
                 .where(InboxMessageModel.thread_id == thread.id)
@@ -124,18 +191,10 @@ class InboxProcessor:
             if not rafe_msgs:
                 continue
 
-            # Check for new messages since last processing
-            last_processed = getattr(thread, "last_processed_message_id", None)
-            if last_processed:
-                msg_ids = [m.id for m in messages]
-                if last_processed in msg_ids:
-                    idx = msg_ids.index(last_processed)
-                    new_msgs = messages[idx + 1:]
-                    new_rafe = [m for m in new_msgs if m.author.lower() == "rafe"]
-                    if not new_rafe:
-                        continue
+            # Check if the last message is from rafe (lobs hasn't responded yet)
+            if messages and messages[-1].author.lower() != "rafe":
+                continue
 
-            # Load inbox item
             inbox_item = await self.db.get(InboxItem, thread.doc_id)
             if not inbox_item:
                 continue
@@ -144,233 +203,268 @@ class InboxProcessor:
 
         return eligible
 
-    async def _process_thread(
+    def _build_threads_context(self, eligible: list[tuple]) -> str:
+        """Build context string for LLM prompt."""
+        parts = []
+        for thread, inbox_item, messages in eligible:
+            # Extract initiative ID if present
+            initiative_id = ""
+            if inbox_item.summary and "tier_c_escalation:" in inbox_item.summary:
+                initiative_id = inbox_item.summary.split("tier_c_escalation:")[-1].strip()
+
+            part = (
+                f"### Thread: {thread.id}\n"
+                f"**Doc ID:** {inbox_item.id}\n"
+                f"**Title:** {inbox_item.title}\n"
+            )
+            if initiative_id:
+                part += f"**Initiative ID:** {initiative_id}\n"
+
+            # Include inbox item content (truncated)
+            content = (inbox_item.content or "")[:1500]
+            part += f"**Content:**\n{content}\n\n"
+
+            part += "**Thread messages:**\n"
+            for msg in messages:
+                part += f"- [{msg.author}]: {msg.text}\n"
+
+            parts.append(part)
+
+        return "\n---\n\n".join(parts)
+
+    async def _analyze_with_llm(self, threads_context: str) -> list[dict[str, Any]]:
+        """Send threads to LLM via Gateway sessions_spawn and get action recommendations."""
+        prompt = INBOX_ANALYSIS_PROMPT.format(threads_context=threads_context)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                parent_key = f"{GATEWAY_SESSION_KEY}-inbox-{uuid.uuid4().hex[:8]}"
+                label = f"inbox-processor-{uuid.uuid4().hex[:8]}"
+
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_spawn",
+                        "sessionKey": parent_key,
+                        "args": {
+                            "task": prompt,
+                            "model": "sonnet",
+                            "runTimeoutSeconds": 120,
+                            "cleanup": "delete",
+                            "label": label,
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=180),
+                )
+
+                data = await resp.json()
+
+                if not data.get("ok"):
+                    logger.error(f"[INBOX] Gateway spawn failed: {data}")
+                    return []
+
+                # Extract result from the spawn response
+                result_text = data.get("result", {}).get("text", "")
+                if not result_text:
+                    # Try getting from session history
+                    child_key = data.get("result", {}).get("childSessionKey", "")
+                    if child_key:
+                        result_text = await self._get_session_result(session, child_key)
+
+                if not result_text:
+                    logger.warning("[INBOX] No result from LLM session")
+                    return []
+
+                return self._parse_llm_response(result_text)
+
+        except Exception as e:
+            logger.error(f"[INBOX] LLM analysis failed: {e}", exc_info=True)
+            return []
+
+    async def _get_session_result(self, session: aiohttp.ClientSession, session_key: str) -> str:
+        """Fetch result from a completed session's history."""
+        try:
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={
+                    "tool": "sessions_history",
+                    "sessionKey": GATEWAY_SESSION_KEY,
+                    "args": {
+                        "sessionKey": session_key,
+                        "limit": 2,
+                    }
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            data = await resp.json()
+            messages = data.get("result", {}).get("messages", [])
+            for msg in reversed(messages):
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        for block in content:
+                            if isinstance(block, dict) and block.get("type") == "text":
+                                return block.get("text", "")
+                    elif isinstance(content, str):
+                        return content
+        except Exception as e:
+            logger.error(f"[INBOX] Failed to fetch session result: {e}")
+        return ""
+
+    def _parse_llm_response(self, text: str) -> list[dict[str, Any]]:
+        """Parse LLM JSON response, handling markdown code blocks."""
+        text = text.strip()
+        # Strip markdown code blocks
+        if text.startswith("```"):
+            lines = text.split("\n")
+            lines = lines[1:]  # remove opening ```json
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines)
+
+        try:
+            result = json.loads(text)
+            if isinstance(result, list):
+                return result
+            logger.warning(f"[INBOX] LLM returned non-array: {type(result)}")
+            return []
+        except json.JSONDecodeError as e:
+            logger.error(f"[INBOX] Failed to parse LLM response: {e}\nText: {text[:500]}")
+            return []
+
+    async def _execute_action(
         self,
+        action: dict[str, Any],
         thread: InboxThreadModel,
         inbox_item: InboxItem,
         messages: list,
     ) -> dict[str, Any]:
-        """Process a single thread based on user's response."""
+        """Execute a single action from LLM analysis."""
         stats = {"tasks_created": 0, "resolved": 0, "marked_pending": 0}
 
-        # Get latest rafe message
-        rafe_msgs = [m for m in messages if m.author.lower() == "rafe"]
-        if not rafe_msgs:
-            return stats
-        latest = rafe_msgs[-1]
-
-        # Analyze response using deterministic server rules
-        action = await self._analyze_response(latest.text, inbox_item)
+        action_type = action.get("action", "resolve")
+        response_msg = action.get("response_message", "")
 
         logger.info(
-            f"[INBOX] Thread {thread.id[:8]} → {action['type']} "
+            f"[INBOX] Thread {thread.id[:8]} → {action_type} "
             f"(title: {inbox_item.title[:50]})"
         )
 
-        response_message = action.get("response_message")
+        if action_type == "create_task":
+            tasks = action.get("tasks", [])
+            if not tasks:
+                # Fallback: create one task from the inbox item
+                tasks = [{
+                    "title": inbox_item.title[:80],
+                    "notes": f"From inbox item. User direction: {messages[-1].text if messages else 'approved'}",
+                    "agent": "programmer",
+                    "project_id": "lobs-server",
+                }]
 
-        if action["type"] == "create_task":
-            # Use action-provided task fields if available
-            task_title = action.get("task_title") or inbox_item.title
-            task_notes = action.get("task_notes")
-            agent_type = action.get("agent_type")
-            project_id = action.get("project_id", "default")
-            
-            task = await self._create_task_from_action(
-                inbox_item=inbox_item,
-                user_message=latest.text,
-                task_title=task_title,
-                task_notes=task_notes,
-                agent_type=agent_type,
-                project_id=project_id,
-            )
-            if task:
-                stats["tasks_created"] = 1
-                if not response_message:
-                    agent_name = task.agent or "programmer"
-                    response_message = f"✅ Created task: {task.title} (assigned to {agent_name})"
+            for task_spec in tasks:
+                task = await self._create_task(task_spec, inbox_item)
+                if task:
+                    stats["tasks_created"] += 1
+
+            # Handle initiative approval if present
+            initiative_id = action.get("initiative_id")
+            if initiative_id:
+                await self._approve_initiative(initiative_id)
+
             thread.triage_status = "resolved"
             stats["resolved"] = 1
 
-        elif action["type"] == "resolve":
-            thread.triage_status = "resolved"
-            stats["resolved"] = 1
-            if not response_message:
-                response_message = "👍 Resolved — no action needed"
+        elif action_type == "respond":
+            # Just post the response, keep as needs_response or resolve
+            thread.triage_status = action.get("new_status", "resolved")
+            if thread.triage_status == "resolved":
+                stats["resolved"] = 1
 
-        elif action["type"] == "pending":
+        elif action_type == "pending":
             thread.triage_status = "pending"
             stats["marked_pending"] = 1
-            if not response_message:
-                response_message = "⏸️ Marked as pending"
 
-        # Add response message to thread
-        if response_message:
-            await self._add_thread_message(thread.id, "lobs", response_message)
+        elif action_type == "resolve":
+            thread.triage_status = "resolved"
+            stats["resolved"] = 1
 
-        # Track last processed message
-        if hasattr(thread, "last_processed_message_id"):
-            thread.last_processed_message_id = latest.id
+        # Post response message
+        if response_msg:
+            await self._add_thread_message(thread.id, "lobs", response_msg)
+
         thread.updated_at = datetime.now(timezone.utc)
-
         return stats
 
-    async def _analyze_response(
-        self, user_message: str, inbox_item: InboxItem
-    ) -> dict[str, Any]:
-        """
-        Analyze user response with deterministic rules.
-        """
-        logger.debug("[INBOX] Using deterministic response analysis")
-        return self._analyze_response_fallback(user_message, inbox_item)
-
-    def _analyze_response_fallback(self, user_message: str, inbox_item: InboxItem) -> dict[str, Any]:
-        """Determine action from user's response. More permissive pattern matching."""
-        msg = user_message.strip().lower()
-
-        # Approval patterns - more permissive, allow conversational responses
-        # Match messages starting with approval words
-        if re.match(r'^yes\b', msg):
-            # Any message starting with "yes" = approval
-            project_id = self._extract_project_id(inbox_item)
-            return {"type": "create_task", "project_id": project_id}
-        
-        if re.match(r'^do\b', msg):
-            # Any message starting with "do" (do this, do that, do it) = approval
-            project_id = self._extract_project_id(inbox_item)
-            return {"type": "create_task", "project_id": project_id}
-        
-        # Check for approval phrases anywhere in message
-        approval_phrases = [
-            r'looks?\s+good',
-            r'sounds?\s+good', 
-            r'go\s+ahead',
-            r'lgtm',
-            r'ship\s+it',
-            r'approved?',
-        ]
-        for pattern in approval_phrases:
-            if re.search(pattern, msg):
-                project_id = self._extract_project_id(inbox_item)
-                return {"type": "create_task", "project_id": project_id}
-
-        # Rejection: more natural patterns
-        rejection_patterns = [
-            r'^(no|nope|nah)\b',  # Start with no
-            r'^skip\b',
-            r'^ignore\b',
-            r'^pass\b',
-            r'^reject',
-            r'(don\'?t|do\s+not)\s+(do|create|make)',
-            r'not\s+(now|interested|needed|necessary)',
-        ]
-        for pattern in rejection_patterns:
-            if re.search(pattern, msg):
-                return {"type": "resolve"}
-
-        # Pending: deferral responses
-        pending_patterns = [
-            r'^(later|maybe|not\s+sure|let\s+me\s+think)\b',
-            r'(i\'?ll?\s+)?(think|decide)\s+(about|on|later)',
-        ]
-        for pattern in pending_patterns:
-            if re.search(pattern, msg):
-                return {"type": "pending"}
-
-        # Longer messages with action verbs → create task
-        # This catches conversational instructions like "integrate this with..."
-        words = user_message.split()
-        if len(words) >= 3:
-            action_verbs = ['create', 'make', 'add', 'build', 'implement', 'fix',
-                           'update', 'write', 'change', 'remove', 'refactor', 
-                           'integrate', 'intergrate',  # typo that appears in real data
-                           'investigate', 'try', 'test']
-            if any(v in msg for v in action_verbs):
-                project_id = self._extract_project_id(inbox_item)
-                return {"type": "create_task", "project_id": project_id}
-
-        # Default: don't act (leave as needs_response)
-        logger.debug(f"[INBOX] No clear action from: {user_message[:50]}")
-        return {"type": "no_action"}
-
-    def _extract_project_id(self, inbox_item: InboxItem) -> str:
-        """Extract project ID from inbox item content/title."""
-        text = f"{inbox_item.title} {inbox_item.content or ''}".lower()
-
-        # Check for explicit project references
-        match = re.search(r'\*\*project:\*\*\s*(\S+)', text)
-        if match:
-            return match.group(1)
-
-        # Check keyword matches
-        for pid, keywords in PROJECT_KEYWORDS.items():
-            if any(kw in text for kw in keywords):
-                return pid
-
-        return "default"
-
-    async def _create_task_from_action(
-        self,
-        inbox_item: InboxItem,
-        user_message: str,
-        task_title: str | None = None,
-        task_notes: str | None = None,
-        agent_type: str | None = None,
-        project_id: str = "default",
-    ) -> Task | None:
-        """Create ONE task from an inbox item with LLM-provided details."""
-        # Validate project exists
+    async def _create_task(self, task_spec: dict[str, Any], inbox_item: InboxItem) -> Task | None:
+        """Create a task from LLM-provided spec."""
         valid = await self._get_valid_project_ids()
+        project_id = task_spec.get("project_id", "lobs-server")
         if project_id not in valid:
-            project_id = "default"
+            project_id = "lobs-server"
 
-        task_id = str(uuid.uuid4())
+        agent = (task_spec.get("agent") or "programmer").strip().lower()
+        title = task_spec.get("title", inbox_item.title[:80])
+        notes = task_spec.get("notes", "")
 
-        # Use LLM-provided title or fallback
-        title = task_title or inbox_item.title[:80]
-
-        # Use LLM-provided notes or build default
-        if task_notes:
-            notes = task_notes
-        else:
-            notes = f"## From Inbox\n**{inbox_item.title}**\n\n"
-            if inbox_item.content:
-                # Truncate long content
-                content = inbox_item.content
-                if len(content) > 2000:
-                    content = content[:2000] + "\n\n[truncated]"
-                notes += content
-            notes += f"\n\n---\n**User direction:** {user_message}"
-
-        # Strict assignment policy: only accept explicit assignment from action.
-        normalized_agent: str | None = (agent_type or "").strip().lower() or None
+        # Add source context
+        notes = (
+            f"{notes}\n\n"
+            f"---\n"
+            f"*Created from inbox item: {inbox_item.title}*"
+        )
 
         task = Task(
-            id=task_id,
+            id=str(uuid.uuid4()),
             title=title,
             status="active",
             work_state="not_started",
             owner="lobs",
             project_id=project_id,
-            agent=normalized_agent,
+            agent=agent,
             notes=notes,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
-
         self.db.add(task)
+
         logger.info(
-            f"[INBOX] Created task {task_id[:8]}: {task.title[:50]} "
-            f"(project={project_id}, agent={normalized_agent or 'unassigned'})"
+            f"[INBOX] Created task {task.id[:8]}: {title[:50]} "
+            f"(project={project_id}, agent={agent})"
         )
         return task
 
-    async def _add_thread_message(
-        self,
-        thread_id: str,
-        author: str,
-        text: str
-    ) -> None:
+    async def _approve_initiative(self, initiative_id: str) -> None:
+        """Formally approve a tier-C initiative as Rafe."""
+        try:
+            initiative = await self.db.get(AgentInitiative, initiative_id)
+            if not initiative:
+                # Try prefix match
+                result = await self.db.execute(
+                    select(AgentInitiative).where(
+                        AgentInitiative.id.startswith(initiative_id)
+                    )
+                )
+                initiative = result.scalar_one_or_none()
+
+            if not initiative:
+                logger.warning(f"[INBOX] Initiative not found for approval: {initiative_id}")
+                return
+
+            if initiative.status == "awaiting_rafe":
+                engine = InitiativeDecisionEngine(self.db)
+                await engine.decide(
+                    initiative,
+                    decision="approve",
+                    decided_by="rafe",
+                    decision_summary="Approved by Rafe via inbox thread",
+                )
+                logger.info(f"[INBOX] Formally approved initiative {initiative_id[:8]} as Rafe")
+        except Exception as e:
+            logger.error(f"[INBOX] Failed to approve initiative {initiative_id[:8]}: {e}")
+
+    async def _add_thread_message(self, thread_id: str, author: str, text: str) -> None:
         """Add a message to an inbox thread."""
         message = InboxMessageModel(
             id=str(uuid.uuid4()),
