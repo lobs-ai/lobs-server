@@ -1,1 +1,1 @@
-Analyzed model routing cost effectiveness. Found 58-77% savings potential by promoting Claude Haiku and removing Claude Opus. Comprehensive findings in research-findings.md.
+Diagnosed d50b583b failure: deleted transcript/no assistant response plus DB-lock persistence fragility. Recommended modify+retry with constrained run and worker hardening fixes.
