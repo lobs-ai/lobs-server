@@ -95,6 +95,47 @@ async def client(test_token):
     app.dependency_overrides.clear()
 
 
+@pytest.fixture
+def sync_test_token(setup_test_db):
+    """Create a test API token synchronously for sync WebSocket tests."""
+    import secrets
+    import asyncio
+    from app.models import APIToken
+    
+    token = secrets.token_urlsafe(32)
+    
+    async def create_token():
+        async with TestSessionLocal() as session:
+            api_token = APIToken(token=token, name="test-token")
+            session.add(api_token)
+            await session.commit()
+    
+    # Run async code synchronously
+    asyncio.get_event_loop().run_until_complete(create_token())
+    
+    return token
+
+
+@pytest.fixture
+def sync_client_with_token(sync_test_token):
+    """Provide a synchronous TestClient for WebSocket testing."""
+    from starlette.testclient import TestClient
+    
+    # Override the database dependency
+    app.dependency_overrides[get_db] = get_test_db
+    
+    # Disable orchestrator for tests
+    settings.ORCHESTRATOR_ENABLED = False
+    
+    client = TestClient(app)
+    client.test_token = sync_test_token
+    
+    yield client
+    
+    # Clean up
+    app.dependency_overrides.clear()
+
+
 # Sample data fixtures
 @pytest_asyncio.fixture
 async def sample_project(client: AsyncClient):
