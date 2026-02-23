@@ -1,1 +1,1 @@
-Added bandit and safety security scanning to CI pipeline. Integrated into .github/workflows/validation.yml with high-severity failure threshold. Created .bandit config excluding tests and cache dirs. Both tools tested locally - bandit found 0 high-severity issues, safety check passes.
+Migration guide template already exists at docs/MIGRATION_TEMPLATE.md with complete structure and 5-tier model routing example
