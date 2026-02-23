@@ -179,6 +179,116 @@ class Example(Base):
 
 ---
 
+## Architecture Decision Records (ADRs)
+
+**When making significant architectural decisions, document them as ADRs.**
+
+ADRs live in the shared memory repository at `~/lobs-shared-memory/docs/decisions/` so they're accessible to all agents and indexed by OpenClaw's memory search.
+
+### When to Write an ADR
+
+Create an ADR when you make a decision that:
+- **Affects system architecture or infrastructure** (database choice, deployment model, API design)
+- **Has significant tradeoffs** with multiple viable options
+- **Would be hard to reverse** once implemented
+- **Needs context for future developers/agents** to understand why we chose this path
+- **Resolves a long-standing debate** or makes an important technical commitment
+
+**Examples of ADR-worthy decisions:**
+- ✅ "Use SQLite vs Postgres" → [ADR-0002](~/lobs-shared-memory/docs/decisions/0002-sqlite-for-primary-database.md)
+- ✅ "Embed orchestrator in FastAPI vs external worker pool" → [ADR-0001](~/lobs-shared-memory/docs/decisions/0001-embedded-orchestrator.md)
+- ✅ "Five-tier model routing with fallback chains" → [ADR-0004](~/lobs-shared-memory/docs/decisions/0004-five-tier-model-routing.md)
+- ❌ "Use pytest instead of unittest" → Too minor, document in comments or docs
+- ❌ "Fix bug in task status update" → Document in commit message, not ADR
+
+### How to Create an ADR
+
+1. **Copy the template:**
+   ```bash
+   cd ~/lobs-shared-memory/docs/decisions/
+   cp 0000-template.md NNNN-short-kebab-title.md
+   # Use next number in sequence (check README index)
+   ```
+
+2. **Fill in all sections:**
+   - **Context** — What problem are you solving? What's the background?
+   - **Decision** — What did you decide to do? Be specific.
+   - **Consequences** — List positive, negative, and neutral outcomes
+   - **Alternatives Considered** — What else did you evaluate? Why did you reject it?
+   - **References** — Link to related code, docs, discussions
+
+3. **Update the index:**
+   ```bash
+   # Edit ~/lobs-shared-memory/docs/decisions/README.md
+   # Add your ADR to the index table
+   ```
+
+4. **Commit:**
+   ```bash
+   git add .
+   git commit -m "docs: ADR-NNNN <short title>"
+   git push
+   ```
+
+### ADR Format (Quick Reference)
+
+See [~/lobs-shared-memory/docs/decisions/0000-template.md](~/lobs-shared-memory/docs/decisions/0000-template.md) for the full template.
+
+```markdown
+# N. Title
+
+**Date:** YYYY-MM-DD
+**Status:** Accepted
+**Deciders:** [Who was involved]
+
+## Context
+What problem are we solving? What's the background?
+
+## Decision
+What are we doing? Be specific and concrete.
+
+## Consequences
+
+### Positive
+- What gets better?
+
+### Negative
+- What tradeoffs are we accepting?
+
+### Neutral
+- What side effects should we be aware of?
+
+## Alternatives Considered
+
+### Option 1: [Name]
+- Pros: ...
+- Cons: ...
+- Why rejected: ...
+
+## References
+- Links to code, docs, related ADRs
+```
+
+### Existing ADRs
+
+Browse existing decisions at `~/lobs-shared-memory/docs/decisions/` or see the [index](~/lobs-shared-memory/docs/decisions/README.md).
+
+**Recent examples:**
+- [ADR-0001: Embedded Task Orchestrator](~/lobs-shared-memory/docs/decisions/0001-embedded-orchestrator.md) — Shows detailed alternatives analysis
+- [ADR-0011: Agent Learning System](~/lobs-shared-memory/docs/decisions/0011-agent-learning-system.md) — Example of complex multi-component decision
+- [ADR-0014: Risk-Based Initiative Approval](~/lobs-shared-memory/docs/decisions/0014-risk-based-initiative-approval.md) — Shows process design decision
+
+### ADRs Are Immutable
+
+Once accepted, **ADRs should not be edited** (except for typos). If a decision changes:
+1. Create a new ADR that supersedes the old one
+2. Update the old ADR's status to "Superseded by ADR-NNNN"
+3. Link between them
+
+This preserves the **decision history** and prevents losing context about why we made changes.
+
+---
+
 ## Testing
 
 See **[docs/TESTING.md](docs/TESTING.md)** for complete testing guide.

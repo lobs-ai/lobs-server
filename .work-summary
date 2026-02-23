@@ -1,1 +1,1 @@
-Migration guide template already exists at docs/MIGRATION_TEMPLATE.md with complete structure and 5-tier model routing example
+Added ADR documentation to CONTRIBUTING.md with process, guidelines, and examples. Template and existing ADRs already present in ~/lobs-shared-memory/docs/decisions/.

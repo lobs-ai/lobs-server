@@ -1,621 +1,663 @@
-# Migration Guide Template
+# Migration Guide: [Feature/Refactor Name]
 
-**Version:** [Source Version] → [Target Version]  
-**Date:** [YYYY-MM-DD]  
-**Estimated Downtime:** [None / X minutes]  
-**Risk Level:** [Low / Medium / High]
+**Date:** YYYY-MM-DD  
+**Version:** X.Y.Z → X.Y.Z  
+**Severity:** 🔴 Breaking | 🟡 Non-Breaking | 🟢 Internal Only  
+**Downtime Required:** Yes/No  
+**Rollback Difficulty:** Easy | Moderate | Hard
 
 ---
 
 ## Overview
 
-[Brief description of what changed and why. 2-3 sentences max.]
+**What Changed:**  
+Brief 1-2 sentence summary of the change.
 
-**Key Impact Areas:**
-- [Area 1 — brief description]
-- [Area 2 — brief description]
-- [Area 3 — brief description]
+**Why:**  
+Reason for the change (performance, maintainability, feature support, etc.).
+
+**Impact:**  
+Who/what is affected (API consumers, database, agents, UI, etc.).
 
 ---
 
 ## Breaking Changes
 
-### 1. [Change Name]
+### API Changes
 
-**What Changed:**  
-[Clear description of the change]
+**Endpoints Modified:**
+- `METHOD /path` — Change description
+  - Request: What changed in request schema
+  - Response: What changed in response schema
+  
+**New Endpoints:**
+- `METHOD /path` — Purpose
 
-**Why It Breaks:**  
-[Explain what will fail and why]
+**Deprecated Endpoints:**
+- `METHOD /path` — Use `METHOD /new-path` instead
 
-**Migration Path:**  
-[Step-by-step instructions to adapt]
+**Removed Endpoints:**
+- `METHOD /path` — Replaced by X
 
-```bash
-# Example: Old way
-old_command --flag value
+### Database Schema
 
-# New way
-new_command --new-flag value
-```
+**Tables Modified:**
+- `table_name`
+  - Added: `column_name TYPE` — Description
+  - Changed: `column_name` — Old TYPE → New TYPE
+  - Removed: `column_name`
 
-**API Changes:**
-```diff
-- OLD_ENDPOINT or OLD_FIELD
-+ NEW_ENDPOINT or NEW_FIELD
-```
+**Migration Required:** Yes/No  
+**Migration Script:** `migrations/YYYYMMDD_description.sql` or handled by Alembic
 
----
+### Configuration
 
-### 2. [Another Breaking Change]
+**Environment Variables:**
+- Added: `VAR_NAME` — Description (default: value)
+- Changed: `VAR_NAME` — Old meaning → New meaning
+- Removed: `VAR_NAME` — Use `NEW_VAR_NAME` instead
 
-[Repeat structure above for each breaking change]
+**Config Files:**
+- `file.json` — Changes required
+
+### Agent Behavior
+
+**Affected Agents:** agent-name, agent-name
+
+**Changes:**
+- Description of how agent behavior changes
+- New capabilities or restrictions
+- Prompt or registry changes
 
 ---
 
 ## Upgrade Steps
 
-### Pre-Upgrade Checklist
+### Pre-Upgrade
 
-- [ ] **Backup database** — `cp data/lobs.db data/lobs.db.backup-$(date +%Y%m%d)`
-- [ ] **Review breaking changes** — Read section above
-- [ ] **Check dependencies** — Ensure pip packages are up to date
-- [ ] **Notify stakeholders** — Inform users of planned maintenance
-- [ ] **Tag current version** — `git tag v[current]` (if applicable)
-
-### Upgrade Procedure
-
-**Step 1: Stop the server**
+**1. Backup**
 ```bash
-# Find and stop the running server
-pkill -f "uvicorn app.main:app"
-# Or if using systemd:
-# sudo systemctl stop lobs-server
+# Database
+cp data/lobs.db data/lobs.db.backup-YYYYMMDD
+
+# Configuration
+cp .env .env.backup-YYYYMMDD
 ```
 
-**Step 2: Pull latest code**
+**2. Check Prerequisites**
+- [ ] Python version ≥ X.Y
+- [ ] Disk space available (X GB for migration)
+- [ ] No running tasks (check `/api/orchestrator/status`)
+- [ ] Gateway version ≥ X.Y (if applicable)
+
+**3. Notify Stakeholders**
+- Stop orchestrator: `POST /api/orchestrator/stop`
+- Announce maintenance window (if downtime required)
+
+### Upgrade
+
+**1. Pull Latest Code**
 ```bash
 git fetch origin
-git checkout [target-branch-or-tag]
+git checkout vX.Y.Z  # or main/master
 ```
 
-**Step 3: Update dependencies**
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt --upgrade
-```
-
-**Step 4: Run database migrations** (if any)
-```bash
-# Check for migration scripts
-ls migrations/
-
-# Apply migrations
-python migrations/[migration-script].py
-```
-
-**Step 5: Update configuration**
-```bash
-# Review and update environment variables
-cat .env.example  # Check for new required variables
-nano .env         # Add/update as needed
-```
-
-**Step 6: Verify configuration**
-```bash
-# Test configuration loading
-python -c "from app.config import settings; print('Config OK')"
-```
-
-**Step 7: Start server**
-```bash
-./bin/run
-# Or if using systemd:
-# sudo systemctl start lobs-server
-```
-
-**Step 8: Verify health**
-```bash
-curl http://localhost:8000/api/health
-# Expected: {"status": "ok", ...}
-```
-
-**Step 9: Smoke test critical paths**
-```bash
-# Test authentication
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/api/projects
-
-# Test orchestrator
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/api/orchestrator/status
-
-# Test chat
-curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:8000/api/chat/sessions
-```
-
----
-
-## Rollback Procedure
-
-**If the upgrade fails or causes issues, follow these steps to roll back:**
-
-### Step 1: Stop the new version
-```bash
-pkill -f "uvicorn app.main:app"
-```
-
-### Step 2: Restore previous code
-```bash
-git checkout [previous-version-tag]
-# Or restore from backup:
-# git reset --hard HEAD@{1}
-```
-
-### Step 3: Restore database (if schema changed)
-```bash
-# Only if database schema was modified
-mv data/lobs.db data/lobs.db.failed-upgrade
-cp data/lobs.db.backup-[date] data/lobs.db
-```
-
-### Step 4: Restore dependencies
+**2. Update Dependencies**
 ```bash
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 5: Restart server
+**3. Run Database Migration** (if required)
 ```bash
-./bin/run
+# Manual migration script
+python migrations/YYYYMMDD_migration.py
+
+# Or Alembic (if using)
+alembic upgrade head
 ```
 
-### Step 6: Verify rollback success
+**4. Update Configuration** (if required)
 ```bash
+# Add new environment variables to .env
+echo "NEW_VAR=value" >> .env
+
+# Update config files
+# (provide specific instructions or script)
+```
+
+**5. Restart Server**
+```bash
+./bin/run
+# or
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+**6. Verify**
+```bash
+# Health check
 curl http://localhost:8000/api/health
+
+# Feature-specific verification
+curl -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/endpoint
 ```
 
-### Step 7: Document the failure
+**7. Resume Operations**
+- Start orchestrator: `POST /api/orchestrator/start`
+- Monitor logs for errors
+- Check `/api/status` for system health
+
+### Post-Upgrade
+
+**1. Smoke Tests**
+- [ ] Create a task
+- [ ] Run worker on test task
+- [ ] Check affected feature works correctly
+- [ ] Review logs for warnings/errors
+
+**2. Monitor**
+- Watch logs for 15-30 minutes
+- Check error rates in `/api/status`
+- Verify agent execution works
+
+**3. Clean Up** (optional, after verification)
 ```bash
-# Create issue or log entry
-echo "Rollback reason: [describe issue]" >> logs/rollback-$(date +%Y%m%d).log
-```
-
----
-
-## Testing Checklist
-
-### Pre-Deployment Testing (Staging/Dev)
-
-**Core Functionality:**
-- [ ] Server starts without errors
-- [ ] Health endpoint responds
-- [ ] Authentication works (valid/invalid tokens)
-- [ ] Database queries execute successfully
-
-**API Endpoints:**
-- [ ] `GET /api/projects` — List projects
-- [ ] `POST /api/projects` — Create project
-- [ ] `GET /api/tasks` — List tasks
-- [ ] `POST /api/tasks` — Create task
-- [ ] `GET /api/memories/search` — Search memories
-- [ ] `GET /api/chat/sessions` — List chat sessions
-- [ ] `GET /api/calendar/events` — List events
-
-**Orchestrator:**
-- [ ] Scanner finds eligible tasks
-- [ ] Router delegates to project-manager
-- [ ] Worker spawns successfully
-- [ ] Task state updates correctly
-- [ ] Failure handling works (escalation, retry)
-
-**Integration:**
-- [ ] OpenClaw Gateway communication
-- [ ] WebSocket connections (chat)
-- [ ] Database writes/reads
-- [ ] Token validation
-
-### Post-Deployment Testing (Production)
-
-**Immediate (within 5 minutes):**
-- [ ] Server is responding to requests
-- [ ] No error spikes in logs
-- [ ] Active sessions still work
-- [ ] Background jobs are running
-
-**Short-term (within 1 hour):**
-- [ ] Task orchestration cycle completes
-- [ ] Agent workers spawn successfully
-- [ ] Chat messages delivered
-- [ ] Memory search returns results
-
-**Long-term (within 24 hours):**
-- [ ] No performance degradation
-- [ ] No recurring errors
-- [ ] All scheduled tasks execute
-- [ ] User-reported issues (if any)
-
----
-
-## Post-Migration Tasks
-
-**Immediate:**
-- [ ] Monitor logs for errors (`tail -f logs/server.log`)
-- [ ] Check orchestrator activity (`curl /api/orchestrator/status`)
-- [ ] Verify agent workers (`curl /api/worker/activity`)
-
-**Within 24 hours:**
-- [ ] Review system health dashboard
-- [ ] Clean up old backup files (after confirming stability)
-- [ ] Update documentation (if needed)
-- [ ] Tag new version (`git tag v[new-version]`)
-
-**Within 1 week:**
-- [ ] Remove deprecated code (if any grace period is over)
-- [ ] Archive migration docs (move to `docs/migrations/archive/`)
-- [ ] Update CHANGELOG.md with final notes
-
----
-
-## Known Issues & Workarounds
-
-**Issue:** [Description of known issue]  
-**Impact:** [Who/what is affected]  
-**Workaround:** [Temporary fix]  
-**Tracking:** [Link to issue or ticket]
-
----
-
-## Support & Resources
-
-**Documentation:**
-- [ARCHITECTURE.md](ARCHITECTURE.md) — System overview
-- [AGENTS.md](AGENTS.md) — API reference
-- [CHANGELOG.md](CHANGELOG.md) — Version history
-
-**Getting Help:**
-- Check logs: `tail -f logs/server.log`
-- System status: `curl /api/health`
-- Open issue: [link to issue tracker]
-
-**Emergency Contacts:**
-- [Role/Person]: [Contact method]
-
----
-
-# Example Migration: 5-Tier Model Routing
-
-**Version:** 3-Tier → 5-Tier Model Hierarchy  
-**Date:** 2026-02-21  
-**Estimated Downtime:** None  
-**Risk Level:** Medium
-
----
-
-## Overview
-
-Upgraded model routing system from 3 tiers (cheap/standard/strong) to 5 tiers (micro/small/medium/standard/strong) for better cost control and local model support. Ollama models are now auto-discovered and injected based on parameter count.
-
-**Key Impact Areas:**
-- **Model configuration** — Tier names changed, new tiers added
-- **Agent prompts** — References to model tiers need updating
-- **Task routing** — Auto-selection logic updated
-- **Local models** — Dedicated "local" tier removed, now auto-injected
-
----
-
-## Breaking Changes
-
-### 1. Model Tier Names Changed
-
-**What Changed:**  
-- Old tiers: `cheap`, `standard`, `strong`
-- New tiers: `micro`, `small`, `medium`, `standard`, `strong`
-
-**Why It Breaks:**  
-Any code or configuration that hardcodes tier names will fail. API requests with `model_tier="cheap"` will not map correctly.
-
-**Migration Path:**  
-Update all references to old tier names:
-
-```diff
-# Agent configuration (e.g., config/agents/researcher.yaml)
-- model_tier: cheap
-+ model_tier: small
-
-# Task creation (e.g., API calls)
-- {"model_tier": "cheap"}
-+ {"model_tier": "small"}
-
-# Environment variables
-- DEFAULT_MODEL_TIER=cheap
-+ DEFAULT_MODEL_TIER=small
-```
-
-**API Changes:**
-```diff
-# Task model field
-- "model_tier": "cheap"     → "model_tier": "small" or "micro"
-- "model_tier": "standard"  → unchanged
-- "model_tier": "strong"    → unchanged
-```
-
----
-
-### 2. Local Tier Removed
-
-**What Changed:**  
-Dedicated `local` tier removed. Local models (Ollama) now auto-inject into `micro`, `small`, or `medium` based on parameter count.
-
-**Why It Breaks:**  
-Tasks explicitly requesting `model_tier="local"` will fail or fall back incorrectly.
-
-**Migration Path:**  
-1. Remove all `model_tier="local"` assignments
-2. Let system auto-select tier based on task complexity
-3. For explicit local model use, specify `model_tier="micro"` or `"small"`
-
-```diff
-# Old way (explicit local)
-- task.model_tier = "local"
-
-# New way (auto-selection or explicit micro/small)
-+ task.model_tier = None  # Auto-select
-# OR
-+ task.model_tier = "micro"  # Force cheapest tier (includes Ollama)
-```
-
----
-
-### 3. Model Hierarchy Reordered
-
-**What Changed:**  
-- Primary model: Codex 5.3 (was Sonnet 4.5)
-- Fallback: Sonnet 4.5 (was Codex)
-- Cheap tier: Gemini Flash / Haiku (was Gemini only)
-
-**Why It Breaks:**  
-Tasks may use different models than before, affecting output quality or cost.
-
-**Migration Path:**  
-No code changes required, but monitor task results for quality changes. If specific model is required:
-
-```python
-# Force specific model (not recommended, breaks fallback chain)
-task.model_override = "anthropic/claude-sonnet-4-5"
-```
-
----
-
-### 4. Ollama Auto-Discovery
-
-**What Changed:**  
-System now auto-detects Ollama models and assigns them to tiers:
-- <5B params → `micro`
-- 5-15B params → `small`
-- >15B params → `medium`
-
-**Why It Breaks:**  
-If Ollama models were previously hardcoded or manually configured, they may now appear in different tiers.
-
-**Migration Path:**  
-1. Run Ollama model scan: `curl /api/orchestrator/models/scan`
-2. Verify tier assignments: `curl /api/orchestrator/models`
-3. Remove manual Ollama configurations (now auto-managed)
-
----
-
-## Upgrade Steps
-
-### Pre-Upgrade Checklist
-
-- [x] **Backup database** — `cp data/lobs.db data/lobs.db.backup-20260221`
-- [x] **Review breaking changes** — See above
-- [x] **Check agent configs** — Search for `model_tier: cheap` or `local`
-- [x] **Notify agents** — Inform about model tier changes
-- [x] **Tag current version** — `git tag v0.3.0-pre-5tier`
-
-### Upgrade Procedure
-
-**Step 1: Stop the server**
-```bash
-pkill -f "uvicorn app.main:app"
-```
-
-**Step 2: Pull latest code**
-```bash
-git fetch origin
-git checkout feature/5-tier-model-routing
-```
-
-**Step 3: Update dependencies**
-```bash
-source .venv/bin/activate
-pip install -r requirements.txt --upgrade
-```
-
-**Step 4: Update agent configurations**
-```bash
-# Find all agent configs with old tier names
-grep -r "model_tier: cheap" config/agents/
-grep -r "model_tier: local" config/agents/
-
-# Update each file
-sed -i '' 's/model_tier: cheap/model_tier: small/g' config/agents/*.yaml
-sed -i '' 's/model_tier: local/model_tier: small/g' config/agents/*.yaml
-```
-
-**Step 5: Update environment variables**
-```bash
-# Add new tier configs to .env
-cat >> .env << EOF
-MICRO_TIER_MODEL=gemini/gemini-2.0-flash-lite
-SMALL_TIER_MODEL=anthropic/claude-haiku-4
-MEDIUM_TIER_MODEL=anthropic/claude-sonnet-4-5
-STANDARD_TIER_MODEL=openai/gpt-5.3-codex
-STRONG_TIER_MODEL=anthropic/claude-opus-4
-EOF
-```
-
-**Step 6: Start server**
-```bash
-./bin/run
-```
-
-**Step 7: Trigger Ollama auto-discovery**
-```bash
-curl -X POST \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  http://localhost:8000/api/orchestrator/models/scan
-```
-
-**Step 8: Verify model tiers**
-```bash
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-  http://localhost:8000/api/orchestrator/models | jq
-```
-
-Expected output:
-```json
-{
-  "tiers": {
-    "micro": ["gemini-2.0-flash-lite", "ollama/qwen2.5-coder:3b"],
-    "small": ["claude-haiku-4", "ollama/mistral:7b"],
-    "medium": ["claude-sonnet-4-5", "ollama/llama3:70b"],
-    "standard": ["gpt-5.3-codex"],
-    "strong": ["claude-opus-4"]
-  }
-}
-```
-
-**Step 9: Test task execution**
-```bash
-# Create test task with new tier
-curl -X POST \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title":"Test 5-tier routing","model_tier":"small"}' \
-  http://localhost:8000/api/tasks
-
-# Check orchestrator picks it up
-curl -H "Authorization: Bearer YOUR_TOKEN" \
-  http://localhost:8000/api/orchestrator/status
+# Remove old backups after N days
+# Remove deprecated code/configs
 ```
 
 ---
 
 ## Rollback Procedure
 
-**Step 1: Stop server**
+**Difficulty:** Easy | Moderate | Hard  
+**Data Loss Risk:** None | Minimal | Significant
+
+### When to Rollback
+
+Roll back if:
+- Critical errors in logs
+- Feature completely broken
+- Database corruption detected
+- Performance degradation > X%
+
+### Rollback Steps
+
+**1. Stop Server**
 ```bash
-pkill -f "uvicorn app.main:app"
+# Stop orchestrator first
+curl -X POST http://localhost:8000/api/orchestrator/stop
+
+# Kill server process
+pkill -f uvicorn
 ```
 
-**Step 2: Restore previous code**
+**2. Restore Code**
 ```bash
-git checkout v0.3.0-pre-5tier
+git checkout vX.Y.Z-previous
 ```
 
-**Step 3: Restore agent configs**
+**3. Restore Database** (if schema changed)
 ```bash
-# Revert tier name changes
-sed -i '' 's/model_tier: small/model_tier: cheap/g' config/agents/*.yaml
+# Stop server first!
+cp data/lobs.db data/lobs.db.failed-YYYYMMDD
+cp data/lobs.db.backup-YYYYMMDD data/lobs.db
+
+# If migration was applied, run down-migration
+python migrations/YYYYMMDD_rollback.py
+# or
+alembic downgrade -1
 ```
 
-**Step 4: Restart server**
+**4. Restore Configuration**
+```bash
+cp .env.backup-YYYYMMDD .env
+# Restore any other config files
+```
+
+**5. Restart Server**
 ```bash
 ./bin/run
 ```
 
-**Step 5: Verify rollback**
+**6. Verify Rollback**
 ```bash
 curl http://localhost:8000/api/health
+# Test critical functionality
+```
+
+**7. Investigate**
+- Review logs from failed upgrade: `logs/app.log`
+- Check error messages
+- Open issue with details
+
+---
+
+## Testing Checklist
+
+### Before Deployment
+
+**Unit Tests:**
+- [ ] All tests pass: `pytest`
+- [ ] New tests added for changed behavior
+- [ ] Coverage maintained or improved
+
+**Integration Tests:**
+- [ ] API endpoint tests updated
+- [ ] Database migration tested on copy of prod data
+- [ ] Agent execution tested
+
+**Manual Testing:**
+- [ ] Feature works in dev environment
+- [ ] Error handling works
+- [ ] Performance acceptable
+
+### After Deployment
+
+**Smoke Tests:**
+- [ ] Server starts without errors
+- [ ] Health endpoint responds
+- [ ] Auth works
+- [ ] Database queries work
+
+**Feature Tests:**
+- [ ] Affected endpoints return correct data
+- [ ] UI displays correctly (if applicable)
+- [ ] Agent behavior correct
+- [ ] No regressions in related features
+
+**Load Tests** (if significant change):
+- [ ] Response times acceptable
+- [ ] No memory leaks
+- [ ] Database performance stable
+
+---
+
+## Troubleshooting
+
+### Issue: [Common Problem]
+
+**Symptoms:**
+- Error message or behavior
+
+**Cause:**
+- Why this happens
+
+**Fix:**
+```bash
+# Steps to resolve
+```
+
+### Issue: Migration Fails
+
+**Symptoms:**
+- Migration script errors out
+- Database in inconsistent state
+
+**Fix:**
+```bash
+# 1. Check migration logs
+cat migrations/YYYYMMDD_migration.log
+
+# 2. Verify prerequisites
+# 3. Try manual steps if auto-migration failed
+# 4. If stuck, rollback and investigate
+```
+
+### Issue: Server Won't Start
+
+**Symptoms:**
+- Server exits immediately
+- Port binding errors
+- Import errors
+
+**Fix:**
+```bash
+# Check dependencies
+pip list | grep [package]
+
+# Check configuration
+cat .env
+
+# Check logs
+tail -f logs/app.log
+```
+
+---
+
+## Support
+
+**Questions:** Open issue in GitHub  
+**Bugs:** Report via `/api/inbox` or GitHub issues  
+**Documentation:** See [CHANGELOG.md](../CHANGELOG.md) for all changes
+
+---
+
+# Example Migration: 5-Tier Model Hierarchy
+
+**Date:** 2026-02-21  
+**Version:** 0.x → 0.x  
+**Severity:** 🟡 Non-Breaking (backward compatible)  
+**Downtime Required:** No  
+**Rollback Difficulty:** Easy
+
+---
+
+## Overview
+
+**What Changed:**  
+Expanded model routing from 3 tiers (cheap/standard/strong) to 5 tiers (micro/small/medium/standard/strong) with Ollama auto-discovery.
+
+**Why:**  
+Better cost control, support for local models, and more granular performance/cost trade-offs.
+
+**Impact:**  
+- Database: Added `model_tier` field to Task model
+- API: New optional `model_tier` parameter on task creation
+- Orchestrator: Uses 5-tier routing logic
+- Agents: Can request specific tiers via task creation
+
+---
+
+## Breaking Changes
+
+### API Changes
+
+**Endpoints Modified:**
+- `POST /api/tasks` — Now accepts optional `model_tier` field
+  - Request: Added `model_tier?: "micro" | "small" | "medium" | "standard" | "strong"`
+  - Response: Task object now includes `model_tier` field (may be null)
+  
+**Backward Compatibility:**  
+✅ Yes — existing clients work unchanged. Old 3-tier values map to new tiers automatically.
+
+### Database Schema
+
+**Tables Modified:**
+- `tasks`
+  - Added: `model_tier VARCHAR(20)` — Explicit tier override (nullable)
+
+**Migration Required:** Yes (automatic via Alembic or manual script)
+
+**Migration Script:**
+```sql
+-- migrations/20260221_add_model_tier.sql
+ALTER TABLE tasks ADD COLUMN model_tier VARCHAR(20);
+-- No data migration needed; null values are valid
+```
+
+### Configuration
+
+**Environment Variables:**
+- No changes required
+
+**Agent Registry:**
+- Updated `config/agent-capabilities.json` to reference 5-tier system
+- Old 3-tier references mapped automatically
+
+### Agent Behavior
+
+**Affected Agents:** All (orchestrator, project-manager, workers)
+
+**Changes:**
+- Orchestrator routes tasks using 5-tier logic instead of 3-tier
+- Ollama models auto-discovered and injected into micro/small/medium tiers
+- Local models no longer in separate "local" tier
+- Project-manager can specify tier when creating tasks
+
+**Backward Compatibility:**  
+✅ Agents using old tier names ("cheap", "standard", "strong") continue to work via mapping.
+
+---
+
+## Upgrade Steps
+
+### Pre-Upgrade
+
+**1. Backup**
+```bash
+cp data/lobs.db data/lobs.db.backup-20260221
+```
+
+**2. Check Prerequisites**
+- [ ] Python version ≥ 3.11
+- [ ] No critical tasks in-flight (or wait for completion)
+- [ ] Orchestrator can be safely stopped
+
+**3. Notify Stakeholders**
+```bash
+# Optional: stop orchestrator to prevent task pickup during upgrade
+curl -X POST http://localhost:8000/api/orchestrator/stop \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Upgrade
+
+**1. Pull Latest Code**
+```bash
+cd ~/lobs-server
+git fetch origin
+git pull origin main
+```
+
+**2. Update Dependencies**
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+**3. Run Database Migration**
+```bash
+# If using Alembic
+alembic upgrade head
+
+# Or manual SQL (if not using Alembic)
+sqlite3 data/lobs.db < migrations/20260221_add_model_tier.sql
+```
+
+**4. Restart Server**
+```bash
+# Kill old process
+pkill -f uvicorn
+
+# Start new version
+./bin/run
+```
+
+**5. Verify**
+```bash
+# Health check
+curl http://localhost:8000/api/health
+
+# Check task creation with new field
+curl -X POST http://localhost:8000/api/tasks \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Test task",
+    "description": "Testing model_tier field",
+    "project_id": "abc123",
+    "model_tier": "small"
+  }'
+```
+
+**6. Resume Operations**
+```bash
+# Restart orchestrator
+curl -X POST http://localhost:8000/api/orchestrator/start \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Post-Upgrade
+
+**1. Smoke Tests**
+- [ ] Create task without `model_tier` (should work, tier auto-selected)
+- [ ] Create task with `model_tier: "small"` (should work, tier enforced)
+- [ ] Run worker task (should route to correct model)
+- [ ] Check logs for tier selection messages
+
+**2. Monitor**
+- Watch orchestrator logs for "Selected model tier: X" messages
+- Verify Ollama models appear in tier selection (if Ollama running)
+- Check `/api/orchestrator/status` for healthy workers
+
+**3. Clean Up**
+```bash
+# After 24-48 hours of successful operation
+rm data/lobs.db.backup-20260221
+```
+
+---
+
+## Rollback Procedure
+
+**Difficulty:** Easy  
+**Data Loss Risk:** None (new field is optional)
+
+### When to Rollback
+
+Roll back if:
+- Model routing completely broken
+- Workers fail to spawn
+- Database errors on task creation
+
+### Rollback Steps
+
+**1. Stop Server**
+```bash
+pkill -f uvicorn
+```
+
+**2. Restore Code**
+```bash
+cd ~/lobs-server
+git checkout <previous-commit-hash>
+```
+
+**3. Rollback Database** (optional)
+```bash
+# Only needed if migration causes issues
+# The new column is nullable, so old code ignores it
+# But if needed:
+sqlite3 data/lobs.db "ALTER TABLE tasks DROP COLUMN model_tier;"
+# Note: SQLite doesn't support DROP COLUMN in older versions
+# Alternative: restore from backup
+cp data/lobs.db.backup-20260221 data/lobs.db
+```
+
+**4. Restart Server**
+```bash
+./bin/run
+```
+
+**5. Verify Rollback**
+```bash
+curl http://localhost:8000/api/health
+# Test task creation works
 ```
 
 ---
 
 ## Testing Checklist
 
-### Pre-Deployment Testing
+### Before Deployment
 
-**Model Tier Selection:**
-- [x] `micro` tier selects Gemini Flash Lite or small Ollama model
-- [x] `small` tier selects Haiku or medium Ollama model
-- [x] `medium` tier selects Sonnet or large Ollama model
-- [x] `standard` tier selects Codex 5.3
-- [x] `strong` tier selects Opus 4
+**Unit Tests:**
+- [x] All tests pass
+- [x] New tests for 5-tier routing
+- [x] Model tier field validation
 
-**Ollama Auto-Discovery:**
-- [x] Ollama models detected via API scan
-- [x] Models assigned to correct tier based on param count
-- [x] Models appear in tier listing endpoint
+**Integration Tests:**
+- [x] Task creation with and without `model_tier`
+- [x] Orchestrator routes to correct models
+- [x] Ollama discovery works
 
-**Task Execution:**
-- [x] Task with `model_tier=null` auto-selects appropriate tier
-- [x] Task with `model_tier="small"` uses small tier model
-- [x] Fallback chain works when primary model unavailable
+**Manual Testing:**
+- [x] Created tasks in dev with each tier
+- [x] Verified worker spawned with correct model
+- [x] Checked Ollama models auto-discovered
 
-**Agent Configs:**
-- [x] All agent YAML files updated with new tier names
-- [x] No references to `cheap` or `local` tiers remain
-- [x] Agents spawn successfully with new configurations
+### After Deployment
 
-### Post-Deployment Testing
+**Smoke Tests:**
+- [ ] Server started successfully
+- [ ] Task creation works (with and without tier)
+- [ ] Orchestrator running
+- [ ] Workers spawning correctly
 
-**Immediate:**
-- [x] All 5 tiers populated with models
-- [x] No errors in orchestrator logs
-- [x] First task executed successfully
-
-**Short-term (1 hour):**
-- [x] Multiple tasks across different tiers completed
-- [x] Cost tracking reflects new tier structure
-- [x] No model selection failures
-
-**Long-term (24 hours):**
-- [x] Average cost per task decreased (due to better tier selection)
-- [x] Task success rate unchanged or improved
-- [x] No agent complaints about model quality
+**Feature Tests:**
+- [ ] Task with `model_tier: "micro"` uses Ollama model
+- [ ] Task with `model_tier: "strong"` uses Opus/Codex
+- [ ] Task without tier auto-selects appropriate tier
+- [ ] Existing tasks (null tier) still work
 
 ---
 
-## Post-Migration Tasks
+## Troubleshooting
 
-**Immediate:**
-- [x] Monitor orchestrator logs: `tail -f logs/orchestrator.log`
-- [x] Track model usage: `curl /api/orchestrator/models/usage`
-- [x] Verify cost metrics: `curl /api/status/costs`
+### Issue: Worker Spawns with Wrong Model
 
-**Within 24 hours:**
-- [x] Review system health dashboard
-- [x] Compare cost/task vs previous week
-- [x] Update CHANGELOG.md with migration notes
+**Symptoms:**
+- Task specifies `model_tier: "small"` but worker uses Opus
 
-**Within 1 week:**
-- [x] Remove deprecated 3-tier code paths
-- [x] Archive old agent configs
-- [x] Document new tier selection guidelines
+**Cause:**
+- Model tier not passed to worker spawn call
+- Registry not updated with 5-tier config
+
+**Fix:**
+```bash
+# 1. Check worker.py for tier handling
+grep -n "model_tier" app/orchestrator/worker.py
+
+# 2. Verify registry has 5-tier entries
+cat config/agent-capabilities.json | jq '.tiers'
+
+# 3. Check orchestrator logs for tier selection
+tail -f logs/orchestrator.log | grep "Selected model tier"
+```
+
+### Issue: Ollama Models Not Appearing
+
+**Symptoms:**
+- Ollama running but models not used for micro/small tiers
+
+**Cause:**
+- Ollama not accessible at expected URL
+- Models not discovered during startup
+
+**Fix:**
+```bash
+# 1. Verify Ollama is running
+curl http://localhost:11434/api/tags
+
+# 2. Check discovery in server logs
+tail -f logs/app.log | grep -i ollama
+
+# 3. Manually verify model list endpoint
+curl http://localhost:8000/api/orchestrator/models
+```
+
+### Issue: Migration Fails with Column Already Exists
+
+**Symptoms:**
+- Migration script errors: "column model_tier already exists"
+
+**Cause:**
+- Migration already run, or manual column added
+
+**Fix:**
+```bash
+# Check if column exists
+sqlite3 data/lobs.db "PRAGMA table_info(tasks);" | grep model_tier
+
+# If exists, skip migration or mark as complete in Alembic
+alembic stamp head
+```
 
 ---
 
-## Known Issues & Workarounds
+## Support
 
-**Issue:** Ollama models may not auto-discover if Ollama service is down  
-**Impact:** `micro` and `small` tiers will fall back to cloud models  
-**Workaround:** Manually trigger scan after Ollama restarts: `curl -X POST /api/orchestrator/models/scan`  
-**Tracking:** Not a blocker, scan runs hourly
-
----
-
-## Support & Resources
-
-**Documentation:**
-- [Model Routing Architecture](docs/model-routing.md)
-- [Ollama Integration Guide](docs/ollama-setup.md)
-- [CHANGELOG.md](CHANGELOG.md)
-
-**Getting Help:**
-- Check tier status: `curl /api/orchestrator/models`
-- Check agent logs: `tail -f logs/agent-*.log`
-- Slack: #lobs-support
-
-**Emergency Contacts:**
-- On-call engineer: [contact info]
+**Questions:** Open issue in GitHub  
+**Bugs:** Report via GitHub issues  
+**Documentation:** See [CHANGELOG.md](../CHANGELOG.md) section "5-Tier Model Hierarchy"
