@@ -45,6 +45,10 @@ from tests.helpers.assertions import (
     assert_timestamp_fields,
     assert_db_object_matches,
     assert_json_schema,
+    assert_not_found,
+    assert_deleted,
+    assert_created,
+    assert_updated,
 )
 
 __all__ = [
@@ -79,4 +83,8 @@ __all__ = [
     "assert_timestamp_fields",
     "assert_db_object_matches",
     "assert_json_schema",
+    "assert_not_found",
+    "assert_deleted",
+    "assert_created",
+    "assert_updated",
 ]

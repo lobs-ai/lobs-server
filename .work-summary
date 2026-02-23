@@ -1,12 +1,31 @@
-Created comprehensive API contract smoke test suite for Swift clients in tests/test_api_contract_swift.py.
+Add schema validation to CI pipeline
 
-Test coverage:
-- Tasks, projects, chat, memories, agents, inbox, documents endpoints
-- Snake_case field name consistency validation
-- ISO 8601 date format verification
-- Required vs optional field validation
-- Edge cases (empty lists, null optional fields, minimal payloads)
+Created comprehensive schema validation system for API models and database migrations:
 
-Tests validate API response shapes to catch breaking changes before they reach Swift clients (lobs-mission-control, lobs-mobile).
+1. API Schema Validator (bin/validate_api_schemas.py):
+   - Validates all Pydantic request/response models
+   - Checks JSON schema generation, field types, CRUD consistency
+   - Warns on overly permissive Any types and update model patterns
+   - Exports schemas to JSON for documentation
 
-Note: Some tests need adjustment for actual API schemas (chat uses session_key, different field names than initially assumed). Test framework is solid and ready for iteration.
+2. Migration Validator (bin/validate_migrations.py):
+   - Validates Python syntax and naming conventions
+   - Detects dangerous operations (DROP TABLE, UPDATE without WHERE)
+   - Checks for hardcoded credentials and suspicious imports
+   - Recognizes project-specific migration patterns
+
+3. Updated CI workflow (.github/workflows/validation.yml):
+   - Added api-schema-validation job with artifact upload
+   - Added migration-validation job
+   - Triggers on changes to schemas, models, migrations
+
+4. Tests (tests/test_schema_validators.py):
+   - 11 tests covering both validators
+   - All tests passing
+
+5. Documentation (docs/SCHEMA_VALIDATION.md):
+   - Complete usage guide
+   - Best practices for adding new models/migrations
+   - Troubleshooting common issues
+
+Both validators pass on current codebase (0 errors, warnings only for known patterns).

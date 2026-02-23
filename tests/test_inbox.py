@@ -2,25 +2,31 @@
 
 import pytest
 from httpx import AsyncClient
+from tests.helpers import (
+    create_inbox_data,
+    assert_created,
+    assert_response_success,
+    assert_not_found,
+    assert_updated,
+    assert_deleted,
+    assert_list_response,
+)
 
 
 @pytest.mark.asyncio
 async def test_create_inbox_item(client: AsyncClient):
     """Test creating an inbox item."""
-    item_data = {
-        "id": "inbox-1",
-        "title": "Inbox Item",
-        "filename": "test.txt",
-        "content": "Test content",
-        "is_read": False
-    }
+    item_data = create_inbox_data(
+        id="inbox-1",
+        title="Inbox Item",
+        filename="test.txt",
+        content="Test content",
+        is_read=False
+    )
     response = await client.post("/api/inbox", json=item_data)
-    assert response.status_code == 200
-    data = response.json()
+    data = assert_created(response, expected_fields=["title", "filename", "content"])
     assert data["id"] == "inbox-1"
     assert data["title"] == "Inbox Item"
-    assert data["filename"] == "test.txt"
-    assert data["content"] == "Test content"
     assert data["is_read"] is False
 
 
@@ -28,40 +34,39 @@ async def test_create_inbox_item(client: AsyncClient):
 async def test_list_inbox_items(client: AsyncClient, sample_inbox_item):
     """Test listing inbox items."""
     response = await client.get("/api/inbox")
-    assert response.status_code == 200
-    data = response.json()
-    assert isinstance(data, list)
-    assert len(data) == 1
-    assert data[0]["id"] == sample_inbox_item["id"]
+    items = assert_list_response(
+        response,
+        min_length=1,
+        max_length=1,
+        item_schema=["id", "title"]
+    )
+    assert items[0]["id"] == sample_inbox_item["id"]
 
 
 @pytest.mark.asyncio
 async def test_list_inbox_items_pagination(client: AsyncClient):
     """Test inbox item pagination."""
-    # Create multiple items
+    # Create multiple items using factory
     for i in range(5):
-        await client.post("/api/inbox", json={
-            "id": f"inbox-{i}",
-            "title": f"Item {i}",
-            "is_read": False
-        })
+        item_data = create_inbox_data(title=f"Item {i}", is_read=False)
+        await client.post("/api/inbox", json=item_data)
     
     # Test limit
     response = await client.get("/api/inbox?limit=2")
-    assert response.status_code == 200
-    assert len(response.json()) == 2
+    items = assert_list_response(response, max_length=2)
+    assert len(items) == 2
     
     # Test offset
     response = await client.get("/api/inbox?offset=2&limit=2")
-    assert response.status_code == 200
-    assert len(response.json()) == 2
+    items = assert_list_response(response, max_length=2)
+    assert len(items) == 2
 
 
 @pytest.mark.asyncio
 async def test_get_inbox_item(client: AsyncClient, sample_inbox_item):
     """Test getting a single inbox item."""
     response = await client.get(f"/api/inbox/{sample_inbox_item['id']}")
-    assert response.status_code == 200
+    assert_response_success(response)
     data = response.json()
     assert data["id"] == sample_inbox_item["id"]
     assert data["title"] == sample_inbox_item["title"]
@@ -71,8 +76,7 @@ async def test_get_inbox_item(client: AsyncClient, sample_inbox_item):
 async def test_get_inbox_item_not_found(client: AsyncClient):
     """Test getting a non-existent inbox item returns 404."""
     response = await client.get("/api/inbox/nonexistent")
-    assert response.status_code == 404
-    assert "not found" in response.json()["detail"].lower()
+    assert_not_found(response, resource_type="inbox")
 
 
 @pytest.mark.asyncio
@@ -87,11 +91,11 @@ async def test_update_inbox_item(client: AsyncClient, sample_inbox_item):
         f"/api/inbox/{sample_inbox_item['id']}",
         json=update_data
     )
-    assert response.status_code == 200
-    data = response.json()
-    assert data["title"] == "Updated Title"
-    assert data["is_read"] is True
-    assert data["summary"] == "This is a summary"
+    data = assert_updated(response, expected_changes={
+        "title": "Updated Title",
+        "is_read": True,
+        "summary": "This is a summary"
+    })
 
 
 @pytest.mark.asyncio
@@ -101,26 +105,25 @@ async def test_update_inbox_item_not_found(client: AsyncClient):
         "/api/inbox/nonexistent",
         json={"title": "Updated"}
     )
-    assert response.status_code == 404
+    assert_not_found(response)
 
 
 @pytest.mark.asyncio
 async def test_delete_inbox_item(client: AsyncClient, sample_inbox_item):
     """Test deleting an inbox item."""
     response = await client.delete(f"/api/inbox/{sample_inbox_item['id']}")
-    assert response.status_code == 200
-    assert response.json() == {"status": "deleted"}
+    assert_deleted(response)
     
     # Verify it's deleted
     get_response = await client.get(f"/api/inbox/{sample_inbox_item['id']}")
-    assert get_response.status_code == 404
+    assert_not_found(get_response)
 
 
 @pytest.mark.asyncio
 async def test_delete_inbox_item_not_found(client: AsyncClient):
     """Test deleting a non-existent inbox item returns 404."""
     response = await client.delete("/api/inbox/nonexistent")
-    assert response.status_code == 404
+    assert_not_found(response)
 
 
 @pytest.mark.asyncio

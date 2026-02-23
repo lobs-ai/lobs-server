@@ -1,29 +1,7 @@
 """WebSocket reconnection tests for chat endpoint."""
 
 import pytest
-from starlette.testclient import TestClient
-from app.main import app
-from app.database import get_db
-from tests.conftest import get_test_db, test_engine
-from app.models import APIToken
-from sqlalchemy import select
 import json
-import time
-
-
-@pytest.fixture
-def sync_client_with_token(db_session, test_token):
-    """Provide a synchronous TestClient for WebSocket testing."""
-    # Override the database dependency
-    app.dependency_overrides[get_db] = get_test_db
-    
-    client = TestClient(app)
-    client.test_token = test_token
-    
-    yield client
-    
-    # Clean up
-    app.dependency_overrides.clear()
 
 
 class TestWebSocketReconnection:

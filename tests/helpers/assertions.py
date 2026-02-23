@@ -244,3 +244,115 @@ def assert_json_schema(
             
         assert isinstance(actual_value, expected_type), \
             f"Field {field}: expected {expected_type.__name__}, got {type(actual_value).__name__}"
+
+
+def assert_not_found(
+    response: Response,
+    resource_type: Optional[str] = None
+) -> None:
+    """Assert that response is a 404 not found error.
+    
+    Args:
+        response: HTTP response object
+        resource_type: Optional resource type to check in error message
+        
+    Raises:
+        AssertionError: If response is not a 404 or message doesn't match
+    """
+    assert response.status_code == 404, \
+        f"Expected 404 Not Found, got {response.status_code}"
+    
+    try:
+        detail = response.json().get("detail", "")
+        assert "not found" in detail.lower(), \
+            f"Expected 'not found' in error detail, got: {detail}"
+        
+        if resource_type:
+            assert resource_type.lower() in detail.lower(), \
+                f"Expected '{resource_type}' in error detail, got: {detail}"
+    except Exception as e:
+        raise AssertionError(f"Could not parse 404 response: {e}")
+
+
+def assert_deleted(
+    response: Response,
+    expected_message: str = "deleted"
+) -> None:
+    """Assert that response indicates successful deletion.
+    
+    Args:
+        response: HTTP response object from delete request
+        expected_message: Expected status message (default: "deleted")
+        
+    Raises:
+        AssertionError: If response doesn't indicate deletion
+    """
+    assert_response_success(response, expected_status=200)
+    
+    data = response.json()
+    if "status" in data:
+        assert data["status"] == expected_message, \
+            f"Expected status '{expected_message}', got '{data.get('status')}'"
+
+
+def assert_created(
+    response: Response,
+    expected_fields: Optional[List[str]] = None
+) -> Dict[str, Any]:
+    """Assert successful creation and return created object.
+    
+    Args:
+        response: HTTP response object from POST request
+        expected_fields: Optional list of fields to verify
+        
+    Returns:
+        Created object data
+        
+    Raises:
+        AssertionError: If creation failed or fields missing
+    """
+    assert_response_success(response, expected_status=200)
+    
+    data = response.json()
+    
+    # Check common creation fields
+    default_fields = ["id", "created_at"]
+    if expected_fields:
+        default_fields.extend(expected_fields)
+    
+    assert_has_fields(data, default_fields)
+    
+    return data
+
+
+def assert_updated(
+    response: Response,
+    expected_changes: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Assert successful update and optionally verify changes.
+    
+    Args:
+        response: HTTP response object from PUT/PATCH request
+        expected_changes: Optional dict of field:value pairs to verify
+        
+    Returns:
+        Updated object data
+        
+    Raises:
+        AssertionError: If update failed or changes not applied
+    """
+    assert_response_success(response, expected_status=200)
+    
+    data = response.json()
+    
+    # Verify has updated_at timestamp
+    assert "updated_at" in data, "Updated object should have updated_at field"
+    
+    # Verify expected changes if provided
+    if expected_changes:
+        for field, expected_value in expected_changes.items():
+            actual_value = data.get(field)
+            assert actual_value == expected_value, \
+                f"Field {field}: expected {expected_value}, got {actual_value}"
+    
+    return data
