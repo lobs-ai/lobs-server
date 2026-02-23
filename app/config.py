@@ -39,6 +39,10 @@ class Settings:
     LOG_FORMAT: str = os.getenv("LOG_FORMAT", "console").lower()  # "console" or "json"
     LOG_DIR: str = os.getenv("LOG_DIR", "./logs")
     
+    # Webhook Security
+    MAX_WEBHOOK_PAYLOAD_BYTES: int = int(os.getenv("MAX_WEBHOOK_PAYLOAD_BYTES", "1048576"))  # 1MB
+    WEBHOOK_SANITIZE_HTML: bool = os.getenv("WEBHOOK_SANITIZE_HTML", "true").lower() in ("true", "1", "yes")
+    
     def ensure_data_dir(self):
         """Ensure data directory exists."""
         db_path = Path(self.DATABASE_PATH)

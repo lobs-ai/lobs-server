@@ -24,11 +24,13 @@ class MonitorEnhanced:
     - Auto-unblock for tasks blocked by completed dependencies
     - Failure pattern detection (same task failing repeatedly)
     - Worker health monitoring
+    - Worker termination for stuck/timed-out workers
     - System health summary
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, worker_manager: Optional[Any] = None):
         self.db = db
+        self.worker_manager = worker_manager
         self.stuck_timeout = 900  # 15 minutes
         self.warning_timeout = 1800  # 30 minutes
         self.kill_timeout = 3600  # 1 hour
@@ -94,14 +96,63 @@ class MonitorEnhanced:
                     f"({task.project_id}) - {int(age_seconds/60)}m old - {severity}"
                 )
                 
-                # Mark task as stuck and create inbox alert
-                await self._mark_task_stuck(task, age_seconds)
+                # If critical severity and worker manager available, kill the worker
+                if severity == "critical" and self.worker_manager:
+                    killed = await self._kill_stuck_worker(task.id, age_seconds)
+                    if killed:
+                        logger.info(
+                            f"[MONITOR] Killed stuck worker for task {task.id[:8]} "
+                            f"(running for {int(age_seconds/60)}m)"
+                        )
+                else:
+                    # Mark task as stuck and create inbox alert
+                    await self._mark_task_stuck(task, age_seconds)
             
             return stuck
         
         except Exception as e:
             logger.error(f"Failed to check stuck tasks: {e}", exc_info=True)
             return []
+
+    async def _kill_stuck_worker(self, task_id: str, age_seconds: float) -> bool:
+        """
+        Kill a worker that's stuck on a task.
+        
+        Returns True if worker was found and killed.
+        """
+        if not self.worker_manager:
+            return False
+        
+        try:
+            # Find the worker handling this task
+            worker_id = None
+            for wid, worker_info in self.worker_manager.active_workers.items():
+                if worker_info.task_id == task_id:
+                    worker_id = wid
+                    break
+            
+            if not worker_id:
+                logger.debug(
+                    f"[MONITOR] No active worker found for stuck task {task_id[:8]}"
+                )
+                return False
+            
+            # Kill the worker
+            reason = f"stuck_timeout_{int(age_seconds/60)}m"
+            await self.worker_manager._kill_worker(worker_id, reason)
+            
+            logger.info(
+                f"[MONITOR] Killed stuck worker {worker_id} "
+                f"(task={task_id[:8]}, age={int(age_seconds/60)}m)"
+            )
+            return True
+            
+        except Exception as e:
+            logger.error(
+                f"[MONITOR] Failed to kill stuck worker for task {task_id[:8]}: {e}",
+                exc_info=True
+            )
+            return False
 
     async def _mark_task_stuck(self, task: Task, age_seconds: float) -> None:
         """Mark a task as stuck and create an inbox alert."""

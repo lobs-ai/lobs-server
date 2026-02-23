@@ -1,0 +1,21 @@
+{
+  "to": "programmer",
+  "initiative": "code-review-fixes",
+  "title": "Improve error handling and docs in orchestrator refactor",
+  "context": "Review found 8 important issues with error handling, race conditions, and documentation:\n\n1. I1: Gateway API timeout not classified as error type\n2. I2: Missing logging for transcript fallback path\n3. I3: Reflection parsing errors swallowed\n4. I4: Token extraction logic changed - needs verification\n5. I5: sweep_requested signal is new behavior - undocumented\n6. I6: Orchestrator getter duplicated across 3 routers\n7. I7: Missing endpoint docstrings\n8. I8: Project lock released before DB commit\n9. I9: Module docstrings lack architectural context\n\nFull review: /Users/lobs/lobs-server/review-notes.md sections I1-I9\n\nThese should be fixed before production use to prevent silent failures and improve debuggability.",
+  "acceptance": "- Timeout errors classified as 'timeout' error type\n- Debug logging added for all fallback paths\n- Reflection JSON validated before marking completed\n- Token extraction tested with real transcripts\n- sweep_requested behavior documented in CHANGELOG\n- Orchestrator getter extracted to shared util module\n- All public API endpoints have docstrings\n- Project locks released after DB commit in try/finally\n- Module docs explain architectural context (why split, how it fits)",
+  "files": [
+    "app/orchestrator/worker_gateway.py",
+    "app/orchestrator/worker_manager.py",
+    "app/routers/orchestrator_admin.py",
+    "app/routers/orchestrator_workers.py",
+    "app/routers/orchestrator_reflections.py",
+    "app/orchestrator/utils.py",
+    "CHANGELOG.md"
+  ],
+  "priority": "medium",
+  "estimated_hours": 3,
+  "risk_level": "medium",
+  "created_by": "reviewer",
+  "created_at": "2026-02-22T17:49:00-05:00"
+}

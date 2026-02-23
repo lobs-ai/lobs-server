@@ -750,3 +750,50 @@ class ControlLoopHeartbeat(Base):
     phase = Column(String, nullable=False)
     last_heartbeat_at = Column(DateTime, nullable=False, index=True)
     heartbeat_metadata = Column("metadata", JSON)
+
+
+class WebhookRegistration(Base):
+    """Registered webhooks for external service integrations."""
+    __tablename__ = "webhook_registrations"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    provider = Column(String, nullable=False, index=True)  # github/slack/linear/custom
+    secret = Column(String, nullable=False)  # For signature verification
+    event_filters = Column(JSON)  # Array of event types to listen for
+    target_action = Column(String, nullable=False)  # create_task/trigger_agent/update_project/custom
+    action_config = Column(JSON)  # Configuration for the target action
+    active = Column(Boolean, default=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+    last_received_at = Column(DateTime)
+
+
+class WebhookEvent(Base):
+    """Incoming webhook events (audit trail and processing queue)."""
+    __tablename__ = "webhook_events"
+
+    id = Column(String, primary_key=True)
+    registration_id = Column(String, ForeignKey("webhook_registrations.id"), index=True)
+    provider = Column(String, nullable=False, index=True)
+    event_type = Column(String, nullable=False, index=True)
+    payload = Column(JSON, nullable=False)
+    headers = Column(JSON)  # Relevant headers for verification
+    signature_valid = Column(Boolean, default=False)
+    status = Column(String, default="pending", nullable=False, index=True)  # pending/processed/failed/ignored
+    processing_result = Column(JSON)
+    created_at = Column(DateTime, default=func.now(), nullable=False, index=True)
+    processed_at = Column(DateTime)
+
+
+class WebhookDelivery(Base):
+    """Webhook event delivery attempts for retry logic."""
+    __tablename__ = "webhook_deliveries"
+
+    id = Column(String, primary_key=True)
+    event_id = Column(String, ForeignKey("webhook_events.id"), nullable=False, index=True)
+    attempt = Column(Integer, default=1, nullable=False)
+    status = Column(String, nullable=False, index=True)  # success/failed/retrying
+    error_message = Column(Text)
+    next_retry_at = Column(DateTime, index=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)

@@ -21,7 +21,7 @@ from typing import Any, Callable, Optional
 from app.database import AsyncSessionLocal
 from app.orchestrator.scanner import Scanner
 from app.orchestrator.capability_registry import CapabilityRegistrySync
-from app.orchestrator.worker import WorkerManager
+from app.orchestrator.worker_manager import WorkerManager
 from app.orchestrator.monitor_enhanced import MonitorEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
@@ -232,7 +232,7 @@ class OrchestratorEngine:
                 self._worker_manager.db = db
                 self._worker_manager.provider_health = self.provider_health
             worker_manager = self._worker_manager
-            monitor_enhanced = MonitorEnhanced(db)
+            monitor_enhanced = MonitorEnhanced(db, worker_manager=worker_manager)
             circuit_breaker = CircuitBreaker(db)
             scheduler = EventScheduler(db)
             reflection_manager = ReflectionCycleManager(db, worker_manager)

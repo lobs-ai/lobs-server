@@ -185,3 +185,8 @@ def auth_headers(test_token):
 def project_id(sample_project):
     """Provide a project ID."""
     return sample_project["id"]
+
+
+# Import additional fixtures from helpers module
+# This makes them available to all tests automatically
+pytest_plugins = ["tests.helpers.fixtures"]

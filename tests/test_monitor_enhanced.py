@@ -200,3 +200,67 @@ class TestMonitorEnhanced:
         assert "failure_patterns" in result
         assert "worker_healthy" in result
         assert "issues_found" in result
+    
+    @pytest.mark.asyncio
+    async def test_kill_stuck_worker_no_manager(self, db_session: AsyncSession):
+        """Test killing stuck worker when no worker manager is available."""
+        monitor = MonitorEnhanced(db_session)  # No worker_manager
+        
+        result = await monitor._kill_stuck_worker("task_123", 3600)
+        
+        assert result is False  # Should return False without manager
+    
+    @pytest.mark.asyncio
+    async def test_kill_stuck_worker_not_found(self, db_session: AsyncSession):
+        """Test killing stuck worker when task has no active worker."""
+        from unittest.mock import MagicMock
+        
+        # Create mock worker manager with no active workers
+        mock_manager = MagicMock()
+        mock_manager.active_workers = {}
+        
+        monitor = MonitorEnhanced(db_session, worker_manager=mock_manager)
+        
+        result = await monitor._kill_stuck_worker("task_123", 3600)
+        
+        assert result is False  # Should return False when worker not found
+    
+    @pytest.mark.asyncio
+    async def test_critical_stuck_task_triggers_kill(self, db_session: AsyncSession):
+        """Test that critical stuck tasks trigger worker termination."""
+        from unittest.mock import MagicMock, AsyncMock
+        
+        # Create mock worker manager
+        mock_manager = MagicMock()
+        mock_manager.active_workers = {
+            "worker_123": MagicMock(task_id="stuck_task_123")
+        }
+        mock_manager._kill_worker = AsyncMock()
+        
+        monitor = MonitorEnhanced(db_session, worker_manager=mock_manager)
+        
+        # Create a critically stuck task (over 1 hour)
+        stuck_time = datetime.now(timezone.utc) - timedelta(hours=2)
+        task = Task(
+            id="stuck_task_123",
+            title="Critically stuck task",
+            status="active",
+            work_state="in_progress",
+            project_id="test-project",
+            updated_at=stuck_time,
+            created_at=stuck_time
+        )
+        db_session.add(task)
+        await db_session.commit()
+        
+        # Check for stuck tasks
+        stuck_tasks = await monitor.check_stuck_tasks()
+        
+        assert len(stuck_tasks) == 1
+        assert stuck_tasks[0]["severity"] == "critical"
+        
+        # Verify worker was killed
+        mock_manager._kill_worker.assert_called_once()
+        call_args = mock_manager._kill_worker.call_args
+        assert call_args[0][0] == "worker_123"  # worker_id
+        assert "stuck" in call_args[0][1].lower()  # reason

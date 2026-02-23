@@ -1066,3 +1066,70 @@ class RoutingPolicy(BaseModel):
 
     # Backward compatibility aliases (legacy field name)
     gemini_first_task_types: list[str] = Field(default_factory=list)
+
+
+# Webhook schemas
+class WebhookRegistrationBase(BaseModel):
+    name: str
+    provider: str  # github/slack/linear/custom
+    secret: str
+    event_filters: Optional[list[str]] = None
+    target_action: str  # create_task/trigger_agent/update_project/custom
+    action_config: Optional[dict[str, Any]] = None
+    active: bool = True
+
+
+class WebhookRegistrationCreate(WebhookRegistrationBase):
+    pass
+
+
+class WebhookRegistrationUpdate(BaseModel):
+    name: Optional[str] = None
+    secret: Optional[str] = None
+    event_filters: Optional[list[str]] = None
+    target_action: Optional[str] = None
+    action_config: Optional[dict[str, Any]] = None
+    active: Optional[bool] = None
+
+
+class WebhookRegistration(WebhookRegistrationBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    last_received_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WebhookEventBase(BaseModel):
+    registration_id: Optional[str] = None
+    provider: str
+    event_type: str
+    payload: dict[str, Any]
+    headers: Optional[dict[str, str]] = None
+    signature_valid: bool = False
+    status: str = "pending"
+    processing_result: Optional[dict[str, Any]] = None
+
+
+class WebhookEvent(WebhookEventBase):
+    id: str
+    created_at: datetime
+    processed_at: Optional[datetime] = None
+    
+    model_config = ConfigDict(from_attributes=True)
+
+
+class WebhookDeliveryBase(BaseModel):
+    event_id: str
+    attempt: int = 1
+    status: str  # success/failed/retrying
+    error_message: Optional[str] = None
+    next_retry_at: Optional[datetime] = None
+
+
+class WebhookDelivery(WebhookDeliveryBase):
+    id: str
+    created_at: datetime
+    
+    model_config = ConfigDict(from_attributes=True)

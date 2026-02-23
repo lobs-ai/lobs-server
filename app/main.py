@@ -32,7 +32,9 @@ from app.routers import (
     templates,
     calendar,
     agents,
-    orchestrator,
+    orchestrator_reflections,
+    orchestrator_admin,
+    orchestrator_workers,
     backup,
     chat,
     memories,
@@ -42,6 +44,7 @@ from app.routers import (
     governance,
     intent,
     usage,
+    webhooks,
 )
 from app.routers import text_dumps
 
@@ -163,7 +166,9 @@ app.include_router(templates.router, prefix=settings.API_PREFIX, dependencies=[D
 app.include_router(calendar.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(text_dumps.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(agents.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
-app.include_router(orchestrator.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(orchestrator_reflections.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(orchestrator_admin.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(orchestrator_workers.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(backup.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(chat.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(memories.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
@@ -173,6 +178,9 @@ app.include_router(governance.router, prefix=settings.API_PREFIX, dependencies=[
 app.include_router(intent.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(usage.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(usage.routing_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+
+# Webhooks - receive endpoint is public (external services), management requires auth
+app.include_router(webhooks.router, prefix=settings.API_PREFIX)
 
 
 @app.get("/")

@@ -1,0 +1,72 @@
+name: Schema & Test Validation
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'app/models.py'
+      - 'app/database.py'
+      - 'tests/**'
+      - 'bin/validate_schema.py'
+      - 'bin/detect_time_based_tests.py'
+      - '.github/workflows/validation.yml'
+  push:
+    branches: [ main ]
+    paths:
+      - 'app/models.py'
+      - 'app/database.py'
+      - 'tests/**'
+
+jobs:
+  schema-validation:
+    name: Validate Schema
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Initialize database
+        run: |
+          # Create test database and run migrations
+          python -c "import asyncio; from app.database import init_db; asyncio.run(init_db())"
+      
+      - name: Run schema validator
+        run: |
+          python bin/validate_schema.py --check
+  
+  test-time-detector:
+    name: Detect Time-Based Test Issues
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Run time-based test detector
+        run: |
+          python bin/detect_time_based_tests.py --check tests/
+      
+      - name: Report results
+        if: failure()
+        run: |
+          echo "❌ Time-based test issues detected!"
+          echo "Tests must not use time.sleep(), datetime.now(), or date.today() without @freeze_time decorator."
+          echo "See https://github.com/spulec/freezegun for proper time mocking."
+          exit 1

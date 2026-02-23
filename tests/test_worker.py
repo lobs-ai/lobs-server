@@ -1,7 +1,11 @@
-"""Tests for worker API endpoints."""
+"""Tests for worker API endpoints and worker manager."""
 
 import pytest
 from httpx import AsyncClient
+from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.orchestrator.worker import WorkerManager
 
 
 @pytest.mark.asyncio
@@ -137,3 +141,102 @@ async def test_list_worker_runs_pagination(client: AsyncClient):
     response = await client.get("/api/worker/history?offset=2&limit=2")
     assert response.status_code == 200
     assert len(response.json()) == 2
+
+
+class TestWorkerManager:
+    """Tests for WorkerManager session termination."""
+    
+    @pytest.mark.asyncio
+    async def test_terminate_session_success(self, db_session: AsyncSession):
+        """Test successful session termination."""
+        manager = WorkerManager(db_session)
+        
+        # Mock the Gateway API response
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(return_value={"ok": True})
+        
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock()
+            mock_session.post = AsyncMock(return_value=mock_response)
+            mock_session_class.return_value = mock_session
+            
+            result = await manager._terminate_session(
+                "agent:programmer:subagent:test-123",
+                "timeout"
+            )
+            
+            assert result is True
+            mock_session.post.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_terminate_session_not_found(self, db_session: AsyncSession):
+        """Test session termination when session not found (treat as success)."""
+        manager = WorkerManager(db_session)
+        
+        # Mock the Gateway API response - session not found
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(return_value={
+            "ok": False,
+            "error": {"message": "Session not found"}
+        })
+        
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock()
+            mock_session.post = AsyncMock(return_value=mock_response)
+            mock_session_class.return_value = mock_session
+            
+            result = await manager._terminate_session(
+                "agent:programmer:subagent:test-123",
+                "cleanup"
+            )
+            
+            assert result is True  # Not found treated as success
+    
+    @pytest.mark.asyncio
+    async def test_terminate_session_api_error(self, db_session: AsyncSession):
+        """Test session termination when API returns error."""
+        manager = WorkerManager(db_session)
+        
+        # Mock the Gateway API response - other error
+        mock_response = MagicMock()
+        mock_response.json = AsyncMock(return_value={
+            "ok": False,
+            "error": {"message": "Internal server error"}
+        })
+        
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock()
+            mock_session.post = AsyncMock(return_value=mock_response)
+            mock_session_class.return_value = mock_session
+            
+            result = await manager._terminate_session(
+                "agent:programmer:subagent:test-123",
+                "timeout"
+            )
+            
+            assert result is False
+    
+    @pytest.mark.asyncio
+    async def test_terminate_session_network_error(self, db_session: AsyncSession):
+        """Test session termination when network error occurs."""
+        manager = WorkerManager(db_session)
+        
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock()
+            mock_session.post = AsyncMock(side_effect=Exception("Network error"))
+            mock_session_class.return_value = mock_session
+            
+            result = await manager._terminate_session(
+                "agent:programmer:subagent:test-123",
+                "timeout"
+            )
+            
+            assert result is False

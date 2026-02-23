@@ -43,13 +43,8 @@ DEFAULT_DAILY_BUDGET = {
     "architect": 2,
 }
 
-# Categories that should never be auto-approved regardless of LLM recommendation
-HARD_GATE_CATEGORIES = {
-    "architecture_change",
-    "destructive_operation",
-    "cross_project_migration",
-    "agent_recruitment",
-}
+# Import PolicyEngine for smart escalation routing
+from app.orchestrator.policy_engine import PolicyEngine
 
 
 class SweepArbitrator:
@@ -123,27 +118,35 @@ class SweepArbitrator:
         for initiative in remaining:
             initiative.status = "lobs_review"
 
-        # --- Send notification to Lobs main session via Gateway API ---
-        notification_sent = False
+        # --- Create inbox items for each initiative ---
+        await self._create_initiative_inbox_items(remaining, sweep_id)
+        logger.info(
+            "[SWEEP] Created %d inbox items for initiative review",
+            len(remaining)
+        )
+
+        # --- Send lightweight notification to Lobs main session via Gateway API ---
         try:
-            await self._notify_lobs_main_session(remaining, budgets, usage, sweep_id)
-            notification_sent = True
+            await self._notify_lobs_main_session_lightweight(remaining, sweep_id)
             logger.info(
                 "[SWEEP] Notified Lobs main session of %d pending initiatives",
                 len(remaining)
             )
         except Exception as e:
             logger.warning(
-                "[SWEEP] Failed to notify Lobs main session: %s — initiatives remain as lobs_review",
+                "[SWEEP] Failed to notify Lobs main session: %s — inbox items already created",
                 e
             )
-            # Create fallback inbox item so Lobs knows there are pending reviews
-            await self._create_lobs_review_inbox_item(remaining, sweep_id)
 
-        # --- Create high-risk inbox items for Rafe ---
+        # --- Create high-risk inbox items for Rafe using PolicyEngine ---
+        policy_engine = PolicyEngine()
         for initiative in remaining:
-            if (initiative.category or "").strip().lower() in HARD_GATE_CATEGORIES:
-                await self._create_rafe_inbox_item(initiative)
+            # Use initiative.score as estimated_effort (score represents effort in days)
+            estimated_effort = int(initiative.score) if initiative.score else None
+            decision = policy_engine.decide(initiative.category, estimated_effort=estimated_effort)
+            
+            if decision.escalate_to_rafe:
+                await self._create_rafe_inbox_item(initiative, decision.reason)
 
         sweep = self._create_sweep_record(
             sweep_id, start, len(initiatives), approved, deferred, rejected, budgets, usage
@@ -163,63 +166,65 @@ class SweepArbitrator:
     # Lobs main session notification
     # ------------------------------------------------------------------
 
-    async def _notify_lobs_main_session(
+    async def _create_initiative_inbox_items(
         self,
         initiatives: list[AgentInitiative],
-        budgets: dict[str, int],
-        usage: dict[str, int],
         sweep_id: str,
     ) -> None:
-        """Send a formatted message to Lobs main session listing all pending initiatives."""
+        """Create an inbox item for each initiative needing review."""
+        for initiative in initiatives:
+            effort_str = f"{int(initiative.score)} day(s)" if initiative.score else "unspecified"
+            
+            content = (
+                f"**Initiative ID:** `{initiative.id}`\n\n"
+                f"**Proposed by:** {initiative.proposed_by_agent}\n"
+                f"**Category:** {initiative.category}\n"
+                f"**Suggested owner:** {initiative.owner_agent or '(unspecified)'}\n"
+                f"**Risk tier:** {initiative.risk_tier or 'C'}\n"
+                f"**Estimated effort:** {effort_str}\n\n"
+                f"**Description:**\n{initiative.description or '(no description)'}\n\n"
+                "---\n\n"
+                "**Review and decide:**\n"
+                "- **Approve**: Create a task from this initiative\n"
+                "- **Defer**: Not now, revisit later\n"
+                "- **Reject**: Not worth doing\n\n"
+                "**Commands:**\n"
+                "```bash\n"
+                "# View initiative details\n"
+                f"~/.openclaw/workspace/scripts/lobs-api.sh get-initiative {initiative.id[:8]}\n\n"
+                "# Approve and create task\n"
+                "~/.openclaw/workspace/scripts/lobs-api.sh create-task\n\n"
+                "# Batch-decide on all pending\n"
+                "~/.openclaw/workspace/scripts/lobs-api.sh batch-decide\n"
+                "```"
+            )
+
+            self.db.add(
+                InboxItem(
+                    id=str(uuid.uuid4()),
+                    title=f"[REVIEW] {initiative.title[:80]}",
+                    content=content,
+                    is_read=False,
+                    summary=f"initiative_review:{initiative.id}",
+                    modified_at=datetime.now(timezone.utc),
+                )
+            )
+
+    async def _notify_lobs_main_session_lightweight(
+        self,
+        initiatives: list[AgentInitiative],
+        sweep_id: str,
+    ) -> None:
+        """Send a lightweight ping to Lobs main session about pending initiatives."""
         import aiohttp
         from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
 
-        # Build initiative summary
-        budget_summary = {
-            agent: f"{usage.get(agent, 0)}/{limit}"
-            for agent, limit in budgets.items()
-        }
-
-        summary_lines = [
-            f"## Initiative Sweep Review — {len(initiatives)} Proposal(s) Pending",
-            "",
-            f"**Sweep ID:** `{sweep_id}`",
-            f"**Daily budgets:** {json.dumps(budget_summary)}",
-            "",
-            "The agent team has proposed the following initiatives from their strategic reflections. Review each and decide:",
-            "- **Approve**: Create a task (use `lobs-api.sh create-task`)",
-            "- **Defer**: Not now, maybe later",
-            "- **Reject**: Not worth doing",
-            "",
-            "**Commands:**",
-            "```bash",
-            "# List all pending initiatives",
-            "~/.openclaw/workspace/scripts/lobs-api.sh initiatives",
-            "",
-            "# Batch-decide after reviewing",
-            "~/.openclaw/workspace/scripts/lobs-api.sh batch-decide",
-            "```",
-            "",
-            "---",
-            "",
-        ]
-
-        for i, init in enumerate(initiatives, 1):
-            summary_lines.append(f"### {i}. {init.title}")
-            summary_lines.append(f"**ID:** `{init.id}`")
-            summary_lines.append(f"**Proposed by:** {init.proposed_by_agent}")
-            summary_lines.append(f"**Category:** {init.category}")
-            summary_lines.append(f"**Suggested owner:** {init.owner_agent or '(unspecified)'}")
-            summary_lines.append(f"**Risk tier:** {init.risk_tier or 'B'}")
-            if init.score is not None:
-                summary_lines.append(f"**Estimated effort:** {int(init.score)}")
-            summary_lines.append("")
-            summary_lines.append(init.description or "(no description)")
-            summary_lines.append("")
-            summary_lines.append("---")
-            summary_lines.append("")
-
-        message_text = "\n".join(summary_lines)
+        message_text = (
+            f"📋 **Initiative Sweep Complete**\n\n"
+            f"**{len(initiatives)} initiative(s)** are awaiting review in your inbox.\n\n"
+            f"Check **Mission Control → Inbox** to review and decide on each initiative.\n\n"
+            f"Sweep ID: `{sweep_id}`"
+        )
 
         # Send via Gateway sessions_send to main session
         async with aiohttp.ClientSession() as session:
@@ -242,42 +247,6 @@ class SweepArbitrator:
 
             if not data.get("ok"):
                 raise RuntimeError(f"Gateway sessions_send failed: {data}")
-
-    async def _create_lobs_review_inbox_item(
-        self,
-        initiatives: list[AgentInitiative],
-        sweep_id: str,
-    ) -> None:
-        """Create an inbox item summarizing pending reviews (fallback if Gateway notification fails)."""
-        title_preview = ", ".join(i.title[:40] for i in initiatives[:3])
-        if len(initiatives) > 3:
-            title_preview += f" + {len(initiatives) - 3} more"
-
-        content = (
-            f"Initiative sweep completed but Lobs notification failed.\n\n"
-            f"Sweep ID: {sweep_id}\n"
-            f"Pending initiatives: {len(initiatives)}\n\n"
-            "Use the following commands to review:\n"
-            "```bash\n"
-            "~/.openclaw/workspace/scripts/lobs-api.sh initiatives\n"
-            "~/.openclaw/workspace/scripts/lobs-api.sh batch-decide\n"
-            "```\n\n"
-            "Initiatives:\n"
-        )
-
-        for init in initiatives:
-            content += f"- **{init.title}** (ID: {init.id[:8]}..., by: {init.proposed_by_agent})\n"
-
-        self.db.add(
-            InboxItem(
-                id=str(uuid.uuid4()),
-                title=f"[REVIEW] {len(initiatives)} initiative(s) pending: {title_preview[:80]}",
-                content=content,
-                is_read=False,
-                summary=f"sweep_review_fallback:{sweep_id}",
-                modified_at=datetime.now(timezone.utc),
-            )
-        )
 
     # ------------------------------------------------------------------
     # Data loading
@@ -361,25 +330,42 @@ class SweepArbitrator:
         category = " ".join((initiative.category or "").strip().lower().split())
         return f"{category}|{normalized[:220]}"
 
-    async def _create_rafe_inbox_item(self, initiative: AgentInitiative) -> None:
+    async def _create_rafe_inbox_item(self, initiative: AgentInitiative, escalation_reason: str) -> None:
         title = initiative.title or "Untitled initiative"
+        effort_str = f"{int(initiative.score)} day(s)" if initiative.score else "unspecified"
+        
         content = (
-            "High-risk initiative requires human review.\n\n"
-            f"Initiative ID: {initiative.id}\n"
-            f"Title: {title}\n"
-            f"Category: {initiative.category}\n"
-            f"Proposed by: {initiative.proposed_by_agent}\n\n"
-            f"Description:\n{initiative.description or '(none)'}\n\n"
-            "Action: approve / defer / reject"
+            "🚨 **High-impact initiative escalated for human review**\n\n"
+            f"**Why escalated:** {escalation_reason}\n\n"
+            f"**Initiative ID:** `{initiative.id}`\n"
+            f"**Title:** {title}\n"
+            f"**Category:** {initiative.category}\n"
+            f"**Proposed by:** {initiative.proposed_by_agent}\n"
+            f"**Suggested owner:** {initiative.owner_agent or '(unspecified)'}\n"
+            f"**Estimated effort:** {effort_str}\n"
+            f"**Risk tier:** {initiative.risk_tier or 'C'}\n\n"
+            f"**Description:**\n{initiative.description or '(none)'}\n\n"
+            "---\n\n"
+            "**Action required:** Review and decide:\n"
+            "- **Approve**: Use `lobs-api.sh create-task` to create from this initiative\n"
+            "- **Defer**: Not now, revisit later\n"
+            "- **Reject**: Not worth doing\n\n"
+            f"Commands:\n"
+            f"```bash\n"
+            f"# View initiative details\n"
+            f"~/.openclaw/workspace/scripts/lobs-api.sh get-initiative {initiative.id[:8]}\n\n"
+            f"# Create task from initiative\n"
+            f"~/.openclaw/workspace/scripts/lobs-api.sh create-task\n"
+            f"```"
         )
 
         self.db.add(
             InboxItem(
                 id=str(uuid.uuid4()),
-                title=f"[HIGH] Initiative review: {title[:80]}",
+                title=f"🚨 [RAFE] {title[:70]}",
                 content=content,
                 is_read=False,
-                summary=f"High-risk category: {initiative.category}",
+                summary=f"Escalated: {escalation_reason}",
                 modified_at=datetime.now(timezone.utc),
             )
         )

@@ -1,0 +1,23 @@
+{
+  "to": "programmer",
+  "initiative": "code-review-fixes",
+  "title": "Fix critical issues in orchestrator refactor before merge",
+  "context": "Review of worker.py and orchestrator.py refactor found 6 critical issues blocking integration:\n\n1. C1: engine.py still imports old worker.py instead of worker_manager.py\n2. C2: Code duplication - both worker.py and worker_manager.py exist\n3. C3: Independent DB sessions introduce race condition risk\n4. C4: No tests for new worker modules\n5. C5: No tests for new router modules\n6. C6: Race condition in reflection completion handler\n\nFull review: /Users/lobs/lobs-server/review-notes.md\n\nThe refactor is well-structured but cannot be merged until these are fixed. Risk: DB corruption from race conditions, regression from missing tests.",
+  "acceptance": "- Engine imports worker_manager.py, old worker.py deleted\n- All tests pass with new modules\n- Test coverage ≥80% for worker_manager, worker_gateway, worker_errors\n- Reflection race condition fixed with locking\n- Independent DB session usage documented with clear rationale OR reverted to single-session pattern\n- README updated with refactor notes",
+  "files": [
+    "app/orchestrator/engine.py",
+    "app/orchestrator/worker.py",
+    "app/orchestrator/worker_manager.py",
+    "app/orchestrator/worker_gateway.py",
+    "tests/test_worker_manager.py",
+    "tests/test_worker_gateway.py",
+    "tests/test_orchestrator_admin.py",
+    "tests/test_orchestrator_workers.py",
+    "tests/test_orchestrator_reflections.py"
+  ],
+  "priority": "high",
+  "estimated_hours": 6,
+  "risk_level": "high",
+  "created_by": "reviewer",
+  "created_at": "2026-02-22T17:49:00-05:00"
+}

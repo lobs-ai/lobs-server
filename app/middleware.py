@@ -1,4 +1,4 @@
-"""Middleware for request logging and network access control."""
+"""Middleware for request logging, network access control, and security."""
 
 import logging
 import time
@@ -7,6 +7,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 logger = logging.getLogger("app.http")
+security_logger = logging.getLogger("app.security")
 
 
 def _is_allowed_ip(ip: str) -> bool:
@@ -72,3 +73,41 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
                 f"500 {duration_ms}ms{token_hint} error={e}"
             )
             raise
+
+
+class PayloadSizeLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Reject requests with body size exceeding max_bytes.
+    
+    Security control: Prevents DoS attacks via oversized payloads.
+    Particularly important for webhook endpoints accepting external input.
+    """
+    
+    def __init__(self, app, max_bytes: int = 1_048_576):  # 1MB default
+        super().__init__(app)
+        self.max_bytes = max_bytes
+    
+    async def dispatch(self, request: Request, call_next):
+        """Check Content-Length before reading body."""
+        content_length = request.headers.get("content-length")
+        
+        if content_length:
+            try:
+                size = int(content_length)
+                if size > self.max_bytes:
+                    client_ip = request.client.host if request.client else "unknown"
+                    security_logger.warning(
+                        f"Rejected oversized request: {size} bytes "
+                        f"(limit: {self.max_bytes}) from {client_ip} "
+                        f"to {request.url.path}"
+                    )
+                    return JSONResponse(
+                        {"detail": "Payload too large"},
+                        status_code=413
+                    )
+            except ValueError:
+                # Invalid Content-Length header - let it through,
+                # will fail at JSON parsing stage
+                pass
+        
+        return await call_next(request)

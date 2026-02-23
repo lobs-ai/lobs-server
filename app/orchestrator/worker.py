@@ -80,7 +80,7 @@ def classify_error_type(error_message: str, response_data: dict | None = None) -
             return "rate_limit"
         if status in (401, 403) or any(k in error_code for k in ("unauthorized", "forbidden", "auth")):
             return "auth_error"
-        if status >= 500 or any(k in error_code for k in ("server_error", "internal_error", "service_unavailable")):
+        if (status is not None and status >= 500) or any(k in error_code for k in ("server_error", "internal_error", "service_unavailable")):
             return "server_error"
     
     # Pattern matching on error message
@@ -1077,6 +1077,63 @@ class WorkerManager:
         # Mark agent idle
         await AgentTracker(self.db).mark_idle(agent_type)
 
+    async def _terminate_session(self, session_key: str, reason: str) -> bool:
+        """
+        Terminate a session via Gateway API.
+        
+        Attempts to gracefully terminate the session using sessions_kill.
+        Returns True if termination was successful or the session is already gone.
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_kill",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-kill-{uuid.uuid4().hex[:8]}",
+                        "args": {
+                            "sessionKey": session_key,
+                            "reason": reason,
+                        }
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                
+                data = await resp.json()
+                
+                if data.get("ok"):
+                    logger.info(
+                        "[GATEWAY] Session terminated successfully: %s (reason: %s)",
+                        session_key, reason
+                    )
+                    return True
+                else:
+                    # Session might already be gone or API doesn't support sessions_kill
+                    error = data.get("error", {})
+                    error_msg = error.get("message", str(data))
+                    
+                    # If session not found, treat as success (already terminated)
+                    if "not found" in error_msg.lower() or "unknown session" in error_msg.lower():
+                        logger.info(
+                            "[GATEWAY] Session already terminated: %s",
+                            session_key
+                        )
+                        return True
+                    
+                    logger.warning(
+                        "[GATEWAY] Failed to terminate session %s: %s",
+                        session_key, error_msg
+                    )
+                    return False
+                    
+        except Exception as e:
+            logger.warning(
+                "[GATEWAY] Error terminating session %s: %s",
+                session_key, e
+            )
+            return False
+
     async def _kill_worker(self, worker_id: str, reason: str) -> None:
         """Kill a worker session via Gateway API."""
         worker_info = self.active_workers.get(worker_id)
@@ -1085,8 +1142,21 @@ class WorkerManager:
 
         logger.warning(f"[WORKER] Killing worker {worker_id} (reason={reason})")
 
-        # TODO: Implement session termination via Gateway API if available
-        # For now, just handle as failed completion
+        # Attempt to terminate the session gracefully
+        terminated = await self._terminate_session(
+            worker_info.child_session_key,
+            reason=reason
+        )
+        
+        if terminated:
+            logger.info(f"[WORKER] Session terminated for worker {worker_id}")
+        else:
+            logger.warning(
+                f"[WORKER] Could not terminate session for {worker_id}, "
+                f"marking as failed anyway"
+            )
+
+        # Handle as failed completion
         await self._handle_worker_completion(
             worker_id=worker_id,
             worker_info=worker_info,

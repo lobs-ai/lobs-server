@@ -1,0 +1,423 @@
+#!/usr/bin/env python3
+"""
+Code Quality Metrics Collection Script
+
+Collects and reports on key quality metrics:
+- Test coverage %
+- Linter violations by severity
+- Type hint coverage %
+- Cyclomatic complexity hotspots
+- Module-level summaries
+
+Usage:
+    ./bin/quality-metrics              # Run all checks and show summary
+    ./bin/quality-metrics --json       # Output JSON for tracking
+    ./bin/quality-metrics --baseline   # Save current metrics as baseline
+    ./bin/quality-metrics --compare    # Compare against baseline
+"""
+
+import argparse
+import json
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+# Project paths
+PROJECT_ROOT = Path(__file__).parent.parent
+APP_DIR = PROJECT_ROOT / "app"
+TESTS_DIR = PROJECT_ROOT / "tests"
+METRICS_DIR = PROJECT_ROOT / "metrics"
+BASELINE_FILE = METRICS_DIR / "baseline.json"
+
+
+def run_command(cmd: list[str], capture_output: bool = True) -> subprocess.CompletedProcess:
+    """Run a shell command and return the result."""
+    return subprocess.run(
+        cmd,
+        cwd=PROJECT_ROOT,
+        capture_output=capture_output,
+        text=True,
+        check=False,
+    )
+
+
+def collect_test_coverage() -> dict[str, Any]:
+    """Collect test coverage metrics using pytest-cov."""
+    print("📊 Collecting test coverage...")
+    
+    # Run pytest with coverage
+    result = run_command([
+        "pytest",
+        "--cov=app",
+        "--cov-report=json",
+        "--cov-report=term-missing",
+        "-q",
+    ])
+    
+    # Read coverage.json
+    coverage_file = PROJECT_ROOT / "coverage.json"
+    if not coverage_file.exists():
+        return {
+            "overall_percent": 0.0,
+            "files_covered": 0,
+            "lines_covered": 0,
+            "lines_total": 0,
+            "error": "Coverage report not generated",
+        }
+    
+    with open(coverage_file) as f:
+        coverage_data = json.load(f)
+    
+    totals = coverage_data.get("totals", {})
+    
+    return {
+        "overall_percent": round(totals.get("percent_covered", 0.0), 2),
+        "lines_covered": totals.get("covered_lines", 0),
+        "lines_total": totals.get("num_statements", 0),
+        "lines_missing": totals.get("missing_lines", 0),
+        "files_covered": len(coverage_data.get("files", {})),
+        "branches_covered": totals.get("covered_branches", 0),
+        "branches_total": totals.get("num_branches", 0),
+    }
+
+
+def collect_linter_violations() -> dict[str, Any]:
+    """Collect linter violations using ruff."""
+    print("🔍 Running linter (ruff)...")
+    
+    result = run_command([
+        "ruff",
+        "check",
+        "app",
+        "tests",
+        "--output-format=json",
+    ])
+    
+    if not result.stdout:
+        return {
+            "total_violations": 0,
+            "by_severity": {},
+            "by_category": {},
+            "files_with_issues": 0,
+        }
+    
+    try:
+        violations = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse ruff output"}
+    
+    # Count by severity and category
+    by_severity = {}
+    by_category = {}
+    files_with_issues = set()
+    
+    for violation in violations:
+        # Ruff doesn't have severity levels like pylint, but we can categorize by code
+        code = violation.get("code", "UNKNOWN")
+        filename = violation.get("filename", "")
+        
+        # Map ruff codes to severity levels
+        if code.startswith("E9") or code.startswith("F"):
+            severity = "error"
+        elif code.startswith("W") or code.startswith("E"):
+            severity = "warning"
+        else:
+            severity = "info"
+        
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        by_category[code] = by_category.get(code, 0) + 1
+        
+        if filename:
+            files_with_issues.add(filename)
+    
+    return {
+        "total_violations": len(violations),
+        "by_severity": by_severity,
+        "by_category": by_category,
+        "files_with_issues": len(files_with_issues),
+        "top_violations": sorted(
+            by_category.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:10],
+    }
+
+
+def collect_type_coverage() -> dict[str, Any]:
+    """Collect type hint coverage using mypy."""
+    print("🔤 Checking type coverage (mypy)...")
+    
+    result = run_command([
+        "mypy",
+        "app",
+        "--ignore-missing-imports",
+        "--no-error-summary",
+    ])
+    
+    # Parse mypy output to count type errors
+    lines = result.stdout.split("\n") if result.stdout else []
+    error_lines = [l for l in lines if ": error:" in l]
+    
+    # Count Python files in app/
+    py_files = list(APP_DIR.rglob("*.py"))
+    total_files = len(py_files)
+    
+    # Estimate type coverage (inverse of error density)
+    # This is approximate; mypy doesn't provide direct coverage metrics
+    errors = len(error_lines)
+    
+    # Files with type errors
+    files_with_errors = set()
+    for line in error_lines:
+        if ":" in line:
+            file_path = line.split(":")[0]
+            files_with_errors.add(file_path)
+    
+    typed_files = total_files - len(files_with_errors)
+    type_coverage = (typed_files / total_files * 100) if total_files > 0 else 0
+    
+    return {
+        "type_coverage_percent": round(type_coverage, 2),
+        "total_files": total_files,
+        "files_with_type_errors": len(files_with_errors),
+        "total_type_errors": errors,
+        "files_fully_typed": typed_files,
+    }
+
+
+def collect_complexity_metrics() -> dict[str, Any]:
+    """Collect cyclomatic complexity metrics using radon."""
+    print("🔄 Analyzing complexity (radon)...")
+    
+    # Radon cyclomatic complexity
+    result = run_command([
+        "radon",
+        "cc",
+        "app",
+        "-j",
+        "-a",
+    ])
+    
+    if not result.stdout:
+        return {"error": "No complexity data"}
+    
+    try:
+        complexity_data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {"error": "Failed to parse radon output"}
+    
+    # Find hotspots (complexity > 10)
+    hotspots = []
+    total_functions = 0
+    complexity_sum = 0
+    
+    for filename, functions in complexity_data.items():
+        for func in functions:
+            if func["type"] in ("function", "method"):
+                total_functions += 1
+                complexity = func.get("complexity", 0)
+                complexity_sum += complexity
+                
+                if complexity > 10:
+                    hotspots.append({
+                        "file": filename,
+                        "function": func.get("name", "unknown"),
+                        "complexity": complexity,
+                        "line": func.get("lineno", 0),
+                    })
+    
+    avg_complexity = (complexity_sum / total_functions) if total_functions > 0 else 0
+    
+    hotspots.sort(key=lambda x: x["complexity"], reverse=True)
+    
+    return {
+        "average_complexity": round(avg_complexity, 2),
+        "total_functions": total_functions,
+        "hotspots_count": len(hotspots),
+        "hotspots": hotspots[:20],  # Top 20 most complex
+    }
+
+
+def collect_all_metrics() -> dict[str, Any]:
+    """Collect all quality metrics."""
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "coverage": collect_test_coverage(),
+        "linting": collect_linter_violations(),
+        "typing": collect_type_coverage(),
+        "complexity": collect_complexity_metrics(),
+    }
+
+
+def save_baseline(metrics: dict[str, Any]) -> None:
+    """Save metrics as baseline for future comparison."""
+    METRICS_DIR.mkdir(exist_ok=True)
+    
+    with open(BASELINE_FILE, "w") as f:
+        json.dump(metrics, f, indent=2)
+    
+    print(f"\n✅ Baseline saved to {BASELINE_FILE}")
+
+
+def load_baseline() -> dict[str, Any] | None:
+    """Load baseline metrics if they exist."""
+    if not BASELINE_FILE.exists():
+        return None
+    
+    with open(BASELINE_FILE) as f:
+        return json.load(f)
+
+
+def compare_metrics(current: dict[str, Any], baseline: dict[str, Any]) -> None:
+    """Compare current metrics against baseline."""
+    print("\n📊 Comparison with Baseline")
+    print("=" * 60)
+    
+    # Coverage comparison
+    curr_cov = current["coverage"]["overall_percent"]
+    base_cov = baseline["coverage"]["overall_percent"]
+    cov_diff = curr_cov - base_cov
+    cov_symbol = "🔺" if cov_diff > 0 else "🔻" if cov_diff < 0 else "➡️"
+    
+    print(f"\nTest Coverage: {curr_cov}% {cov_symbol} ({cov_diff:+.2f}%)")
+    print(f"  Baseline: {base_cov}%")
+    
+    # Linting comparison
+    curr_violations = current["linting"]["total_violations"]
+    base_violations = baseline["linting"]["total_violations"]
+    violations_diff = curr_violations - base_violations
+    violations_symbol = "🔻" if violations_diff < 0 else "🔺" if violations_diff > 0 else "➡️"
+    
+    print(f"\nLinter Violations: {curr_violations} {violations_symbol} ({violations_diff:+d})")
+    print(f"  Baseline: {base_violations}")
+    
+    # Type coverage comparison
+    curr_type = current["typing"]["type_coverage_percent"]
+    base_type = baseline["typing"]["type_coverage_percent"]
+    type_diff = curr_type - base_type
+    type_symbol = "🔺" if type_diff > 0 else "🔻" if type_diff < 0 else "➡️"
+    
+    print(f"\nType Coverage: {curr_type}% {type_symbol} ({type_diff:+.2f}%)")
+    print(f"  Baseline: {base_type}%")
+    
+    # Complexity comparison
+    curr_complexity = current["complexity"]["average_complexity"]
+    base_complexity = baseline["complexity"]["average_complexity"]
+    complexity_diff = curr_complexity - base_complexity
+    complexity_symbol = "🔻" if complexity_diff < 0 else "🔺" if complexity_diff > 0 else "➡️"
+    
+    print(f"\nAverage Complexity: {curr_complexity} {complexity_symbol} ({complexity_diff:+.2f})")
+    print(f"  Baseline: {base_complexity}")
+    
+    print("\n" + "=" * 60)
+
+
+def print_summary(metrics: dict[str, Any]) -> None:
+    """Print a human-readable summary of metrics."""
+    print("\n" + "=" * 60)
+    print("📊 CODE QUALITY METRICS SUMMARY")
+    print("=" * 60)
+    
+    # Coverage
+    coverage = metrics["coverage"]
+    print(f"\n🧪 TEST COVERAGE")
+    print(f"  Overall: {coverage['overall_percent']}%")
+    print(f"  Lines: {coverage['lines_covered']}/{coverage['lines_total']}")
+    print(f"  Files: {coverage['files_covered']}")
+    
+    # Linting
+    linting = metrics["linting"]
+    print(f"\n🔍 LINTER VIOLATIONS")
+    print(f"  Total: {linting['total_violations']}")
+    if linting.get("by_severity"):
+        for severity, count in linting["by_severity"].items():
+            print(f"    {severity}: {count}")
+    print(f"  Files with issues: {linting['files_with_issues']}")
+    
+    if linting.get("top_violations"):
+        print(f"\n  Top violations:")
+        for code, count in linting["top_violations"][:5]:
+            print(f"    {code}: {count}")
+    
+    # Type coverage
+    typing = metrics["typing"]
+    print(f"\n🔤 TYPE COVERAGE")
+    print(f"  Estimated coverage: {typing['type_coverage_percent']}%")
+    print(f"  Files fully typed: {typing['files_fully_typed']}/{typing['total_files']}")
+    print(f"  Type errors: {typing['total_type_errors']}")
+    
+    # Complexity
+    complexity = metrics["complexity"]
+    print(f"\n🔄 COMPLEXITY METRICS")
+    print(f"  Average complexity: {complexity['average_complexity']}")
+    print(f"  Total functions: {complexity['total_functions']}")
+    print(f"  Hotspots (>10): {complexity['hotspots_count']}")
+    
+    if complexity.get("hotspots"):
+        print(f"\n  Top 5 complexity hotspots:")
+        for hotspot in complexity["hotspots"][:5]:
+            print(f"    {hotspot['function']} ({hotspot['file']}):")
+            print(f"      Complexity: {hotspot['complexity']}, Line: {hotspot['line']}")
+    
+    print("\n" + "=" * 60)
+    print(f"Generated: {metrics['timestamp']}")
+    print("=" * 60 + "\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Collect code quality metrics")
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output metrics as JSON",
+    )
+    parser.add_argument(
+        "--baseline",
+        action="store_true",
+        help="Save current metrics as baseline",
+    )
+    parser.add_argument(
+        "--compare",
+        action="store_true",
+        help="Compare against baseline",
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help="Output file for JSON (implies --json)",
+    )
+    
+    args = parser.parse_args()
+    
+    # Collect metrics
+    metrics = collect_all_metrics()
+    
+    # Handle output
+    if args.baseline:
+        save_baseline(metrics)
+    
+    if args.compare:
+        baseline = load_baseline()
+        if baseline:
+            compare_metrics(metrics, baseline)
+        else:
+            print("⚠️  No baseline found. Run with --baseline first.")
+    
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"✅ Metrics saved to {output_path}")
+    elif args.json:
+        print(json.dumps(metrics, indent=2))
+    else:
+        print_summary(metrics)
+    
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
