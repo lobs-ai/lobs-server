@@ -19,7 +19,7 @@ async def list_inbox_items(
     db: AsyncSession = Depends(get_db)
 ) -> list[InboxItem]:
     """List inbox items with pagination."""
-    query = select(InboxItemModel).offset(offset).limit(min(limit, settings.MAX_LIMIT))
+    query = select(InboxItemModel).order_by(InboxItemModel.modified_at.desc()).offset(offset).limit(min(limit, settings.MAX_LIMIT))
     result = await db.execute(query)
     items = result.scalars().all()
     return [InboxItem.model_validate(i) for i in items]
