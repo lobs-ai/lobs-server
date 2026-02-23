@@ -1,1 +1,1 @@
-Diagnosed d50b583b failure: deleted transcript/no assistant response plus DB-lock persistence fragility. Recommended modify+retry with constrained run and worker hardening fixes.
+Diagnosed task 186a9af5 failure as orchestrator session-lifecycle issue (Session not found after 5m fallback); wrote remediation + retry plan in review-notes.md.
