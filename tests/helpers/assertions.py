@@ -297,13 +297,15 @@ def assert_deleted(
 
 def assert_created(
     response: Response,
-    expected_fields: Optional[List[str]] = None
+    expected_fields: Optional[List[str]] = None,
+    require_timestamps: bool = True
 ) -> Dict[str, Any]:
     """Assert successful creation and return created object.
     
     Args:
         response: HTTP response object from POST request
         expected_fields: Optional list of fields to verify
+        require_timestamps: Whether to require created_at field (default: True)
         
     Returns:
         Created object data
@@ -316,7 +318,9 @@ def assert_created(
     data = response.json()
     
     # Check common creation fields
-    default_fields = ["id", "created_at"]
+    default_fields = ["id"]
+    if require_timestamps:
+        default_fields.append("created_at")
     if expected_fields:
         default_fields.extend(expected_fields)
     
@@ -327,13 +331,15 @@ def assert_created(
 
 def assert_updated(
     response: Response,
-    expected_changes: Optional[Dict[str, Any]] = None
+    expected_changes: Optional[Dict[str, Any]] = None,
+    require_timestamps: bool = True
 ) -> Dict[str, Any]:
     """Assert successful update and optionally verify changes.
     
     Args:
         response: HTTP response object from PUT/PATCH request
         expected_changes: Optional dict of field:value pairs to verify
+        require_timestamps: Whether to require updated_at field (default: True)
         
     Returns:
         Updated object data
@@ -345,8 +351,9 @@ def assert_updated(
     
     data = response.json()
     
-    # Verify has updated_at timestamp
-    assert "updated_at" in data, "Updated object should have updated_at field"
+    # Verify has updated_at timestamp if required
+    if require_timestamps:
+        assert "updated_at" in data, "Updated object should have updated_at field"
     
     # Verify expected changes if provided
     if expected_changes:

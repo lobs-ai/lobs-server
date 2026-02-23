@@ -131,9 +131,19 @@ def sync_test_token():
 def sync_client_with_token(sync_test_token):
     """Provide a synchronous TestClient for WebSocket testing."""
     from starlette.testclient import TestClient
+    from app.auth import require_auth
+    from app.models import APIToken
     
-    # Override the database dependency
+    # Create a mock token object for the auth dependency
+    mock_token = APIToken(
+        token=sync_test_token,
+        name="test-token",
+        active=True
+    )
+    
+    # Override dependencies
     app.dependency_overrides[get_db] = get_test_db
+    app.dependency_overrides[require_auth] = lambda: mock_token
     
     # Disable orchestrator for tests
     settings.ORCHESTRATOR_ENABLED = False

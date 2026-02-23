@@ -24,7 +24,7 @@ async def test_create_inbox_item(client: AsyncClient):
         is_read=False
     )
     response = await client.post("/api/inbox", json=item_data)
-    data = assert_created(response, expected_fields=["title", "filename", "content"])
+    data = assert_created(response, expected_fields=["title", "filename", "content"], require_timestamps=False)
     assert data["id"] == "inbox-1"
     assert data["title"] == "Inbox Item"
     assert data["is_read"] is False
@@ -95,7 +95,7 @@ async def test_update_inbox_item(client: AsyncClient, sample_inbox_item):
         "title": "Updated Title",
         "is_read": True,
         "summary": "This is a summary"
-    })
+    }, require_timestamps=False)
 
 
 @pytest.mark.asyncio

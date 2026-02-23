@@ -1,350 +1,389 @@
-# Error Handling Review — Orchestrator Modules
+# Memory Retrieval Quality Audit
 
-**Review Date:** 2026-02-23  
+**Date:** 2026-02-23  
 **Reviewer:** reviewer  
-**Task:** Audit error handling in refactored server modules  
-**Files Reviewed:**
-- `app/orchestrator/worker.py`
-- `app/orchestrator/monitor_enhanced.py`
-- `app/orchestrator/sweep_arbitrator.py`
-- `app/orchestrator/monitor.py`
+**Task:** Audit memory retrieval quality  
+**Database:** 253 memories across multiple agents
 
 ---
 
-## Summary
+## Executive Summary
 
-Reviewed error handling patterns across recently refactored orchestrator modules. Found **5 high-priority issues** related to swallowed errors, missing context, and inconsistent error recovery patterns. Overall code quality is good with comprehensive logging, but several patterns need hardening for production reliability.
+The memory search implementation uses **simple substring matching (ILIKE)** which provides adequate results for basic single-term queries (70% success rate) but fails completely on multi-word phrases (20% failure rate). The system shows **NO semantic understanding** and cannot match queries where words are separated or appear in different order.
 
----
-
-## 🔴 Critical Issues (2)
-
-### 1. Bare `except Exception` without error type specification — swallows critical errors
-
-**Location:** `worker.py:110-111`
-
-```python
-except Exception as e:
-    logger.warning("[USAGE] Skipping usage event due to DB/logging error: %s", e)
-    try:
-        await db.rollback()
-    except Exception:
-        pass  # ❌ Swallowed silently
-```
-
-**Issue:** The nested `except Exception: pass` swallows all errors during rollback, including `CancelledError`, `KeyboardInterrupt` (via BaseException), and critical DB failures. This makes debugging impossible when rollback fails.
-
-**Impact:** Critical DB state corruption could be masked. If rollback fails due to connection issues, the system will continue with potentially inconsistent state.
-
-**Fix Required:**
-```python
-except Exception as e:
-    logger.warning("[USAGE] Skipping usage event due to DB/logging error: %s", e)
-    try:
-        await db.rollback()
-    except Exception as rollback_err:
-        logger.error("[USAGE] Rollback failed during error recovery: %s", rollback_err, exc_info=True)
-        # Re-raise if it's a critical error type
-        if isinstance(rollback_err, (asyncio.CancelledError, KeyboardInterrupt)):
-            raise
-```
-
-**Priority:** 🔴 **High** — Can mask critical DB failures
+**Overall Metrics:**
+- ✅ **7/10 queries** performed well (≥50% precision)
+- ⚠️ **1/10 queries** had poor relevance (0% precision)
+- ❌ **2/10 queries** returned zero results despite relevant content existing
+- 📊 Average precision@10: **68%**
 
 ---
 
-### 2. Missing error context in DB rollback patterns — hard to diagnose
+## 🔴 Critical Issues
 
-**Locations:**
-- `worker.py:1232-1233`
-- `worker.py:1339-1340`
-- `monitor_enhanced.py:196-197`
-- `monitor_enhanced.py:300-301`
+### 1. Multi-Word Query Failure (Zero Recall)
 
-**Example:** `worker.py:1232-1233`
+**Query:** `"orchestrator task routing"`  
+**Expected:** Memories about orchestrator, task delegation, routing logic  
+**Actual:** 0 results
 
+**Root Cause:** ILIKE requires exact substring match. Query looks for literal string "orchestrator task routing" but content contains these words separated:
+- "orchestrator handles task assignment"  
+- "routing tasks to agents"  
+- "task orchestrator logic"
+
+**Impact:** Users cannot find relevant information using natural multi-word queries. This is a **fundamental usability issue**.
+
+**Evidence:**
 ```python
-except Exception as e:
-    logger.error(f"Failed to update worker status: {e}", exc_info=True)
-    await self.db.rollback()  # ❌ No error handling
-```
-
-**Issue:** DB rollback operations are called without error handling. If rollback fails, the exception propagates up and crashes the calling code without proper cleanup. No context about what operation was being rolled back.
-
-**Impact:** Unhandled rollback failures can crash the orchestrator engine. When reviewing logs, it's unclear which task/worker/project the rollback was for.
-
-**Fix Required:**
-```python
-except Exception as e:
-    logger.error(
-        f"Failed to update worker status (worker={worker_id}, task={task_id}): {e}",
-        exc_info=True
+# Current implementation (app/routers/memories.py:95-98)
+query = select(MemoryModel).where(
+    or_(
+        MemoryModel.title.ilike(f"%{q}%"),
+        MemoryModel.content.ilike(f"%{q}%")
     )
-    try:
-        await self.db.rollback()
-    except Exception as rollback_err:
-        logger.critical(
-            f"DB rollback failed after worker status update failure "
-            f"(worker={worker_id}, task={task_id}): {rollback_err}",
-            exc_info=True
-        )
-```
-
-**Priority:** 🔴 **High** — Can crash engine loop, missing diagnostic context
-
----
-
-## 🟡 Important Issues (3)
-
-### 3. Inconsistent error handling in session status checks
-
-**Location:** `worker.py:784-786`
-
-```python
-except Exception as e:
-    logger.warning("[WORKER] Error checking session status: %s", e)
-    return None  # ❌ Silently returns None, caller must handle
-```
-
-**Issue:** Error is logged as warning but returns `None`, forcing caller to check for both "session not completed" and "error checking status". This pattern is inconsistent with other methods that raise exceptions on critical failures.
-
-**Comparison with similar pattern in `_get_session_history` (line 812-814):**
-```python
-except Exception as e:
-    logger.debug("[WORKER] Error querying Gateway sessions_history: %s", e)
-    return None  # ✅ OK for fallback, but inconsistent logging level
-```
-
-**Issue:** Both methods have the same error handling but use different log levels (`warning` vs `debug`). It's unclear which failures are expected vs. unexpected.
-
-**Impact:** Inconsistent error semantics make it hard to distinguish between "operation not possible" vs. "operation failed". Callers must defensively handle `None` returns even for unexpected errors.
-
-**Fix Required:**
-1. Document which errors are expected (use `logger.debug`)
-2. Document which errors are unexpected (use `logger.warning` or `logger.error`)
-3. Consider raising exceptions for unexpected errors rather than returning `None`
-4. Add docstring to clarify: "Returns None if status cannot be determined (expected for recently spawned sessions)"
-
-**Example fix:**
-```python
-async def _check_session_status(...) -> Optional[dict[str, Any]]:
-    """Check if a worker session has completed.
-    
-    Returns:
-        Status dict if check succeeded, None if temporary check failure
-        (e.g., transcript not yet written, network timeout).
-    
-    Raises:
-        RuntimeError: If session is permanently lost or Gateway is unreachable.
-    """
-    try:
-        # ... existing logic ...
-    except aiohttp.ClientError as e:
-        # Network errors are temporary, return None
-        logger.debug("[WORKER] Gateway unreachable during status check: %s", e)
-        return None
-    except Exception as e:
-        # Unexpected errors should be visible
-        logger.error("[WORKER] Unexpected error checking session status: %s", e, exc_info=True)
-        return None
-```
-
-**Priority:** 🟡 **Medium** — Inconsistent error semantics, hard to debug
-
----
-
-### 4. Nested exception handlers without context propagation
-
-**Location:** `worker.py:1615-1633` (in `_process_sweep_review_results`)
-
-```python
-for d in decisions:
-    # ... initiative processing ...
-    try:
-        result = await engine.decide(...)
-        # ... success handling ...
-    except Exception as e:
-        logger.error(
-            "[SWEEP_REVIEW] Failed to process initiative %s: %s",
-            initiative_id[:8], e, exc_info=True
-        )
-        # ❌ Loop continues, error swallowed
-
-# ... after loop ...
-try:
-    await self.db.commit()
-except Exception as e:
-    logger.error("[SWEEP_REVIEW] Failed to process sweep review results: %s", e, exc_info=True)
-    await self.db.rollback()
-```
-
-**Issue:** Individual initiative processing errors are logged but swallowed — loop continues. The final `commit()` might fail due to earlier errors, but the error message doesn't indicate which initiative caused the issue.
-
-**Impact:** Partial batch processing can leave DB in inconsistent state. If 3 out of 10 initiatives fail, the final commit will fail, but it's unclear why. No way to track which initiatives succeeded vs. failed.
-
-**Fix Required:**
-```python
-failed_initiatives = []
-for d in decisions:
-    try:
-        result = await engine.decide(...)
-        # ... success handling ...
-    except Exception as e:
-        failed_initiatives.append({
-            "initiative_id": initiative_id,
-            "error": str(e),
-        })
-        logger.error(
-            "[SWEEP_REVIEW] Failed to process initiative %s: %s",
-            initiative_id[:8], e, exc_info=True
-        )
-
-# After loop, report failures
-if failed_initiatives:
-    logger.warning(
-        "[SWEEP_REVIEW] %d initiative(s) failed to process: %s",
-        len(failed_initiatives),
-        [f["initiative_id"][:8] for f in failed_initiatives]
-    )
-
-try:
-    await self.db.commit()
-except Exception as e:
-    logger.error(
-        "[SWEEP_REVIEW] Failed to commit batch (processed=%d, failed=%d): %s",
-        processed, len(failed_initiatives), e, exc_info=True
-    )
-    await self.db.rollback()
-```
-
-**Priority:** 🟡 **Medium** — Partial failure handling, missing diagnostic context
-
----
-
-### 5. Missing timezone awareness checks in monitor time calculations
-
-**Location:** `monitor_enhanced.py:40-48`, `monitor.py:40-48`
-
-```python
-now = datetime.now(timezone.utc)
-stuck_cutoff = now - timedelta(seconds=self.stuck_timeout)
-
-# ... query tasks ...
-
-for task in tasks:
-    updated_at = task.updated_at.replace(tzinfo=timezone.utc) if task.updated_at.tzinfo is None else task.updated_at
-    age_seconds = (now - updated_at).total_seconds()  # ⚠️ Can crash if timezone-naive
-```
-
-**Issue:** Code assumes `task.updated_at` might be timezone-naive and defensively adds UTC timezone. However, this is done **after** the query, not during comparison. If SQLAlchemy returns naive datetimes and the `.replace()` happens too late, the subtraction will crash.
-
-**Impact:** Orchestrator engine will crash with `TypeError: can't subtract offset-naive and offset-aware datetimes` if the DB migration state is inconsistent (some tables have timezone-aware columns, some don't).
-
-**Fix Required:**
-
-1. **Immediate fix** — move timezone normalization before calculation:
-```python
-for task in tasks:
-    # Normalize timezone BEFORE any operations
-    if task.updated_at is None:
-        continue
-    updated_at = (
-        task.updated_at.replace(tzinfo=timezone.utc)
-        if task.updated_at.tzinfo is None
-        else task.updated_at
-    )
-    age_seconds = (now - updated_at).total_seconds()
-```
-
-2. **Long-term fix** — add DB-level timezone validation:
-```python
-# In models.py, ensure all datetime columns use timezone-aware types
-updated_at: Mapped[datetime] = mapped_column(
-    DateTime(timezone=True),  # Enforce timezone-aware
-    default=lambda: datetime.now(timezone.utc),
-    nullable=False,
 )
 ```
 
-**Priority:** 🟡 **Medium** — Can crash monitor, but rare (depends on DB state)
+This looks for exact substring `%orchestrator task routing%` which doesn't exist.
 
 ---
 
-## 🔵 Suggestions (minor improvements)
+### 2. Recent Feature Not Discoverable
 
-### Additional observations:
+**Query:** `"learning feedback outcome"`  
+**Expected:** Memories about the agent learning system (documented in ARCHITECTURE.md as recent change)  
+**Actual:** 0 results
 
-1. **Good:** Comprehensive logging with structured log keys (`[WORKER]`, `[MONITOR]`, `[SWEEP]`)
-2. **Good:** Most error handlers include `exc_info=True` for stack traces
-3. **Good:** DB rollback is called in most error paths (but see issue #2)
-4. **Suggestion:** Consider using custom exception types for different failure modes:
-   - `WorkerSpawnError` — failed to spawn worker
-   - `SessionStatusError` — failed to check session status
-   - `DBRollbackError` — rollback failed during recovery
+**Root Cause:** Same substring matching limitation. Even though the learning system is documented, the exact phrase isn't used.
 
-5. **Suggestion:** Add error counters/metrics for monitoring:
-   ```python
-   # Track error rates for alerting
-   self.error_counter = {"spawn_failures": 0, "session_check_failures": 0}
-   ```
-
-6. **Suggestion:** In `worker.py:_spawn_session`, the error type classification is good (`classify_error_type`), but results are only used for provider health tracking. Consider exposing error types in API responses for better client-side error handling.
+**Impact:** **New architectural features are not discoverable** through search, forcing users to manually browse or rely on external documentation.
 
 ---
 
-## Test Coverage Gaps
+## 🟡 Important Issues
 
-**Missing tests for error scenarios:**
-1. ❌ No tests for DB rollback failures
-2. ❌ No tests for timezone-naive datetime handling in monitor
-3. ❌ No tests for partial batch processing failures in sweep review
-4. ❌ No tests for worker kill scenarios
-5. ❌ No tests for Gateway API failures (rate limits, auth errors)
+### 3. Generic Query Poor Relevance
 
-**Recommendation:** Add integration tests for these failure modes to catch regressions.
+**Query:** `"how to"`  
+**Expected:** Tutorials, guides, procedural documentation  
+**Actual:** 27 results, 0% relevant (0/10 in top 10)
 
----
+**Root Cause:** Over-matching on common phrase "how to" appearing in random contexts:
+- "...clients know **how to** use safely..."  
+- "...overview ✓ **How to** improve SWE-bench..."
 
-## Recommended Actions
+**Impact:** High-frequency phrases pollute results with false positives. **No ranking by relevance** beyond title/content distinction.
 
-**Priority order:**
-
-1. **Fix issue #1** (bare except pass) — 30 minutes
-2. **Fix issue #2** (missing rollback error handling) — 1 hour (affects 4+ locations)
-3. **Fix issue #5** (timezone handling) — 30 minutes
-4. **Fix issue #3** (inconsistent error handling) — 1 hour (requires API design decision)
-5. **Fix issue #4** (nested exception handling) — 45 minutes
-
-**Total estimated effort:** ~4 hours
+**Example False Positive:**
+```
+"...standard tool interface that LLM clients know how to use safely and consistently."
+```
+This matches "how to" but is NOT a tutorial/guide.
 
 ---
 
-## Files Requiring Changes
+### 4. No Semantic Understanding
 
-| File | Lines to Change | Estimated Time |
-|------|-----------------|----------------|
-| `worker.py` | 110-111, 1232-1233, 1339-1340, 784-786, 1615-1633 | 2.5 hours |
-| `monitor_enhanced.py` | 40-48, 196-197, 300-301 | 1 hour |
-| `monitor.py` | 40-48 | 15 minutes |
-| `sweep_arbitrator.py` | (minor, no changes required) | — |
+**Observation:** Search cannot match:
+- **Synonyms:** "authentication" won't find "login", "auth", "security"
+- **Related concepts:** "bug" won't find "error", "crash", "failure" (unless explicitly mentioned)
+- **Paraphrased queries:** Different wording of the same concept
+
+**Current workaround:** Users must guess exact terminology used in memories.
+
+---
+
+### 5. Primitive Scoring Algorithm
+
+**Current scoring (app/routers/memories.py:107-111):**
+```python
+score = 0.0
+if query_lower in memory.title.lower():
+    score += 2.0
+if query_lower in memory.content.lower():
+    score += 1.0
+```
+
+**Problems:**
+1. **Binary scoring:** Either matches or doesn't, no partial credit
+2. **No term frequency consideration:** 1 mention = 100 mentions
+3. **No position weighting:** Match at start vs. end treated equally
+4. **No recency bias:** Old memories rank same as new ones
+5. **Ties not broken meaningfully:** Many results have same score
+
+**Evidence:** 17 results for "authentication" all scored 1.0 (tied), order is essentially random among ties.
+
+---
+
+## ✅ What Works Well
+
+### Strong Single-Term Performance
+
+**Queries with 100% precision:**
+- `"authentication"` → 17 results, 10/10 relevant
+- `"API endpoint"` → 22 results, 10/10 relevant
+- `"database migration"` → 3 results, 3/3 relevant
+- `"memory system"` → 9 results, 9/9 relevant
+- `"test coverage"` → 22 results, 10/10 relevant
+
+**Why it works:** Single terms or exact 2-word phrases that appear as-is in content. Substring matching is sufficient for literal matches.
+
+### Good Error Handling
+
+- Empty queries return empty results (correct behavior)
+- Agent filtering works correctly
+- No crashes or exceptions during testing
+
+---
+
+## 📊 Detailed Test Results
+
+| Query | Results | Relevant/10 | Precision | Status |
+|-------|---------|-------------|-----------|--------|
+| authentication | 17 | 10 | 100% | ✅ Good |
+| bug | 72 | 8 | 80% | ✅ Good |
+| API endpoint | 22 | 10 | 100% | ✅ Good |
+| database migration | 3 | 3 | 100% | ✅ Good |
+| **orchestrator task routing** | **0** | **0** | **N/A** | ❌ **Failed** |
+| memory system | 9 | 9 | 100% | ✅ Good |
+| how to | 27 | 0 | 0% | ⚠️ Poor |
+| performance optimization | 2 | 2 | 100% | ✅ Good |
+| test coverage | 22 | 10 | 100% | ✅ Good |
+| **learning feedback outcome** | **0** | **0** | **N/A** | ❌ **Failed** |
+
+---
+
+## 🎯 Recommendations
+
+### Priority 1: Multi-Word Query Support (Critical)
+
+**Problem:** 20% of queries return zero results due to word separation.
+
+**Solutions (pick one):**
+
+#### Option A: Token-Based Search (Quick Fix)
+Split query into tokens, match ANY token:
+```python
+tokens = q.lower().split()
+conditions = []
+for token in tokens:
+    conditions.append(MemoryModel.title.ilike(f"%{token}%"))
+    conditions.append(MemoryModel.content.ilike(f"%{token}%"))
+query = select(MemoryModel).where(or_(*conditions))
+```
+
+**Pros:** Easy to implement, immediate improvement  
+**Cons:** Will over-match, lots of false positives  
+**Effort:** 1-2 hours
+
+#### Option B: SQLite FTS5 (Better Solution)
+Use SQLite's full-text search with `MATCH`:
+```python
+# Requires FTS5 virtual table
+# CREATE VIRTUAL TABLE memories_fts USING fts5(title, content);
+query = "SELECT * FROM memories_fts WHERE memories_fts MATCH ?"
+```
+
+**Pros:** 
+- Built-in ranking (BM25)
+- Handles multi-word queries properly
+- Phrase queries with quotes
+- Boolean operators (AND, OR, NOT)
+
+**Cons:** Requires schema migration, index maintenance  
+**Effort:** 4-8 hours (migration + testing)
+
+#### Option C: Vector/Semantic Search (Future)
+Use embeddings for semantic similarity:
+- Requires embedding model (OpenAI, local Sentence Transformers)
+- Vector database (pgvector, ChromaDB, Qdrant)
+- Async embedding generation
+
+**Pros:** True semantic search, synonym matching  
+**Cons:** Complex infrastructure, cost/latency  
+**Effort:** 2-3 days
+
+**Recommendation:** Start with **Option B (FTS5)** for immediate multi-word support with good ranking. Consider Option C for future semantic capabilities.
+
+---
+
+### Priority 2: Improve Scoring Algorithm (Important)
+
+**Current scoring is too simplistic.** Implement TF-IDF or BM25-style scoring:
+
+```python
+# Pseudo-code for better scoring
+score = 0.0
+
+# Term frequency (multiple mentions = higher score)
+title_matches = title.lower().count(query_lower)
+content_matches = content.lower().count(query_lower)
+
+score += title_matches * 5.0  # Title matches worth more
+score += content_matches * 1.0
+
+# Position bonus (earlier = better)
+first_pos = content.lower().find(query_lower)
+if first_pos >= 0:
+    position_score = 1.0 / (1.0 + first_pos / 1000.0)
+    score += position_score
+
+# Recency bonus (newer = slightly better)
+age_days = (now - memory.updated_at).days
+recency_score = 1.0 / (1.0 + age_days / 30.0)
+score += recency_score
+```
+
+**Effort:** 2-3 hours
+
+---
+
+### Priority 3: Add Query Preprocessing (Quick Win)
+
+Clean and normalize queries:
+```python
+def preprocess_query(q: str) -> str:
+    q = q.strip().lower()
+    q = re.sub(r'\s+', ' ', q)  # Normalize whitespace
+    q = re.sub(r'[^\w\s-]', '', q)  # Remove special chars
+    return q
+```
+
+Add common expansions:
+```python
+SYNONYMS = {
+    "auth": ["authentication", "login", "token"],
+    "bug": ["error", "issue", "problem", "fix"],
+    "api": ["endpoint", "route", "REST"],
+}
+```
+
+**Effort:** 1-2 hours
+
+---
+
+### Priority 4: Add Search Analytics (Monitoring)
+
+Track search quality over time:
+```python
+class SearchLog(Base):
+    query = Column(String)
+    result_count = Column(Integer)
+    clicked_result_id = Column(Integer, nullable=True)
+    timestamp = Column(DateTime)
+```
+
+**Metrics to track:**
+- Zero-result queries (should be <5%)
+- Click-through rate (users finding what they need?)
+- Most common queries (optimize for these)
+
+**Effort:** 2-3 hours
+
+---
+
+## 🔬 Testing Gaps
+
+### Missing Test Coverage
+
+**Current tests (test_memories.py):**
+- ✅ Basic CRUD operations
+- ✅ Search with single terms
+- ✅ Agent filtering
+- ✅ Pagination
+
+**Missing tests:**
+- ❌ Multi-word phrase queries
+- ❌ Search result ranking/scoring
+- ❌ Search relevance (precision/recall)
+- ❌ Query edge cases (special chars, very long queries)
+- ❌ Performance with large result sets
+
+**Recommendation:** Add `test_search_relevance.py` with:
+```python
+@pytest.mark.asyncio
+async def test_multiword_query():
+    """Multi-word queries should match words in any order."""
+    # Create memory with "orchestrator handles task routing"
+    # Query "task routing orchestrator"
+    # Should return the memory
+
+@pytest.mark.asyncio
+async def test_search_ranking():
+    """Results should be ranked by relevance."""
+    # Create 3 memories with different match quality
+    # Verify best match comes first
+```
+
+---
+
+## 💡 Future Enhancements
+
+### 1. Faceted Search
+- Filter by agent, date range, memory_type
+- Sort by date, relevance, length
+
+### 2. Query Suggestions
+- "Did you mean..." for typos
+- "Related searches" based on query patterns
+
+### 3. Search Highlighting
+- Return match positions for highlighting in UI
+- Show multiple snippets per result
+
+### 4. Advanced Syntax
+- Boolean operators: `+required -excluded "exact phrase"`
+- Field-specific: `title:bug agent:programmer`
+- Date filters: `after:2026-02-01`
+
+---
+
+## 📝 Implementation Checklist
+
+If implementing FTS5 (recommended):
+
+- [ ] Create migration script for FTS5 virtual table
+- [ ] Add triggers to keep FTS5 in sync with memories table
+- [ ] Update search endpoint to use FTS5 MATCH
+- [ ] Implement BM25 ranking
+- [ ] Add phrase query support (quotes)
+- [ ] Write integration tests for multi-word queries
+- [ ] Update API documentation
+- [ ] Add search analytics logging
+- [ ] Monitor zero-result rate in production
+
+**Estimated effort:** 1-2 days for full implementation + testing
+
+---
+
+## 🎓 Lessons Learned
+
+1. **Simple substring matching is insufficient** for production search - works for 70% of cases but fails catastrophically on the remaining 30%
+
+2. **Multi-word queries are table stakes** - users expect this to work, it's not an advanced feature
+
+3. **Search is a product feature, not just technical implementation** - requires ranking, relevance tuning, and analytics
+
+4. **SQLite FTS5 is underutilized** - provides excellent full-text search without external dependencies
+
+5. **Test with realistic queries** - single-word tests pass but don't represent actual usage patterns
 
 ---
 
 ## Conclusion
 
-The refactored orchestrator modules have **solid error handling foundations** with comprehensive logging and rollback logic. However, there are **5 high-priority issues** that should be addressed before production deployment:
+The current memory search is **functional for basic single-term queries but inadequate for production use**. The 20% failure rate on multi-word queries and 0% precision on common phrases like "how to" indicate fundamental limitations.
 
-- 2 critical issues (swallowed errors, missing rollback handling)
-- 3 important issues (inconsistent patterns, missing context, timezone bugs)
+**Immediate action required:**
+1. Implement SQLite FTS5 for multi-word query support (1-2 days)
+2. Improve scoring beyond binary title/content matching (2-3 hours)
+3. Add search relevance tests (2-3 hours)
 
-All issues are **fixable in ~4 hours** with targeted changes. No architectural changes required.
+**Without these improvements, users will:**
+- Miss relevant memories due to phrasing differences
+- Get frustrated with zero-result searches
+- Resort to manual browsing or external grep searches
+- Lose confidence in the memory system
 
-**Overall assessment:** ✅ **Good** — Production-ready after fixing the 5 issues identified above.
-
----
-
-**Next Steps:**
-
-1. Create programmer handoffs for the top 5 issues
-2. Add integration tests for error scenarios
-3. Review similar patterns in other orchestrator modules (router, engine, scanner)
+The good news: SQLite FTS5 provides a solid foundation for production-quality search without external dependencies. This is a solvable problem with well-established solutions.
