@@ -1,11 +1,12 @@
-"""Lobs sweep phase: collect agent proposals, filter obvious junk, and use an LLM
-to intelligently review and decide on all remaining initiatives.
+"""Lobs sweep phase: collect agent proposals, filter obvious junk, and route
+all remaining initiatives to the Lobs main session for approval.
 
 Flow:
 1. Server-side first pass: quality filter (too-short, junk), dedup by title+desc
-2. Spawn a single LLM session to review ALL remaining proposals as a batch
-3. Process LLM decisions: approve → create task, defer, reject
-4. Only risk_tier C / truly dangerous items also create Rafe inbox items
+2. Mark all remaining initiatives as 'lobs_review'
+3. Send formatted summary to Lobs main session via Gateway API
+4. Lobs reviews and decides using lobs-api.sh initiatives/batch-decide
+5. High-risk categories also create Rafe inbox items
 """
 
 from __future__ import annotations
@@ -104,7 +105,7 @@ class SweepArbitrator:
                 dup.rationale = (dup.rationale or "") + " | Duplicate initiative"
                 rejected += 1
 
-        # --- Collect remaining proposals for LLM review ---
+        # --- Collect remaining proposals for Lobs main session review ---
         remaining = [i for i in initiatives if i.status == "proposed"]
 
         if not remaining:
@@ -115,40 +116,29 @@ class SweepArbitrator:
             await self.db.commit()
             return {"proposed": len(initiatives), "approved": 0, "deferred": 0, "rejected": rejected}
 
-        # --- Spawn LLM to review all proposals ---
+        # --- Mark all remaining as "lobs_review" ---
         approved = 0
         deferred = 0
 
-        if self.worker_manager is not None:
-            try:
-                await self._spawn_llm_review(remaining, budgets, usage, sweep_id)
-                # Mark all remaining as "lobs_review" — the LLM session will
-                # process them asynchronously via _process_sweep_review_results
-                for initiative in remaining:
-                    initiative.status = "lobs_review"
-            except Exception as e:
-                logger.warning("[SWEEP] Failed to spawn LLM review: %s", e)
-                # Fallback: defer everything so nothing is lost
-                for initiative in remaining:
-                    await self.decision_engine.decide(
-                        initiative,
-                        decision="defer",
-                        decision_summary=f"LLM review spawn failed: {e}",
-                        decided_by="lobs",
-                        sweep_id=sweep_id,
-                    )
-                    deferred += 1
-        else:
-            # No worker manager — defer everything
-            for initiative in remaining:
-                await self.decision_engine.decide(
-                    initiative,
-                    decision="defer",
-                    decision_summary="No worker manager available for LLM review",
-                    decided_by="lobs",
-                    sweep_id=sweep_id,
-                )
-                deferred += 1
+        for initiative in remaining:
+            initiative.status = "lobs_review"
+
+        # --- Send notification to Lobs main session via Gateway API ---
+        notification_sent = False
+        try:
+            await self._notify_lobs_main_session(remaining, budgets, usage, sweep_id)
+            notification_sent = True
+            logger.info(
+                "[SWEEP] Notified Lobs main session of %d pending initiatives",
+                len(remaining)
+            )
+        except Exception as e:
+            logger.warning(
+                "[SWEEP] Failed to notify Lobs main session: %s — initiatives remain as lobs_review",
+                e
+            )
+            # Create fallback inbox item so Lobs knows there are pending reviews
+            await self._create_lobs_review_inbox_item(remaining, sweep_id)
 
         # --- Create high-risk inbox items for Rafe ---
         for initiative in remaining:
@@ -170,105 +160,123 @@ class SweepArbitrator:
         }
 
     # ------------------------------------------------------------------
-    # LLM review
+    # Lobs main session notification
     # ------------------------------------------------------------------
 
-    async def _spawn_llm_review(
+    async def _notify_lobs_main_session(
         self,
         initiatives: list[AgentInitiative],
         budgets: dict[str, int],
         usage: dict[str, int],
         sweep_id: str,
     ) -> None:
-        """Spawn a single LLM session to review all proposals intelligently."""
-        batch = []
-        for i in initiatives:
-            batch.append({
-                "id": i.id,
-                "title": i.title,
-                "description": i.description,
-                "category": i.category,
-                "proposed_by": i.proposed_by_agent,
-                "suggested_owner": i.owner_agent,
-                "estimated_effort": int(i.score) if i.score is not None else None,
-            })
+        """Send a formatted message to Lobs main session listing all pending initiatives."""
+        import aiohttp
+        from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
 
+        # Build initiative summary
         budget_summary = {
             agent: f"{usage.get(agent, 0)}/{limit}"
             for agent, limit in budgets.items()
         }
 
-        prompt = f"""## Initiative Sweep Review — Lobs PM Decision
+        summary_lines = [
+            f"## Initiative Sweep Review — {len(initiatives)} Proposal(s) Pending",
+            "",
+            f"**Sweep ID:** `{sweep_id}`",
+            f"**Daily budgets:** {json.dumps(budget_summary)}",
+            "",
+            "The agent team has proposed the following initiatives from their strategic reflections. Review each and decide:",
+            "- **Approve**: Create a task (use `lobs-api.sh create-task`)",
+            "- **Defer**: Not now, maybe later",
+            "- **Reject**: Not worth doing",
+            "",
+            "**Commands:**",
+            "```bash",
+            "# List all pending initiatives",
+            "~/.openclaw/workspace/scripts/lobs-api.sh initiatives",
+            "",
+            "# Batch-decide after reviewing",
+            "~/.openclaw/workspace/scripts/lobs-api.sh batch-decide",
+            "```",
+            "",
+            "---",
+            "",
+        ]
 
-You are Lobs, the main agent and project manager. You know Rafe's priorities, the active projects, and the system architecture. Use that context to make real decisions about these {len(batch)} initiative proposals from your agent team's reflections.
+        for i, init in enumerate(initiatives, 1):
+            summary_lines.append(f"### {i}. {init.title}")
+            summary_lines.append(f"**ID:** `{init.id}`")
+            summary_lines.append(f"**Proposed by:** {init.proposed_by_agent}")
+            summary_lines.append(f"**Category:** {init.category}")
+            summary_lines.append(f"**Suggested owner:** {init.owner_agent or '(unspecified)'}")
+            summary_lines.append(f"**Risk tier:** {init.risk_tier or 'B'}")
+            if init.score is not None:
+                summary_lines.append(f"**Estimated effort:** {int(init.score)}")
+            summary_lines.append("")
+            summary_lines.append(init.description or "(no description)")
+            summary_lines.append("")
+            summary_lines.append("---")
+            summary_lines.append("")
 
-### Context
-- These proposals come from agents reflecting on their recent work
-- Daily agent budgets (used/limit): {json.dumps(budget_summary)}
-- Sweep ID: {sweep_id}
-- Read your MEMORY.md and project context to inform decisions — you have full access to Rafe's priorities and system state
+        message_text = "\n".join(summary_lines)
 
-### Your job
-1. Evaluate each proposal against what you know about current priorities, active work, and what Rafe actually cares about
-2. Check for overlapping or contradictory proposals across agents
-3. Decide: **approve** (create a task), **defer** (not now but maybe later), or **reject** (not worth doing)
-4. For approved items, assign the best agent and set priority
+        # Send via Gateway sessions_send to main session
+        async with aiohttp.ClientSession() as session:
+            caller_key = f"{GATEWAY_SESSION_KEY}-sweep-notify-{sweep_id[:8]}"
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={
+                    "tool": "sessions_send",
+                    "sessionKey": caller_key,
+                    "args": {
+                        "sessionKey": "agent:main:main",
+                        "message": message_text,
+                    }
+                },
+                timeout=aiohttp.ClientTimeout(total=30)
+            )
 
-### Decision guidelines
-- Be selective. Approve only proposals that deliver clear, concrete value aligned with current priorities.
-- Reject vague, speculative, or low-impact proposals. Reject things that duplicate existing work.
-- Defer things that are reasonable but not urgent or would exceed budget.
-- Respect daily budgets — don't approve more work for an agent than their remaining budget allows.
-- High-risk categories (architecture changes, destructive operations, cross-project migrations, agent recruitment) should be deferred for human review, not approved.
-- Think about what Rafe would want — he values correctness, leverage, and systems that work autonomously. Don't approve busywork.
+            data = await resp.json()
 
-### Proposals
-{json.dumps(batch, indent=2)}
+            if not data.get("ok"):
+                raise RuntimeError(f"Gateway sessions_send failed: {data}")
 
-### Output format
-Return STRICT JSON only (no prose outside JSON):
-```json
-{{
-  "decisions": [
-    {{
-      "initiative_id": "<id>",
-      "decision": "approve|defer|reject",
-      "reason": "brief rationale",
-      "owner_agent": "agent-type (for approved items)",
-      "task_title": "refined title (for approved items)",
-      "task_notes": "notes for task (for approved items)",
-      "priority": "low|medium|high",
-      "project_id": "optional project id"
-    }}
-  ],
-  "observations": ["any cross-cutting observations about the proposals"]
-}}
-```
-"""
-        # Use the main agent's standard-tier model — this is Lobs making real
-        # project decisions and needs full context awareness + reasoning quality.
-        from app.orchestrator.model_chooser import ModelChooser
-        chooser = ModelChooser(self.db)
-        choice = await chooser.choose(
-            agent_type="lobs",
-            task={"id": "sweep-review", "title": "Initiative sweep review", "notes": "Project management decisions requiring full context"},
-            purpose="execution",
+    async def _create_lobs_review_inbox_item(
+        self,
+        initiatives: list[AgentInitiative],
+        sweep_id: str,
+    ) -> None:
+        """Create an inbox item summarizing pending reviews (fallback if Gateway notification fails)."""
+        title_preview = ", ".join(i.title[:40] for i in initiatives[:3])
+        if len(initiatives) > 3:
+            title_preview += f" + {len(initiatives) - 3} more"
+
+        content = (
+            f"Initiative sweep completed but Lobs notification failed.\n\n"
+            f"Sweep ID: {sweep_id}\n"
+            f"Pending initiatives: {len(initiatives)}\n\n"
+            "Use the following commands to review:\n"
+            "```bash\n"
+            "~/.openclaw/workspace/scripts/lobs-api.sh initiatives\n"
+            "~/.openclaw/workspace/scripts/lobs-api.sh batch-decide\n"
+            "```\n\n"
+            "Initiatives:\n"
         )
 
-        result, error, _error_type = await self.worker_manager._spawn_session(
-            task_prompt=prompt,
-            agent_id="main",
-            model=choice.model,
-            label=f"sweep-review-{sweep_id[:8]}",
-        )
-        if not result:
-            raise RuntimeError(f"LLM sweep spawn failed: {error}")
+        for init in initiatives:
+            content += f"- **{init.title}** (ID: {init.id[:8]}..., by: {init.proposed_by_agent})\n"
 
-        logger.info(
-            "[SWEEP] Spawned LLM review for %d initiatives (model=%s, runId=%s)",
-            len(batch),
-            choice.model,
-            result.get("runId", "?")[:12],
+        self.db.add(
+            InboxItem(
+                id=str(uuid.uuid4()),
+                title=f"[REVIEW] {len(initiatives)} initiative(s) pending: {title_preview[:80]}",
+                content=content,
+                is_read=False,
+                summary=f"sweep_review_fallback:{sweep_id}",
+                modified_at=datetime.now(timezone.utc),
+            )
         )
 
     # ------------------------------------------------------------------
