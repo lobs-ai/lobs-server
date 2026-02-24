@@ -1,7 +1,7 @@
 """Tests for tracker API endpoints."""
 
 import pytest
-from datetime import timezone
+from datetime import timezone, datetime, timedelta
 from httpx import AsyncClient
 
 
