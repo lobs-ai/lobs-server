@@ -49,6 +49,7 @@ from app.routers import (
     knowledge,
 )
 from app.routers import text_dumps
+from app.routers.workflows import router as workflows_router, runs_router as workflow_runs_router, events_router as workflow_events_router, subs_router as workflow_subs_router
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +183,12 @@ app.include_router(usage.router, prefix=settings.API_PREFIX, dependencies=[Depen
 app.include_router(usage.routing_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(learning.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(knowledge.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+
+# Workflow engine
+app.include_router(workflows_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(workflow_runs_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(workflow_events_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(workflow_subs_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 
 # Webhooks - receive endpoint is public (external services), management requires auth
 app.include_router(webhooks.router, prefix=settings.API_PREFIX)

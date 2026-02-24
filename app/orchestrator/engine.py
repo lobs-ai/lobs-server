@@ -22,6 +22,7 @@ from app.database import AsyncSessionLocal
 from app.orchestrator.scanner import Scanner
 from app.orchestrator.capability_registry import CapabilityRegistrySync
 from app.orchestrator.worker import WorkerManager
+from app.orchestrator.workflow_executor import WorkflowExecutor
 from app.orchestrator.monitor_enhanced import MonitorEnhanced
 from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
@@ -123,6 +124,16 @@ class OrchestratorEngine:
         
         # Startup recovery: ensure default project exists and reset orphaned tasks
         await self._startup_recovery()
+        
+        # Seed default workflow definitions
+        try:
+            from app.orchestrator.workflow_seeds import seed_default_workflows
+            async with self._session_factory() as db:
+                count = await seed_default_workflows(db)
+                if count:
+                    logger.info("[ENGINE] Seeded %d default workflow(s)", count)
+        except Exception as e:
+            logger.warning("[ENGINE] Workflow seeding failed: %s", e)
         
         self._running = True
         self._paused = False
@@ -617,6 +628,21 @@ class OrchestratorEngine:
             if len(worker_manager.active_workers) != initial_active:
                 activity = True
 
+            # 4a. Advance active workflow runs
+            try:
+                workflow_executor = WorkflowExecutor(db, worker_manager=worker_manager)
+                active_runs = await workflow_executor.get_active_runs()
+                for wf_run in active_runs:
+                    advanced = await workflow_executor.advance(wf_run)
+                    if advanced:
+                        activity = True
+                # Process pending workflow events
+                events_started = await workflow_executor.process_events(limit=10)
+                if events_started > 0:
+                    activity = True
+            except Exception as e:
+                logger.error("[ENGINE] Workflow executor error: %s", e, exc_info=True)
+
             # 5. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
             try:
                 monitor_result = await monitor_enhanced.run_full_check()
@@ -654,6 +680,7 @@ class OrchestratorEngine:
                 )
 
             # 8. Process eligible tasks
+            workflow_executor = WorkflowExecutor(db, worker_manager=worker_manager)
             for task_dict in eligible_tasks:
                 activity = True
                 
@@ -676,6 +703,19 @@ class OrchestratorEngine:
                         task_id[:8],
                     )
                     continue
+
+                # Check if a workflow matches this task
+                try:
+                    matched_workflow = await workflow_executor.match_workflow(task_dict)
+                    if matched_workflow:
+                        await workflow_executor.start_run(matched_workflow, task=task_dict, trigger_type="task")
+                        logger.info(
+                            "[ENGINE] Task %s matched workflow '%s', started run",
+                            task_id[:8], matched_workflow.name,
+                        )
+                        continue
+                except Exception as e:
+                    logger.warning("[ENGINE] Workflow match failed for %s: %s", task_id[:8], e)
 
                 # GitHub claim handshake before spawning work
                 if task_dict.get("external_source") == "github":

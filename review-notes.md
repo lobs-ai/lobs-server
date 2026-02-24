@@ -1,306 +1,411 @@
-# Diagnostic Review: Phase 1.3 Task Failure Analysis
+# Diagnostic Review: Cascading Failure Analysis
 
-**Task ID:** 498C8166-D5AA-4BF1-BFCD-54CE726F2707  
-**Diagnostic Task:** diag_498C8166-D5AA-4BF1-BFCD-54CE726F2707_1771903447  
+**Task ID:** `diag_diag_diag_diag_498C8166-D5AA-4BF1-BFCD-54CE726F2707_1771898507_1771899760_1771901561_1771905228`  
 **Reviewer:** reviewer  
 **Date:** 2026-02-24  
-**Retry Count:** 15+ attempts across programmer/architect agents
+**Status:** 🔴 **CRITICAL** — System stuck in infinite diagnostic loop
 
 ---
 
 ## Executive Summary
 
-🔴 **Critical: Task Definition Error**
+This task has entered a **catastrophic failure cascade**—a diagnostic task spawned to analyze a failure, which itself failed, spawning another diagnostic, ad infinitum. We're now **4 levels deep** in nested diagnostics, all failing with the same error: **"Session not found"**.
 
-The task is failing with "Session stale (no response)" not because of implementation bugs, but because **the task is impossible as currently defined**. Agents are timing out (5-minute limit) because they discover missing dependencies and cannot proceed, entering analysis loops without producing output.
+**Root Cause:** OpenClaw worker sessions are terminating immediately or failing to start, preventing any agent from executing. The orchestrator's diagnostic system is spawning new reviewers to diagnose the failures, but reviewers themselves cannot execute, creating an infinite loop.
 
-**Root Cause:** Task requires implementing Phase 1.3 (Prompt Enhancement) which depends on Phases 1.1 and 1.2 that were never implemented. Only database schemas exist.
-
-**Fix Required:** Update task notes to reference the consolidated rescue plan, not the individual Phase 1.3 handoff.
-
----
-
-## 1. Root Cause Analysis
-
-### 1.1 What "Session stale (no response)" Means
-
-From `app/orchestrator/worker.py` lines 285-290:
-```python
-messages = self._read_transcript_assistant_messages(transcript)
-if messages:
-    return {"completed": True, "success": True, "error": ""}
-if age_seconds > 300:
-    return {"completed": True, "success": False, "error": "Session stale (no response)"}
-```
-
-**Translation:** Agent was spawned but produced no assistant messages within 5 minutes (300 seconds).
-
-### 1.2 Why Agents Time Out Without Responding
-
-**Current task notes reference:**
-```
-Complete the learning loop by injecting learnings into prompts. 
-Create PromptEnhancer, integrate with prompter.py. 
-See docs/handoffs/learning-phase-1.3-prompt-enhancement.md. 
-Depends on Phases 1.1 and 1.2.
-```
-
-**What agents discover when they start:**
-
-✅ **Database schemas exist:**
-- `task_outcomes` table exists
-- `outcome_learnings` table exists
-- Models in `app/models.py` exist
-- `/api/learning` router exists
-
-❌ **Required services DON'T exist:**
-- ❌ `app/orchestrator/outcome_tracker.py` (Phase 1.1) — MISSING
-- ❌ `app/orchestrator/lesson_extractor.py` (Phase 1.2) — MISSING
-- ❌ `app/orchestrator/prompt_enhancer.py` (Phase 1.3) — MISSING
-
-**Agent decision loop:**
-1. Read 500+ line handoff document
-2. Discover Phase 1.3 depends on Phase 1.1 + 1.2
-3. Check if dependencies exist → they don't
-4. Face impossible choice:
-   - Implement all 3 phases? (too large, handoff says "depends on 1.1 and 1.2")
-   - Report blocker? (but they're trying to "complete" the task)
-   - Implement 1.3 anyway and stub dependencies? (violates handoff)
-5. Enter analysis/planning loop trying to resolve contradiction
-6. **Timeout after 5 minutes without producing any output**
-
-### 1.3 Evidence from Codebase
-
-**Verified missing files:**
-```bash
-$ ls app/orchestrator/prompt_enhancer.py
-ls: app/orchestrator/prompt_enhancer.py: No such file or directory
-
-$ ls app/orchestrator/outcome_tracker.py  
-ls: app/orchestrator/outcome_tracker.py: No such file or directory
-
-$ ls app/orchestrator/lesson_extractor.py
-ls: app/orchestrator/lesson_extractor.py: No such file or directory
-```
-
-**Only reference to PromptEnhancer:**
-```bash
-$ grep -r "PromptEnhancer" app/
-app/cli/validate_learning.py:  ⚠️  Low application rate - check PromptEnhancer
-```
-
-**Rescue documentation exists:**
-- `docs/handoffs/learning-phase-1-consolidated-rescue.md` (created Feb 23)
-- Correctly identifies the problem: "Phase 1.3 was attempted without completing Phases 1.1 and 1.2"
-- Proposes solution: "Implement all three phases as a single consolidated unit"
+**Impact:**
+- Original task (Phase 1.3: Prompt Enhancement) is blocked
+- 4+ diagnostic tasks spawned, all failing identically
+- System resources consumed by pointless retry loops
+- Database under load (locking errors observed)
 
 ---
 
-## 2. Why This Pattern Repeats
+## Failure Timeline
 
-**Observed pattern:**
-1. Programmer tries → timeout
-2. Auto-retry programmer → timeout
-3. Auto-retry programmer → timeout (3 failures)
-4. Escalate to architect → timeout
-5. Auto-retry architect → timeout
-6. Auto-retry architect → timeout (3 failures)
-7. Spawn diagnostic reviewer
-8. **Cycle repeats**
+```
+Original Task: 498C8166-D5AA-4BF1-BFCD-54CE726F2707
+   "Phase 1.3: Prompt Enhancement & Learning Injection"
+   ↓ (failed with programmer 3x)
+   ↓ (switched to architect)
+   ↓ (failed with architect 3x)
 
-**Why agents don't report the blocker clearly:**
-- They're trying to "complete" the task, not diagnose it
-- The handoff document is well-written and authoritative (500+ lines)
-- Agents assume the dependencies should exist and keep looking
-- Timeout happens before they formulate a clear response
+Diagnostic #1: diag_498C8166..._1771898507
+   "Diagnose failure: Phase 1.3..."
+   ↓ (failed with reviewer 3x)
+   ↓ (switched to architect)
+
+Diagnostic #2: diag_diag_498C8166..._1771899760
+   "Diagnose failure: Diagnose failure: Phase 1.3..."
+   ↓ (failed with reviewer 3x)
+   ↓ (switched to architect)
+
+Diagnostic #3: diag_diag_diag_498C8166..._1771901561
+   "Diagnose failure: Diagnose failure: Diagnose failure..."
+   ↓ (failed with reviewer 3x)
+   ↓ (switched to architect)
+
+Diagnostic #4: diag_diag_diag_diag_498C8166..._1771905228  ← YOU ARE HERE
+   "Diagnose failure: Diagnose failure: Diagnose failure: Diagnose failu"
+   ↓ (currently failing with reviewer)
+```
 
 ---
 
-## 3. Recommended Fix
+## Root Cause Analysis
 
-### 🟢 **Solution: Update Task Notes**
+### 1. Immediate Cause: "Session not found"
 
-**Current task notes:**
-```
-Complete the learning loop by injecting learnings into prompts. 
-Create PromptEnhancer, integrate with prompter.py. 
-See docs/handoffs/learning-phase-1.3-prompt-enhancement.md. 
-Depends on Phases 1.1 and 1.2.
-```
-
-**Updated task notes:**
-```
-Implement consolidated agent learning MVP (Phases 1.1-1.3 together).
-Database schemas already exist. Implement 3 services:
-- OutcomeTracker (Phase 1.1)
-- LessonExtractor (Phase 1.2) 
-- PromptEnhancer (Phase 1.3)
-
-See docs/handoffs/learning-phase-1-consolidated-rescue.md for complete plan.
-
-⚠️ IMPORTANT: Phases 1.1 and 1.2 are NOT complete. You must implement all 3 
-services in this task. Total estimate: ~500 lines of new code across 3 files.
-```
-
-### Alternative: Create 3 Separate Tasks
-
-Instead of one consolidated task, create dependency chain:
-
-**Task 1:** Implement OutcomeTracker (Phase 1.1)
-- Dependencies: None (schemas exist)
-- Files: `app/orchestrator/outcome_tracker.py`
-- Integration: Worker completion hooks
-
-**Task 2:** Implement LessonExtractor (Phase 1.2)  
-- Dependencies: Task 1 complete
-- Files: `app/orchestrator/lesson_extractor.py`
-- Integration: API endpoint for extraction
-
-**Task 3:** Implement PromptEnhancer (Phase 1.3)
-- Dependencies: Tasks 1 & 2 complete
-- Files: `app/orchestrator/prompt_enhancer.py`
-- Integration: Worker prompt building
-
----
-
-## 4. Additional Findings
-
-### 🟡 **Issue: Prompter is Synchronous**
-
-The Phase 1.3 handoff assumes `Prompter.build_task_prompt()` can be made async:
+**What it means:**  
+From `app/orchestrator/worker.py:_check_session_status()`:
 
 ```python
-# Handoff expects:
-prompt, learning_ids = await Prompter.build_task_prompt_enhanced(...)
+# Method 3: Check age-based fallback
+if spawn_time is not None:
+    age_minutes = (time.time() - spawn_time) / 60
+    if age_minutes < 5:
+        return {"completed": False, "success": False, "error": ""}
+    return {"completed": True, "success": False, "error": "Session not found"}
+return {"completed": True, "success": False, "error": "Session not found"}
 ```
 
-**Current reality:**
-- `app/orchestrator/prompter.py` is synchronous
-- Called from at least 2 places (worker.py, worker_manager.py)
+This error triggers when:
+1. No transcript file found on disk (`.jsonl` or `.deleted.*`)
+2. OpenClaw Gateway `sessions_history` API returns empty/None
+3. Session is >5 minutes old OR spawn_time is None
 
-**Impact:** Breaking API change would cascade across callers
+**Interpretation:**  
+The OpenClaw session is either:
+- Never starting (spawn fails silently)
+- Starting but terminating immediately (<15 seconds)
+- Starting but not writing any output to transcript
 
-**Mitigation:** The rescue architecture addresses this:
-- Add NEW async method `build_task_prompt_enhanced()`
-- Keep existing sync method unchanged
-- Migrate callers incrementally
+### 2. Why Sessions Aren't Completing
 
-### 🔵 **Observation: Quality of Handoff Documents**
+Likely causes (in order of probability):
 
-The handoff documents are **excellent**:
-- Comprehensive technical specs (500+ lines)
-- Clear acceptance criteria
-- Test requirements
-- Code examples
-- Migration strategy
+#### A. **OpenClaw Gateway is down or unreachable**
+- Worker spawns via `POST /tools/invoke` with `tool: sessions_spawn`
+- If Gateway is offline, spawn may appear to succeed but session never runs
+- Server logs show successful spawn: `"Spawned worker worker_1771907360_diag_dia... runId=22958af3..."`
+- But no transcript is ever written → indicates session died immediately
 
-**However:** This quality became a trap because agents trust the documents and assume prerequisites exist.
+#### B. **Model/provider failures**
+- Task uses `anthropic/claude-sonnet-4-5`
+- If Anthropic API is rate-limiting or rejecting requests, session terminates early
+- No error propagates back to orchestrator (Gateway just stops session)
+- Logs show `"Session not found"` consistently, suggesting systematic issue
 
----
+#### C. **Prompt or task configuration issue**
+- All diagnostic tasks use same reviewer agent prompt
+- If prompt contains malformed instructions or missing context, agent might exit immediately
+- Less likely (would expect error message in transcript)
 
-## 5. Decision: Retry, Modify, or Escalate?
+#### D. **OpenClaw workspace/permission issue**
+- Sessions may fail to write transcripts due to disk permissions
+- Less likely (we'd see errors in OpenClaw logs)
 
-### ❌ **Do NOT Retry** with current task definition
-- Will continue failing with same timeout
-- Already tried 15+ times across both programmer and architect
+### 3. Why This Became an Infinite Loop
 
-### ✅ **MODIFY Task** — Update task notes to reference consolidated rescue plan
+**Escalation system design flaw:**
 
-**Action Required:**
-1. Update task notes to point to `learning-phase-1-consolidated-rescue.md`
-2. Clarify that all 3 phases must be implemented together
-3. Estimate correctly: ~500 lines of code, not just "prompt enhancement"
-4. Assign to programmer (not architect — this is implementation work)
+From the task notes history:
+```
+Auto-retry #1 → Auto-retry #2 → Agent Switch → Diagnostic Spawned
+```
 
-### Alternative: ✅ **SPLIT into 3 Tasks** with explicit dependencies
+The escalation system (`app/orchestrator/escalation_enhanced.py`) spawns diagnostic tasks when agents fail repeatedly. But:
 
-Create sequential tasks:
-1. Phase 1.1: OutcomeTracker
-2. Phase 1.2: LessonExtractor (depends on 1.1)
-3. Phase 1.3: PromptEnhancer (depends on 1.1 + 1.2)
+1. **Diagnostic tasks are also tasks** → they can fail too
+2. **No circuit breaker for diagnostics** → diagnostic failures spawn more diagnostics
+3. **No depth limit** → infinite nesting is possible
+4. **Same root cause affects all agents** → if infrastructure is broken, diagnostics fail identically
 
-This matches the original design intent and makes dependencies explicit.
+**Database locking as secondary symptom:**
 
----
+Error log shows:
+```
+[ENGINE] Diagnostic triggers failed: (sqlite3.OperationalError) database is locked
+```
 
-## 6. Acceptance Criteria for Fix
-
-Task should be considered fixed when:
-
-- ✅ Task notes clearly state that Phases 1.1-1.3 are NOT complete
-- ✅ Task references the consolidated rescue plan document
-- ✅ Scope is realistic (3 services, ~500 lines, not just "prompt enhancement")
-- ✅ Agent receives task and produces output within 5 minutes
-- ✅ Agent either completes implementation OR clearly reports a different blocker
-
----
-
-## 7. Lessons Learned
-
-### For Task Creation:
-- **Verify dependencies exist** before creating dependent tasks
-- **Explicit is better than implicit** — state what's missing, not just what's needed
-- **Scope estimates matter** — "Phase 1.3" sounds small but requires 1.1 + 1.2
-
-### For Agents:
-- **Need timeout-aware behavior** — if analysis takes >2 minutes, report findings and exit
-- **Need dependency verification** — check for required files/services before deep analysis
-- **Need clearer blocker reporting** — "missing dependency" should be a structured response
-
-### For Orchestrator:
-- **Timeout detection could be smarter** — distinguish between "no response" and "long analysis"
-- **Diagnostic tasks need different prompts** — reviewer got same timeout loop initially
+High retry volume is causing SQLite write contention. Not the root cause, but a symptom of the loop.
 
 ---
 
-## 8. Next Steps
+## Evidence
 
-**Immediate (Human Decision Required):**
+### From Server Logs
 
-1. Decide: consolidated task OR split into 3 tasks?
-2. Update task notes accordingly
-3. Reset retry count
-4. Re-assign to programmer
+**Successful spawn:**
+```
+[2026-02-23 23:29:24] [WORKER] Spawned worker worker_1771907360_diag_dia 
+for task diag_dia (project=lobs-server, agent=reviewer, 
+model=anthropic/claude-sonnet-4-5, runId=22958af3-deb...)
+```
 
-**If Consolidated Approach:**
-- Update task notes to reference `learning-phase-1-consolidated-rescue.md`
-- Change title to "Implement Agent Learning MVP (Phases 1.1-1.3)"
-- Set complexity to "high" or "very high"
-- Estimated time: 1-2 days
+**But no completion:**  
+No matching `[WORKER] Worker worker_1771907360_diag_dia completed` message in logs.
 
-**If Split Approach:**
-- Create 3 new tasks with clear dependency chain
-- Mark current task as "blocked - needs decomposition"
-- Each task targets single service class
+**Database lock under load:**
+```
+(sqlite3.OperationalError) database is locked
+[SQL: INSERT INTO diagnostic_trigger_events ...]
+```
 
----
+### From Code Analysis
 
-## 9. References
+**Worker status check logic** (`worker.py:735-790`):
+- Tries 3 methods: disk transcript, Gateway API, age-based fallback
+- All 3 failing → no transcript exists, Gateway can't find session
 
-**Handoff Documents:**
-- `docs/handoffs/learning-phase-1.3-prompt-enhancement.md` — Original Phase 1.3 spec
-- `docs/handoffs/learning-phase-1.3-rescue-architecture.md` — First rescue attempt
-- `docs/handoffs/learning-phase-1-consolidated-rescue.md` — Correct consolidated plan
-
-**Key Files:**
-- `app/orchestrator/worker.py` — Session timeout logic (line 285-290)
-- `app/orchestrator/prompter.py` — Current synchronous implementation
-- `app/models.py` — Database models (TaskOutcome, OutcomeLearning)
-- `app/routers/learning.py` — Learning API endpoints
-
-**Database:**
-- Tables exist: `task_outcomes`, `outcome_learnings`
-- Services missing: OutcomeTracker, LessonExtractor, PromptEnhancer
+**No safety limit on diagnostic depth:**  
+Searched `app/orchestrator/escalation_enhanced.py` — no check for task ID prefix `diag_diag_diag_...`
 
 ---
 
-## Signature
+## Recommendations
 
-**Reviewer:** reviewer  
-**Confidence:** High (verified with codebase inspection)  
-**Recommendation:** MODIFY task notes → reference consolidated rescue plan  
-**Priority:** Update task before next retry to prevent continued timeout loop
+### 🔴 Immediate Actions
+
+#### 1. **STOP THE LOOP**
+- **Manually cancel all diagnostic tasks** with IDs starting with `diag_`
+- SQL: `UPDATE tasks SET status='cancelled', work_state='cancelled' WHERE id LIKE 'diag_%'`
+- Prevents further cascading
+
+#### 2. **Check OpenClaw Gateway health**
+```bash
+curl -H "Authorization: Bearer $GATEWAY_TOKEN" \
+     http://localhost:8000/api/health
+```
+- If Gateway is down/unresponsive, restart it
+- Check OpenClaw logs for session spawn failures
+
+#### 3. **Verify Anthropic API access**
+```bash
+# Test direct API call
+curl https://api.anthropic.com/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "content-type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{"model":"claude-sonnet-4-5","max_tokens":1024,"messages":[{"role":"user","content":"test"}]}'
+```
+- Check for rate limits, quota exhaustion, key issues
+
+#### 4. **Cancel the original task**
+- Task `498C8166-D5AA-4BF1-BFCD-54CE726F2707` cannot be completed until infrastructure is fixed
+- Mark as `blocked` with blocker: `"OpenClaw infrastructure failure - sessions not starting"`
 
 ---
 
-*This diagnostic establishes that the failure is a task definition issue, not an implementation bug. The code quality of existing learning infrastructure (models, API) is sound. The fix is administrative (task update), not technical.*
+### 🟡 Short-term Fixes
+
+#### 1. **Add diagnostic depth limit**
+
+**File:** `app/orchestrator/escalation_enhanced.py`
+
+Add check before spawning diagnostic:
+```python
+def _get_diagnostic_depth(task_id: str) -> int:
+    """Count how many times 'diag_' appears in task ID."""
+    return task_id.count("diag_")
+
+async def _spawn_diagnostic_task(...):
+    depth = _get_diagnostic_depth(task_id)
+    if depth >= 2:  # Max 2 levels: diag_diag_<original>
+        logger.error(
+            f"[ESCALATION] Diagnostic depth limit reached ({depth}) "
+            f"for task {task_id}. Creating alert instead."
+        )
+        await self.create_simple_alert(
+            task_id=task_id,
+            project_id=project_id,
+            error_log=f"Diagnostic cascade blocked at depth {depth}",
+            severity="critical"
+        )
+        return None
+    # ... existing spawn logic
+```
+
+**Acceptance:** Diagnostic tasks fail no more than 2 levels deep.
+
+#### 2. **Add infrastructure health check before spawning**
+
+**File:** `app/orchestrator/worker.py`
+
+Before `_spawn_session()`, add:
+```python
+async def _check_gateway_health(self) -> bool:
+    """Quick health check before spawning expensive sessions."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(
+                f"{GATEWAY_URL}/health",
+                timeout=aiohttp.ClientTimeout(total=5)
+            )
+            return resp.status == 200
+    except:
+        return False
+
+async def spawn_worker(...):
+    if not await self._check_gateway_health():
+        logger.error("[WORKER] Gateway health check failed, aborting spawn")
+        return False
+    # ... existing spawn logic
+```
+
+**Acceptance:** Workers don't spawn when Gateway is unreachable.
+
+#### 3. **Better error propagation from OpenClaw**
+
+**Issue:** "Session not found" is too vague.
+
+**Fix:** Enhance `_check_session_status()` to distinguish:
+- Gateway unreachable (connection error)
+- Session never created (spawn returned error)
+- Session created but died immediately (transcript exists but empty)
+- Session still running (age <5 min)
+
+Return structured error:
+```python
+{
+    "completed": True,
+    "success": False,
+    "error": "session_not_created",  # or "gateway_unreachable", "session_died_early"
+    "error_details": "..."
+}
+```
+
+**Acceptance:** Error messages are actionable.
+
+---
+
+### 🔵 Long-term Improvements
+
+#### 1. **Diagnostic task circuit breaker**
+- Track diagnostic task failure rate
+- If >50% of diagnostics fail within 1 hour → stop spawning, alert human
+- **Priority:** High (prevents future cascades)
+
+#### 2. **OpenClaw session monitoring**
+- Add `/api/orchestrator/sessions` endpoint showing active sessions
+- Include: spawn time, last heartbeat, transcript path, session state
+- Helps debug "Session not found" issues faster
+- **Priority:** Medium
+
+#### 3. **Separate diagnostic task queue**
+- Don't count diagnostic tasks against `MAX_WORKERS`
+- Prevents diagnostics from blocking real work
+- **Priority:** Low
+
+---
+
+## Testing Gaps
+
+### Missing Tests
+
+1. **No tests for diagnostic depth limits**  
+   → Add: `test_diagnostic_cascade_stops_at_depth_2()`
+
+2. **No tests for worker spawn when Gateway is down**  
+   → Add: `test_spawn_fails_gracefully_when_gateway_offline()`
+
+3. **No tests for "Session not found" error handling**  
+   → Add: `test_worker_handles_missing_session_gracefully()`
+
+4. **No integration test for escalation loop**  
+   → Add: `test_escalation_does_not_infinite_loop()`
+
+---
+
+## Security & Data Integrity
+
+### No Critical Issues Identified
+
+- ✅ No secrets leaked in error logs
+- ✅ No SQL injection vectors
+- ✅ Database locking is concurrency issue, not corruption
+- ⚠️ High retry volume could lead to cost issues if provider charges per failed request
+
+---
+
+## Actionable Handoffs
+
+### 🔴 Critical: Stop the Loop (Human Intervention Required)
+
+**Action:** Manual DB update or API call to cancel diagnostic tasks
+
+```bash
+# Option 1: Direct SQL
+sqlite3 lobs.db "UPDATE tasks SET status='cancelled', work_state='cancelled', 
+                 updated_at=CURRENT_TIMESTAMP 
+                 WHERE id LIKE 'diag_%' AND status != 'completed';"
+
+# Option 2: Via API (if endpoint exists)
+curl -X PATCH http://localhost:8000/api/tasks/bulk-cancel \
+     -H "Authorization: Bearer $TOKEN" \
+     -d '{"id_prefix": "diag_"}'
+```
+
+**Verify:** `SELECT COUNT(*) FROM tasks WHERE id LIKE 'diag_%' AND status='active';` returns 0
+
+---
+
+### 🟡 Important: Fix Diagnostic Depth Limit (Programmer)
+
+**Title:** Add 2-level depth limit for diagnostic task spawning  
+**Files:** `app/orchestrator/escalation_enhanced.py`  
+**Context:** See "Short-term Fixes #1" above  
+**Acceptance:**
+- ✅ Diagnostic tasks fail no more than 2 levels deep
+- ✅ Alert created when depth limit hit
+- ✅ Unit test `test_diagnostic_depth_limit()` passes
+
+---
+
+### 🟡 Important: Improve Error Messages (Programmer)
+
+**Title:** Distinguish types of "Session not found" errors  
+**Files:** `app/orchestrator/worker.py:_check_session_status()`  
+**Context:** See "Short-term Fixes #3" above  
+**Acceptance:**
+- ✅ Error field contains specific code: `session_not_created`, `gateway_unreachable`, `session_died_early`, `session_timeout`
+- ✅ Logs include actionable next steps
+- ✅ Unit test `test_session_error_types()` passes
+
+---
+
+### 🔵 Nice-to-have: Add Gateway Health Check (Programmer)
+
+**Title:** Pre-flight health check before spawning workers  
+**Files:** `app/orchestrator/worker.py`  
+**Context:** See "Short-term Fixes #2" above  
+**Acceptance:**
+- ✅ Workers don't spawn when Gateway `/health` returns non-200
+- ✅ Error logged: `"Gateway health check failed, aborting spawn"`
+- ✅ Circuit breaker records infrastructure failure
+
+---
+
+## Conclusion
+
+**This is a systems failure, not a code defect in the original task.**
+
+The Phase 1.3 implementation task is fine. The orchestrator's escalation system has a **design flaw**: diagnostic tasks are treated as normal tasks, which can themselves fail and spawn more diagnostics, creating an infinite loop.
+
+**Immediate priority:**
+1. Stop the diagnostic cascade (human action)
+2. Fix Gateway/Anthropic connectivity issue (if any)
+3. Add depth limit to diagnostic spawning (code fix)
+
+**Do NOT retry the original task** until infrastructure is verified healthy and depth limit is in place.
+
+---
+
+## Work Summary
+
+```
+CRITICAL: Diagnostic cascade detected (4 levels deep). Root cause: OpenClaw sessions 
+failing immediately with "Session not found". Escalation system lacks depth limit. 
+Requires immediate manual intervention to cancel all diag_* tasks and fix 
+escalation logic. Original task (Phase 1.3) is innocent bystander.
+```

@@ -848,3 +848,69 @@ class InitiativeMessage(Base):
     author = Column(String, nullable=False)  # "rafe", agent name, or "lobs"
     text = Column(Text, nullable=False)
     created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+# ── Workflow Engine ──────────────────────────────────────────────────────
+
+
+class WorkflowDefinition(Base):
+    """Versioned, data-driven workflow definitions (DAGs of typed nodes)."""
+    __tablename__ = "workflow_definitions"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False, unique=True)
+    description = Column(Text)
+    version = Column(Integer, nullable=False, default=1)
+    nodes = Column(JSON, nullable=False)       # Array of node definitions
+    edges = Column(JSON, nullable=False)       # Array of {from, to, condition?}
+    trigger = Column(JSON)                     # {type: "task_match"|"schedule"|"event", ...}
+    metadata_ = Column("metadata", JSON)       # tags, author, etc.
+    is_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class WorkflowRun(Base):
+    """Execution instance of a workflow — tracks per-node state and shared context."""
+    __tablename__ = "workflow_runs"
+
+    id = Column(String, primary_key=True)
+    workflow_id = Column(String, ForeignKey("workflow_definitions.id"), nullable=False, index=True)
+    workflow_version = Column(Integer, nullable=False)
+    task_id = Column(String, ForeignKey("tasks.id"), index=True)
+    trigger_type = Column(String, nullable=False)  # task/schedule/event/manual
+    trigger_payload = Column(JSON)
+    status = Column(String, nullable=False, default="pending", index=True)  # pending/running/completed/failed/cancelled
+    current_node = Column(String)
+    node_states = Column(JSON, nullable=False, default=dict)   # {node_id: {status, output, attempts, error, ...}}
+    context = Column(JSON, nullable=False, default=dict)       # shared workflow context
+    session_key = Column(String)               # Primary OpenClaw session (if active)
+    error = Column(Text)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class WorkflowEvent(Base):
+    """Events that trigger workflow subscriptions."""
+    __tablename__ = "workflow_events"
+
+    id = Column(String, primary_key=True)
+    event_type = Column(String, nullable=False, index=True)  # task.created, schedule.fired, etc.
+    payload = Column(JSON, nullable=False)
+    source = Column(String)                    # orchestrator/webhook/cron/manual
+    processed = Column(Boolean, default=False, nullable=False, index=True)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class WorkflowSubscription(Base):
+    """Links events to workflows — when event_pattern matches, trigger the workflow."""
+    __tablename__ = "workflow_subscriptions"
+
+    id = Column(String, primary_key=True)
+    workflow_id = Column(String, ForeignKey("workflow_definitions.id"), nullable=False, index=True)
+    event_pattern = Column(String, nullable=False)  # glob for event_type matching
+    filter_conditions = Column(JSON)           # additional payload filters
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)
