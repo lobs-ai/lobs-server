@@ -12,7 +12,9 @@ Constructs structured prompts that include:
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, List, Tuple
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.orchestrator.registry import get_agent
 from app.orchestrator.config import BASE_DIR
@@ -368,3 +370,59 @@ Be thorough but concise.
 
 Be comprehensive but focused.
 """
+
+    @staticmethod
+    async def build_task_prompt_enhanced(
+        db: Optional[AsyncSession],
+        item: dict[str, Any],
+        project_path: Path,
+        agent_type: str | None = None,
+        rules: str = "",
+        learning_disabled: bool = False,
+    ) -> Tuple[str, List[str]]:
+        """
+        Build a complete prompt for an agent, enhanced with learnings.
+        
+        This is the learning-aware version of build_task_prompt().
+        Falls back gracefully if db is None or enhancement fails.
+        
+        Args:
+            db: Database session (optional - if None, no enhancement)
+            item: Task dict (from scanner)
+            project_path: Path to project workspace
+            agent_type: Agent template type
+            rules: Global engineering rules (text)
+            learning_disabled: If True, skip enhancement (A/B control group)
+            
+        Returns:
+            Tuple of (prompt_text, list of applied learning IDs)
+        """
+        # Build base prompt using existing sync method
+        base_prompt = Prompter.build_task_prompt(
+            item=item,
+            project_path=project_path,
+            agent_type=agent_type,
+            rules=rules,
+        )
+        
+        # If no db session, cannot enhance
+        if db is None:
+            logger.debug("[LEARNING] No db session provided, skipping enhancement")
+            return base_prompt, []
+        
+        # Normalize agent type (same logic as base prompter)
+        normalized_agent_type = Prompter._normalize_agent_type(agent_type)
+        
+        # Import here to avoid circular dependency
+        from app.orchestrator.prompt_enhancer import PromptEnhancer
+        
+        # Enhance with learnings (fail-safe: returns base prompt on error)
+        enhanced_prompt, learning_ids = await PromptEnhancer.enhance_prompt(
+            db=db,
+            base_prompt=base_prompt,
+            task_dict=item,
+            agent_type=normalized_agent_type,
+            learning_disabled=learning_disabled,
+        )
+        
+        return enhanced_prompt, learning_ids

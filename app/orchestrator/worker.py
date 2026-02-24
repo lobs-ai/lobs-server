@@ -15,6 +15,8 @@ Key changes from subprocess version:
 import asyncio
 import json
 import logging
+import os
+import random
 import subprocess
 import time
 import uuid
@@ -223,23 +225,31 @@ class WorkerManager:
             worker_id = f"worker_{int(time.time())}_{task_id_short}"
             label = f"task-{task_id_short}"
             
-            # Build task prompt using Prompter
+            # Build task prompt using Prompter (with learning enhancement)
             task_title = task.get("title", task_id_short)
             prompt_file = WORKER_RESULTS_DIR / f"{task_id}.prompt.txt"
             
+            # Determine control group for A/B testing
+            control_group_pct = float(os.getenv("LEARNING_CONTROL_GROUP_PCT", "0.2"))
+            learning_disabled = random.random() < control_group_pct
+            
+            applied_learning_ids = []
+            
             try:
-                # Build structured prompt with agent context
+                # Build structured prompt with agent context and learning enhancement
                 global_rules = ""  # TODO: Load from config/DB if needed
-                prompt_content = Prompter.build_task_prompt(
+                prompt_content, applied_learning_ids = await Prompter.build_task_prompt_enhanced(
+                    db=self.db,
                     item=task,
                     project_path=repo_path,
                     agent_type=agent_type,
-                    rules=global_rules
+                    rules=global_rules,
+                    learning_disabled=learning_disabled,
                 )
                 prompt_file.write_text(prompt_content, encoding="utf-8")
                 logger.info(
-                    f"[WORKER] Built structured prompt for {task_id_short} "
-                    f"(agent={agent_type})"
+                    f"[WORKER] Built {'enhanced' if applied_learning_ids else 'standard'} prompt for {task_id_short} "
+                    f"(agent={agent_type}, learnings={len(applied_learning_ids)}, control_group={learning_disabled})"
                 )
             except Exception as e:
                 # Fallback to simple prompt
@@ -368,6 +378,38 @@ class WorkerManager:
                 db_task.started_at = datetime.now(timezone.utc)
                 db_task.updated_at = datetime.now(timezone.utc)
                 await self.db.commit()
+
+            # Best-effort: persist applied learnings to TaskOutcome
+            if applied_learning_ids or learning_disabled:
+                try:
+                    from app.models import TaskOutcome
+                    
+                    # Check if outcome already exists for this task
+                    stmt = select(TaskOutcome).where(TaskOutcome.task_id == task_id)
+                    result = await self.db.execute(stmt)
+                    outcome = result.scalar_one_or_none()
+                    
+                    if outcome:
+                        # Update existing outcome
+                        outcome.applied_learnings = applied_learning_ids
+                        outcome.learning_disabled = learning_disabled
+                        outcome.updated_at = datetime.now(timezone.utc)
+                        await self.db.commit()
+                        logger.debug(
+                            f"[LEARNING] Updated TaskOutcome for task {task_id_short} "
+                            f"(learnings={len(applied_learning_ids)}, control_group={learning_disabled})"
+                        )
+                    else:
+                        # No outcome exists yet - this is fine, it may be created later
+                        logger.debug(
+                            f"[LEARNING] No TaskOutcome found for task {task_id_short} yet, "
+                            f"will persist learnings when outcome is created"
+                        )
+                except Exception as e:
+                    # Never fail task execution due to learning metadata persistence
+                    logger.warning(
+                        f"[LEARNING] Failed to persist applied learnings for task {task_id_short}: {e}"
+                    )
 
             # Update agent tracker
             await AgentTracker(self.db).mark_working(
