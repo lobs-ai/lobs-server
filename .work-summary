@@ -1,1 +1,1 @@
-Audited and updated docs for Learning Loop MVP: fixed ARCHITECTURE.md directory listing (removed non-existent lesson_extractor.py, corrected outcome_tracker.py location, added ❌ markers for unbuilt files). All implementation docs confirmed accurate — programmer can start with docs/handoffs/learning-loop-mvp-implementation-guide.md.
+Created LEARNING-DOCS-MAP.md and learning-loop-mvp-test-spec.md; updated implementation guide and quickstart with cross-references
