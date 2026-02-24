@@ -411,15 +411,40 @@ async def daily_work_summary(db: AsyncSession, worker_manager=None, context=None
             due_time = dl.due_date.astimezone(ET).strftime("%I:%M %p") if dl.due_date else "?"
             summary_lines.append(f"  • {dl.raw_text} @ {due_time}")
 
+    # Add proactive deadline sentinel briefing (next 72h, top risk first)
+    window_end = now_et + timedelta(hours=72)
+    upcoming_result = await db.execute(
+        select(TrackerEntry).where(
+            and_(
+                TrackerEntry.type == "deadline",
+                TrackerEntry.due_date != None,
+                TrackerEntry.due_date >= now_et,
+                TrackerEntry.due_date <= window_end,
+            )
+        ).order_by(TrackerEntry.due_date)
+    )
+    upcoming_deadlines = upcoming_result.scalars().all()
+    if upcoming_deadlines:
+        summary_lines.append(f"\n**Deadline Sentinel (next 72h: {len(upcoming_deadlines)}):**")
+        top = []
+        for dl in upcoming_deadlines:
+            due = dl.due_date if dl.due_date.tzinfo else dl.due_date.replace(tzinfo=timezone.utc)
+            hours_until = (due - datetime.now(timezone.utc)).total_seconds() / 3600
+            score = dl.priority_score if dl.priority_score is not None else _deadline_priority_score(dl, hours_until)
+            top.append((score, dl, hours_until))
+
+        for score, dl, hours_until in sorted(top, key=lambda x: x[0], reverse=True)[:5]:
+            action = dl.next_action or "Pick one concrete subtask and start now."
+            summary_lines.append(f"  • [{int(round(hours_until))}h | score {score}] {dl.raw_text} → {action}")
+
     summary = "\n".join(summary_lines)
 
-    if sessions or today_deadlines:
+    if sessions or today_deadlines or upcoming_deadlines:
         db.add(InboxItem(
             id=str(uuid.uuid4()),
             title=f"📊 Daily Summary — {yesterday_start.strftime('%b %d')}",
             content=summary,
             is_read=False,
-            source="tracker",
             summary=f"daily_summary:{yesterday_start.date().isoformat()}",
         ))
         await db.commit()
@@ -429,5 +454,6 @@ async def daily_work_summary(db: AsyncSession, worker_manager=None, context=None
         "total_minutes": total_minutes,
         "categories": categories,
         "deadlines_today": len(today_deadlines),
-        "summary_created": bool(sessions or today_deadlines),
+        "deadlines_next_72h": len(upcoming_deadlines),
+        "summary_created": bool(sessions or today_deadlines or upcoming_deadlines),
     }

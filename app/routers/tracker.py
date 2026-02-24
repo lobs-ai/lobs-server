@@ -1,12 +1,13 @@
 """Tracker API endpoints."""
 
 from datetime import datetime, timedelta, timezone
+import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import TrackerItem as TrackerItemModel, ResearchRequest as ResearchRequestModel, TrackerEntry as TrackerEntryModel, TrackerNotification as TrackerNotificationModel
+from app.models import TrackerItem as TrackerItemModel, ResearchRequest as ResearchRequestModel, TrackerEntry as TrackerEntryModel, TrackerNotification as TrackerNotificationModel, Task as TaskModel
 from app.schemas import (
     TrackerItem, TrackerItemCreate, TrackerItemUpdate, 
     ResearchRequest, ResearchRequestCreate, ResearchRequestUpdate,
@@ -403,6 +404,10 @@ async def get_deadlines(
             category=e.category,
             due_date=e.due_date,
             estimated_minutes=e.estimated_minutes,
+            commitment_type=e.commitment_type,
+            priority_score=e.priority_score,
+            next_action=e.next_action,
+            escalation_task_id=e.escalation_task_id,
             created_at=e.created_at
         )
         for e in entries
