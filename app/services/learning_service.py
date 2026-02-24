@@ -52,7 +52,7 @@ Return ONLY a JSON array of objects:
   ...
 ]
 
-No prose before or after the JSON. Just the array.
+Return ONLY the raw JSON array. No markdown, no code fences, no prose before or after.
 """
 
 
@@ -78,6 +78,7 @@ async def create_plan(
     # Parse the JSON outline
     outline = _parse_json_array(outline_text)
     if not outline:
+        logger.warning("[LEARNING] Failed to parse outline. Raw text: %s", outline_text[:1000])
         return {"status": "error", "error": "Failed to parse plan outline", "raw": outline_text[:500]}
 
     # Ensure we have the right number of days
@@ -335,11 +336,12 @@ async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
                     if msg.get("role") == "assistant":
                         content = msg.get("content", "")
                         if isinstance(content, list):
+                            # Extract only text blocks (skip thinking blocks)
                             content = "\n".join(
                                 b.get("text", "") for b in content
                                 if isinstance(b, dict) and b.get("type") == "text"
                             )
-                        if content and len(content) > 20:
+                        if isinstance(content, str) and len(content.strip()) > 20:
                             return content.strip()
 
         logger.warning("[LEARNING] No LLM response after polling")
@@ -351,9 +353,13 @@ async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
 
 
 def _parse_json_array(text: str) -> list[dict] | None:
-    """Extract a JSON array from LLM output."""
+    """Extract a JSON array from LLM output (handles code fences, thinking, etc.)."""
     if not text:
         return None
+    # Strip markdown code fences
+    import re
+    text = re.sub(r"```(?:json)?\s*", "", text)
+    text = text.strip()
     try:
         start = text.find("[")
         end = text.rfind("]") + 1
