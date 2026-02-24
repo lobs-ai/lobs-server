@@ -1,0 +1,28 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "handle-this-intake-pipeline",
+    "title": "Implement intake endpoint POST /intake/handle-this with stable response schema",
+    "context": "Implement server-side intake endpoint per docs/design/handle-this-intake-pipeline.md. Start with deterministic planner and strict request validation. Keep API prefix configurable so deployments can expose /v1/intake/handle-this without hardcoding.",
+    "acceptance": "Authenticated POST returns {task, subtasks, owner_agent, confidence, clarifying_questions}. Includes validation for empty message_text and bad source_url plus 200/401/422 tests. Router is registered in app/main.py.",
+    "files": [
+      "docs/design/handle-this-intake-pipeline.md",
+      "app/main.py",
+      "app/routers/intake.py",
+      "tests/test_intake.py"
+    ]
+  },
+  {
+    "to": "programmer",
+    "initiative": "handle-this-intake-pipeline",
+    "title": "Add Mission Control Handle This models, API method, and compact Chat review flow",
+    "context": "In lobs-mission-control, add intake models to Models.swift, API client method to APIService.swift, and message-level Handle This action/review sheet under Sources/LobsMissionControl/Chat/.",
+    "acceptance": "From non-system chat message, user can launch Handle This, edit optional URL/context, call endpoint, see structured plan, and create task via existing task APIs. Includes loading/error UX and basic decode/API coverage.",
+    "files": [
+      "docs/design/handle-this-intake-pipeline.md",
+      "Sources/LobsMissionControl/Models.swift",
+      "Sources/LobsMissionControl/APIService.swift",
+      "Sources/LobsMissionControl/Chat/"
+    ]
+  }
+]

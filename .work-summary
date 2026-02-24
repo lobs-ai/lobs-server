@@ -1,1 +1,2 @@
-Designed comprehensive plugin system for custom agent skills. Created ADR with full architecture (script-based plugins, security model, manifest format, orchestrator integration), detailed 4-phase implementation guide with code examples, working echo-test example plugin, and complete documentation. Design ready for Phase 1 implementation (core infrastructure). All deliverables in docs/plugin-system-*.md and plugins/README.md.
+Designed the 'Handle This' intake pipeline and wrote implementation handoffs for server endpoint + Mission Control chat flow.
+See docs/design/handle-this-intake-pipeline.md and docs/handoffs/handle-this-intake-handoffs.json.
