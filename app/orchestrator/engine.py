@@ -80,35 +80,21 @@ class OrchestratorEngine:
         self._paused = False
         self._task: Optional[asyncio.Task] = None
         self.last_poll = 0.0
+        # Timer-based checks (all recurring work now driven by workflow scheduler)
         self._last_scheduler_check = 0.0
-        self._scheduler_interval = 60  # Check events every 60 seconds
+        self._scheduler_interval = 60
         self._last_routine_check = 0.0
-        self._routine_interval = 60  # Check routine registry every 60 seconds
+        self._routine_interval = 60
         self._last_inbox_check = 0.0
-        self._inbox_interval = 45  # Process inbox every 45 seconds
-        self._auto_assign_interval = 60  # Auto-assign unassigned tasks every 60 seconds
-        self._last_auto_assign_check = 0.0
-        self._last_reflection_check = 0.0
-        self._reflection_interval = 10800  # every 3 hours
-        self._daily_compression_hour_et = 3
-        self._last_daily_compression_date_et: str | None = None
-        self._last_memory_maintenance_date_et: str | None = None
+        self._inbox_interval = 45
         self._last_capability_sync = 0.0
-        self._capability_sync_interval = 3600  # every hour
-        # Sweep is now triggered by worker_manager.sweep_requested (no fixed timer)
-        self._last_diagnostic_check = 0.0
-        self._diagnostic_interval = 600  # every 10 minutes
-        self._last_github_sync_check = 0.0
-        self._github_sync_interval = 120  # every 2 minutes
+        self._capability_sync_interval = 3600
         self._last_runtime_settings_refresh = 0.0
-        self._runtime_settings_refresh_interval = 60  # refresh from DB every minute
+        self._runtime_settings_refresh_interval = 60
         self._last_openclaw_model_sync = 0.0
-        self._openclaw_model_sync_interval = 900  # every 15 minutes
+        self._openclaw_model_sync_interval = 900
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
-        self._reflection_anchor_loaded = False
-        # API-triggered reflection flag
-        self._force_reflection = False
         # Provider health tracking (persistent across ticks)
         self.provider_health: Optional[ProviderHealthRegistry] = None
 
@@ -371,21 +357,19 @@ class OrchestratorEngine:
             monitor_enhanced = MonitorEnhanced(db, worker_manager=worker_manager)
             circuit_breaker = CircuitBreaker(db)
             scheduler = EventScheduler(db)
-            reflection_manager = ReflectionCycleManager(db, worker_manager)
-            sweep_arbitrator = SweepArbitrator(db, worker_manager=worker_manager)
-            diagnostic_engine = DiagnosticTriggerEngine(db, worker_manager)
 
-            # 1. Check scheduled events (every 60 seconds)
             import time
             current_time = time.time()
 
-            # 0. Refresh runtime-configurable loop intervals
+            # 0. Refresh runtime-configurable settings from DB
             if current_time - self._last_runtime_settings_refresh >= self._runtime_settings_refresh_interval:
                 try:
                     await self._refresh_runtime_settings(db)
                 except Exception as e:
                     logger.warning("[ENGINE] Runtime settings refresh failed: %s", e)
                 self._last_runtime_settings_refresh = current_time
+
+            # 1. Check scheduled events (every 60 seconds)
             if current_time - self._last_scheduler_check >= self._scheduler_interval:
                 try:
                     result = await scheduler.check_due_events()
@@ -425,35 +409,7 @@ class OrchestratorEngine:
                     logger.error("[ENGINE] Routine registry check failed: %s", e, exc_info=True)
                     await db.rollback()
 
-            # 1b. Sync GitHub-backed projects (every 2 minutes)
-            if current_time - self._last_github_sync_check >= self._github_sync_interval:
-                try:
-                    github_projects_q = await db.execute(
-                        select(ProjectModel).where(
-                            ProjectModel.archived == False,
-                            ProjectModel.tracking == "github",
-                            ProjectModel.github_repo.is_not(None),
-                        )
-                    )
-                    github_projects = github_projects_q.scalars().all()
-                    if github_projects:
-                        sync_service = GitHubSyncService(db)
-                        for project in github_projects:
-                            try:
-                                result = await sync_service.sync_project(project, push=True)
-                                if result.get("imported", 0) > 0 or result.get("updated", 0) > 0:
-                                    activity = True
-                            except Exception as project_err:
-                                logger.warning(
-                                    "[ENGINE] GitHub sync failed for project %s: %s",
-                                    project.id,
-                                    project_err,
-                                )
-                        await db.commit()
-                    self._last_github_sync_check = current_time
-                except Exception as e:
-                    logger.error("[ENGINE] GitHub sync check failed: %s", e, exc_info=True)
-                    await db.rollback()
+            # 1b. GitHub sync now handled by github-sync workflow (every 15 min)
 
             # 1c. Sync OpenClaw model/auth/billing catalog (every 15 minutes)
             if current_time - self._last_openclaw_model_sync >= self._openclaw_model_sync_interval:
@@ -526,11 +482,7 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
                     await db.rollback()
 
-            # 3. Auto-assign agents — now handled by workflow engine
-            #    (scan-unassigned workflow + agent-assignment workflow)
-            #    Legacy auto-assigner removed.
-
-            # 4. Capability registry sync (hourly)
+            # 3. Capability registry sync (hourly)
             if current_time - self._last_capability_sync >= self._capability_sync_interval:
                 try:
                     sync_result = await CapabilityRegistrySync(db).sync()
