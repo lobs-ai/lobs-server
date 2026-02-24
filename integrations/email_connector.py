@@ -1,16 +1,15 @@
 """Email connector — Integration Contract v1 adapter.
 
-Wraps ``app.services.email_service.EmailService`` and translates its raw
-dicts into normalized contract entities.  Supports Gmail API and IMAP/SMTP
-fallback (whichever the underlying service detects).
+Wraps the existing ``app.services.email_service.EmailService`` (Gmail API or
+IMAP/SMTP fallback) and exposes it through the canonical BaseConnector
+interface.
 
-Supported capabilities:
-  ✅ auth         — is_configured(), health_check()
-  ✅ fetch        — fetch_messages(), search()
-  ❌ fetch_events — not applicable (raises ConnectorNotImplementedError)
-  ✅ act          — send_message(), mark_read()
-  ⚠️  webhook_in  — verify_webhook stub (provider-specific HMAC not set up)
-  ❌ webhook_out  — Gmail push setup not yet implemented
+Supported capabilities
+  auth       — is_configured, health_check
+  fetch      — fetch_messages (unread), search
+  act        — send_message, mark_read
+  webhook_in — not supported (raises ConnectorNotImplementedError)
+  webhook_out— not supported (raises ConnectorNotImplementedError)
 """
 
 from __future__ import annotations
@@ -18,15 +17,10 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
-from typing import Union
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from integrations.base_connector import BaseConnector
 from integrations.entities import (
     ActionResult,
-    ConnectorError,
     ConnectorHealth,
     NormalizedMessage,
     OutboundMessage,
@@ -36,28 +30,30 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_date(date_str: str) -> datetime:
-    """Best-effort parse of RFC 2822 / ISO date strings."""
+    """Parse RFC 2822 / ISO-8601 date strings, falling back to now."""
     if not date_str:
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(timezone.utc)
     try:
-        return parsedate_to_datetime(date_str)
+        from dateutil.parser import parse as _parse
+        return _parse(date_str).replace(tzinfo=timezone.utc) if _parse(date_str).tzinfo is None else _parse(date_str)
     except Exception:
-        pass
-    try:
-        return datetime.fromisoformat(date_str)
-    except Exception:
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(timezone.utc)
 
 
-def _normalize(raw: dict, connector_name: str) -> NormalizedMessage:
-    """Convert an EmailService raw dict into a NormalizedMessage."""
+def _raw_to_normalized(raw: dict, connector: str = "email") -> NormalizedMessage:
+    """Convert a raw dict from EmailService into a NormalizedMessage."""
+    recipients: list[str] = []
+    to_field = raw.get("to", "")
+    if to_field:
+        recipients = [addr.strip() for addr in to_field.split(",") if addr.strip()]
+
     return NormalizedMessage(
-        id=str(raw.get("id", "")),
-        connector=connector_name,
+        id=raw.get("id", ""),
+        connector=connector,
         subject=raw.get("subject", ""),
         body=raw.get("body", raw.get("snippet", "")),
         sender=raw.get("from", ""),
-        recipients=[r.strip() for r in raw.get("to", "").split(",") if r.strip()],
+        recipients=recipients,
         timestamp=_parse_date(raw.get("date", "")),
         is_unread=raw.get("is_unread", True),
         labels=raw.get("labels", []),
@@ -66,132 +62,105 @@ def _normalize(raw: dict, connector_name: str) -> NormalizedMessage:
 
 
 class EmailConnector(BaseConnector):
-    """Contract v1 adapter for the email integration."""
+    """Canonical connector for email (Gmail API / IMAP-SMTP fallback).
+
+    The connector is *sessionless* — it creates a fresh EmailService per call
+    because the underlying service accepts a DB session (optional for email
+    operations).  Pass ``db=None`` when constructing outside of a request
+    context; the service will still work for email operations that don't touch
+    the DB.
+    """
 
     name = "email"
 
-    def __init__(self, db: AsyncSession) -> None:
-        self._db = db
-        self._svc: object | None = None  # lazy-loaded EmailService
+    def __init__(self, db=None) -> None:
+        # Lazy import to avoid circular dependencies and heavy startup cost.
+        from app.services.email_service import EmailService
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        self._svc = EmailService(db)  # type: ignore[arg-type]
 
-    def _service(self):
-        """Return (cached) EmailService instance."""
-        if self._svc is None:
-            from app.services.email_service import EmailService  # avoid circular import
-            self._svc = EmailService(self._db)
-        return self._svc
+    # ── auth ──────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # 1. auth
-    # ------------------------------------------------------------------
+    def is_configured(self) -> bool:  # noqa: D102
+        return self._svc.is_configured()
 
-    def is_configured(self) -> bool:
-        return self._service().is_configured()
-
-    async def health_check(self) -> ConnectorHealth:
+    async def health_check(self) -> ConnectorHealth:  # noqa: D102
         if not self.is_configured():
+            return self._not_configured_health()
+
+        t0 = time.monotonic()
+        try:
+            msgs = await self._svc.get_unread(max_results=1)
+            latency = self._ms(t0)
             return ConnectorHealth(
                 connector=self.name,
-                status="not_configured",
-                detail="Email service is not configured — set GMAIL_CREDENTIALS_FILE or IMAP credentials",
+                status="ok",
+                latency_ms=latency,
+                detail=f"Fetched {len(msgs)} message(s) successfully.",
             )
-        start = time.monotonic()
-        try:
-            # Fetch at most 1 message as a connectivity probe.
-            await self._service().get_unread(max_results=1)
-            return self._timed_health(start, f"mode={self._service()._detect_mode()}")
         except Exception as exc:
             return ConnectorHealth(
                 connector=self.name,
                 status="error",
+                latency_ms=self._ms(t0),
                 detail=str(exc),
             )
 
-    # ------------------------------------------------------------------
-    # 2. fetch
-    # ------------------------------------------------------------------
+    # ── fetch ─────────────────────────────────────────────────────────
 
     async def fetch_messages(
         self,
         limit: int = 20,
-        filter_unread: bool = False,
+        filter_unread: bool = True,
     ) -> list[NormalizedMessage]:
-        try:
-            if filter_unread:
-                raws = await self._service().get_unread(max_results=limit)
-            else:
-                raws = await self._service().get_unread(max_results=limit)
-            return [_normalize(r, self.name) for r in raws if r]
-        except Exception as exc:
-            logger.error("[email_connector] fetch_messages failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        """Return unread emails normalized to NormalizedMessage."""
+        raw_list = await self._svc.get_unread(max_results=limit)
+        return [_raw_to_normalized(r) for r in raw_list]
 
     async def search(
         self,
         query: str,
         limit: int = 20,
     ) -> list[NormalizedMessage]:
-        try:
-            raws = await self._service().search(query=query, max_results=limit)
-            return [_normalize(r, self.name) for r in raws if r]
-        except Exception as exc:
-            logger.error("[email_connector] search failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        """Search emails and return normalized results."""
+        raw_list = await self._svc.search(query=query, max_results=limit)
+        return [_raw_to_normalized(r) for r in raw_list]
 
-    # ------------------------------------------------------------------
-    # 3. act
-    # ------------------------------------------------------------------
+    # ── act ───────────────────────────────────────────────────────────
 
     async def send_message(self, msg: OutboundMessage) -> ActionResult:
-        try:
-            result = await self._service().send(
-                to=", ".join(msg.to),
-                subject=msg.subject,
-                body=msg.body,
-                html=msg.html,
-                cc=", ".join(msg.cc),
-                bcc=", ".join(msg.bcc),
-            )
-            if result:
-                return ActionResult(
-                    success=True,
-                    connector=self.name,
-                    resource_id=str(result.get("id", "")),
-                    detail=result.get("status", "sent"),
-                    raw=result,
-                )
+        """Send an email.  ``msg.to`` may contain multiple addresses."""
+        to = ", ".join(msg.to)
+        cc = ", ".join(msg.cc) if msg.cc else ""
+        bcc = ", ".join(msg.bcc) if msg.bcc else ""
+
+        result = await self._svc.send(
+            to=to,
+            subject=msg.subject,
+            body=msg.body,
+            html=msg.html,
+            cc=cc,
+            bcc=bcc,
+        )
+        if result:
             return ActionResult(
-                success=False,
+                success=True,
                 connector=self.name,
-                detail="send returned None — check email service configuration",
+                resource_id=result.get("id", ""),
+                raw=result,
             )
-        except Exception as exc:
-            logger.error("[email_connector] send_message failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        return ActionResult(
+            success=False,
+            connector=self.name,
+            detail="Email service returned no result — backend may not be configured.",
+        )
 
     async def mark_read(self, message_id: str) -> ActionResult:
-        try:
-            ok = await self._service().mark_read(message_id)
-            return ActionResult(
-                success=ok,
-                connector=self.name,
-                resource_id=message_id,
-                detail="marked read" if ok else "mark_read returned False",
-            )
-        except Exception as exc:
-            logger.error("[email_connector] mark_read failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
-
-    # ------------------------------------------------------------------
-    # 4. webhook_in (stub — Gmail push webhooks require Cloud Pub/Sub setup)
-    # ------------------------------------------------------------------
-
-    def verify_webhook(self, headers: dict, body_bytes: bytes) -> bool:
-        # Gmail push notifications are authenticated via Google-signed JWT.
-        # Full verification not yet implemented; return False to be safe.
-        logger.debug("[email_connector] verify_webhook called — not fully implemented")
-        return False
+        """Mark an email as read by its provider message ID."""
+        ok = await self._svc.mark_read(message_id)
+        return ActionResult(
+            success=ok,
+            connector=self.name,
+            resource_id=message_id,
+            detail="" if ok else "mark_read returned False — may not be supported by backend.",
+        )

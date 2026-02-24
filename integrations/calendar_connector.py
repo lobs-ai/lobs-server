@@ -1,30 +1,32 @@
 """Calendar connector — Integration Contract v1 adapter.
 
-Wraps ``app.services.google_calendar.GoogleCalendarService`` and translates
-its raw dict payloads into normalized contract entities.
+Wraps the existing ``app.services.google_calendar.GoogleCalendarService`` and
+exposes it through the canonical BaseConnector interface.
 
-Supported capabilities:
-  ✅ auth         — is_configured(), health_check()
-  ❌ fetch_messages — not applicable (raises ConnectorNotImplementedError)
-  ✅ fetch_events — fetch_events(start, end)
-  ❌ search       — full-text search not supported by Google Calendar API
-  ✅ act          — create_event(), update_event(), delete_event()
-  ❌ webhook_in/out — Google Calendar push notifications not yet configured
+Supported capabilities
+  auth       — is_configured, health_check
+  fetch      — fetch_events
+  act        — create_event, update_event, delete_event
+  webhook_in — not supported (raises ConnectorNotImplementedError)
+  webhook_out— not supported (raises ConnectorNotImplementedError)
+
+Notes
+  - Events are fetched from *Lobs's own calendar* by default.
+  - ``fetch_messages()`` and ``send_message()``/``mark_read()`` raise
+    ConnectorNotImplementedError (calendars don't carry messages).
+  - ``search()`` is not implemented by the underlying service and also raises.
 """
 
 from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
-from typing import Union
-
-from sqlalchemy.ext.asyncio import AsyncSession
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from integrations.base_connector import BaseConnector
 from integrations.entities import (
     ActionResult,
-    ConnectorError,
     ConnectorHealth,
     EventDraft,
     NormalizedEvent,
@@ -33,29 +35,30 @@ from integrations.entities import (
 logger = logging.getLogger(__name__)
 
 
-def _parse_dt(dt_str: str | None) -> datetime:
-    """Parse an ISO 8601 / date-only string into a datetime."""
-    if not dt_str:
-        return datetime.now(tz=timezone.utc)
-    try:
-        if "T" in dt_str:
-            from dateutil.parser import parse
-            return parse(dt_str)
-        return datetime.strptime(dt_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    except Exception:
-        return datetime.now(tz=timezone.utc)
+def _raw_to_normalized(raw: dict, connector: str = "calendar") -> NormalizedEvent:
+    """Convert a raw dict from GoogleCalendarService._norm() into a NormalizedEvent."""
 
+    def _parse(dt_str: str | None) -> datetime:
+        if not dt_str:
+            return datetime.now(timezone.utc)
+        try:
+            from dateutil.parser import parse as _p
+            dt = _p(dt_str)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except Exception:
+            return datetime.now(timezone.utc)
 
-def _normalize(raw: dict, connector_name: str) -> NormalizedEvent:
-    """Convert a GoogleCalendarService raw dict into a NormalizedEvent."""
+    start = _parse(raw.get("start"))
+    end = _parse(raw.get("end")) if raw.get("end") else start + timedelta(hours=1)
+
     return NormalizedEvent(
-        id=str(raw.get("gcal_id", "")),
-        connector=connector_name,
-        title=raw.get("title", "(No title)"),
+        id=raw.get("gcal_id", ""),
+        connector=connector,
+        title=raw.get("title", ""),
         description=raw.get("description", ""),
-        start=_parse_dt(raw.get("start")),
-        end=_parse_dt(raw.get("end")),
-        attendees=[a for a in raw.get("attendees", []) if a],
+        start=start,
+        end=end,
+        attendees=raw.get("attendees", []),
         location=raw.get("location", ""),
         is_all_day=raw.get("all_day", False),
         status=raw.get("status", "confirmed"),
@@ -64,140 +67,115 @@ def _normalize(raw: dict, connector_name: str) -> NormalizedEvent:
 
 
 class CalendarConnector(BaseConnector):
-    """Contract v1 adapter for the Google Calendar integration."""
+    """Canonical connector for Google Calendar.
+
+    Pass ``db=None`` when constructing outside of a request context; the
+    underlying service only uses the DB for sync operations which are not
+    surfaced through this contract interface.
+    """
 
     name = "calendar"
 
-    def __init__(self, db: AsyncSession) -> None:
-        self._db = db
-        self._svc: object | None = None  # lazy-loaded GoogleCalendarService
+    def __init__(self, db=None) -> None:
+        from app.services.google_calendar import GoogleCalendarService
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        self._svc = GoogleCalendarService(db)  # type: ignore[arg-type]
 
-    def _service(self):
-        """Return (cached) GoogleCalendarService instance."""
-        if self._svc is None:
-            from app.services.google_calendar import GoogleCalendarService  # avoid circular import
-            self._svc = GoogleCalendarService(self._db)
-        return self._svc
+    # ── auth ──────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # 1. auth
-    # ------------------------------------------------------------------
+    def is_configured(self) -> bool:  # noqa: D102
+        return self._svc.is_configured()
 
-    def is_configured(self) -> bool:
-        return self._service().is_configured()
-
-    async def health_check(self) -> ConnectorHealth:
+    async def health_check(self) -> ConnectorHealth:  # noqa: D102
         if not self.is_configured():
+            return self._not_configured_health()
+
+        t0 = time.monotonic()
+        try:
+            events = await self._svc.get_lobs_events(days=3)
+            latency = self._ms(t0)
             return ConnectorHealth(
                 connector=self.name,
-                status="not_configured",
-                detail="Google Calendar not configured — set GOOGLE_CALENDAR_CREDENTIALS_FILE",
+                status="ok",
+                latency_ms=latency,
+                detail=f"Fetched {len(events)} event(s) successfully.",
             )
-        start = time.monotonic()
-        try:
-            # Fetch 1 event as a connectivity probe (next 1 day window).
-            from datetime import timedelta
-            now = datetime.now(tz=timezone.utc)
-            events = await self._service().get_lobs_events(days=1)
-            return self._timed_health(start, f"fetched {len(events)} events")
         except Exception as exc:
             return ConnectorHealth(
                 connector=self.name,
                 status="error",
+                latency_ms=self._ms(t0),
                 detail=str(exc),
             )
 
-    # ------------------------------------------------------------------
-    # 2. fetch
-    # ------------------------------------------------------------------
+    # ── fetch ─────────────────────────────────────────────────────────
 
     async def fetch_events(
         self,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> list[NormalizedEvent]:
-        """Return Lobs's calendar events in the given window."""
-        try:
-            svc = self._service()
-            # Compute days from start → end and call get_lobs_events.
-            from datetime import timedelta
-            days = max(1, int((end - start).total_seconds() / 86400))
-            raws = await svc.get_lobs_events(days=days)
-            return [_normalize(r, self.name) for r in raws if r]
-        except Exception as exc:
-            logger.error("[calendar_connector] fetch_events failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        """Return Lobs's calendar events in the given window.
 
-    # ------------------------------------------------------------------
-    # 3. act
-    # ------------------------------------------------------------------
+        If ``start`` / ``end`` are omitted, defaults to the next 7 days.
+        """
+        now = datetime.now(timezone.utc)
+        start = start or now
+        end = end or (now + timedelta(days=7))
+
+        days = max(1, (end - start).days)
+        raw_list = await self._svc.get_lobs_events(days=days)
+        return [_raw_to_normalized(r) for r in raw_list]
+
+    # ── act ───────────────────────────────────────────────────────────
 
     async def create_event(self, event: EventDraft) -> ActionResult:
-        try:
-            result = await self._service().create_event(
-                title=event.title,
-                start=event.start,
-                end=event.end,
-                description=event.description,
-                location=event.location,
-                all_day=event.is_all_day,
-                invite_rafe=False,  # callers must explicitly invite via attendees
-            )
-            if result:
-                return ActionResult(
-                    success=True,
-                    connector=self.name,
-                    resource_id=str(result.get("gcal_id", "")),
-                    detail="created",
-                    raw=result,
-                )
+        """Create an event on Lobs's Google Calendar."""
+        result = await self._svc.create_event(
+            title=event.title,
+            start=event.start,
+            end=event.end,
+            description=event.description,
+            location=event.location,
+            all_day=event.is_all_day,
+            invite_rafe=False,  # connector layer does not apply business rules
+        )
+        if result:
             return ActionResult(
-                success=False,
+                success=True,
                 connector=self.name,
-                detail="create_event returned None — check Google Calendar configuration",
+                resource_id=result.get("gcal_id", ""),
+                raw=result,
             )
-        except Exception as exc:
-            logger.error("[calendar_connector] create_event failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        return ActionResult(
+            success=False,
+            connector=self.name,
+            detail="Calendar service returned no result — backend may not be configured.",
+        )
 
-    async def update_event(self, event_id: str, patch: dict) -> ActionResult:
-        """Patch an existing event.
-
-        Supported patch keys: title, description, start (datetime), end (datetime).
-        """
-        try:
-            result = await self._service().update_event(event_id, **patch)
-            if result:
-                return ActionResult(
-                    success=True,
-                    connector=self.name,
-                    resource_id=str(result.get("gcal_id", event_id)),
-                    detail="updated",
-                    raw=result,
-                )
+    async def update_event(self, event_id: str, patch: dict[str, Any]) -> ActionResult:
+        """Patch an existing event.  ``patch`` keys mirror EventDraft fields."""
+        result = await self._svc.update_event(event_id, **patch)
+        if result:
             return ActionResult(
-                success=False,
+                success=True,
                 connector=self.name,
-                resource_id=event_id,
-                detail="update_event returned None — event may not exist or credentials missing",
+                resource_id=result.get("gcal_id", event_id),
+                raw=result,
             )
-        except Exception as exc:
-            logger.error("[calendar_connector] update_event failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        return ActionResult(
+            success=False,
+            connector=self.name,
+            resource_id=event_id,
+            detail="update_event returned None — check event_id and credentials.",
+        )
 
     async def delete_event(self, event_id: str) -> ActionResult:
-        try:
-            ok = await self._service().delete_event(event_id)
-            return ActionResult(
-                success=ok,
-                connector=self.name,
-                resource_id=event_id,
-                detail="deleted" if ok else "delete_event returned False — event may not exist",
-            )
-        except Exception as exc:
-            logger.error("[calendar_connector] delete_event failed: %s", exc)
-            raise ConnectorError(self.name, str(exc)) from exc
+        """Delete / cancel an event from Lobs's Google Calendar."""
+        ok = await self._svc.delete_event(event_id)
+        return ActionResult(
+            success=ok,
+            connector=self.name,
+            resource_id=event_id,
+            detail="" if ok else "delete_event returned False — check event_id and credentials.",
+        )
