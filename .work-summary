@@ -1,1 +1,1 @@
-Updated docs/learning-loop-mvp-design.md (correct state/prefix/criteria) + wrote docs/handoffs/learning-loop-mvp-status.md (precise programmer handoff for remaining work)
+Design doc and programmer handoffs for Learning Loop MVP verified and corrected: fixed /api/learning → /api/agent-learning prefix, updated component status (PromptEnhancer fully implemented, Hook 1 live). Report at ~/lobs-control/state/reports/pending/learning-loop-mvp-documentation-2026-02-24.md
