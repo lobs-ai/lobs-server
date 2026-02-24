@@ -703,6 +703,9 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Work Tracker
     "tracker.check_deadlines": lambda db, wm, ctx, **kw: _pcall_integration("check_deadlines", db, wm, ctx, **kw),
     "tracker.daily_summary": lambda db, wm, ctx, **kw: _pcall_integration("daily_work_summary", db, wm, ctx, **kw),
+    # Learning
+    "learning.check_due": lambda db, wm, ctx, **kw: _pcall_learning("check_due_lessons", db, wm, ctx, **kw),
+    "learning.create_plan": lambda db, wm, ctx, **kw: _pcall_learning("create_plan_from_request", db, wm, ctx, **kw),
 }
 
 
@@ -710,4 +713,11 @@ async def _pcall_integration(func_name: str, db, worker_manager, context, **kw):
     """Generic dispatcher for integration callables."""
     import app.orchestrator.workflow_integrations as integrations
     fn = getattr(integrations, func_name)
+    return await fn(db, worker_manager, context, **kw)
+
+
+async def _pcall_learning(func_name: str, db, worker_manager, context, **kw):
+    """Dispatcher for learning service callables."""
+    import app.services.learning_service as learning
+    fn = getattr(learning, func_name)
     return await fn(db, worker_manager, context, **kw)

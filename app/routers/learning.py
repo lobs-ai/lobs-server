@@ -1,245 +1,133 @@
-"""Learning system stats and metrics API."""
-
-import logging
-from typing import Optional, List
-from datetime import datetime, timedelta, timezone
+"""Learning plan API endpoints."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func, and_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import TaskOutcome, OutcomeLearning
-
-logger = logging.getLogger(__name__)
+from app.auth import require_auth
+from app.models import LearningPlan, LearningLesson
 
 router = APIRouter(prefix="/learning", tags=["learning"])
 
 
-class LearningStats(BaseModel):
-    """Learning system performance metrics."""
-    agent_type: str
-    baseline_acceptance_rate: float
-    current_acceptance_rate: float
-    improvement_pct: float
-    learning_count: int
-    active_learning_count: int
-    avg_confidence: float
-    application_rate: float
-    tasks_with_outcomes: int
-    tasks_with_learnings: int
-    control_group_size: int
-    treatment_group_size: int
-    control_success_rate: float
-    treatment_success_rate: float
-    statistical_significance: Optional[str]
+class CreatePlanRequest(BaseModel):
+    topic: str
+    goal: str = "Get 1% better every day"
+    total_days: int = 30
+    schedule_cron: str = "0 7 * * *"
+    delivery_channel: str = "discord"
 
 
-class LearningHealth(BaseModel):
-    """Learning system health status."""
-    status: str
-    issues: List[str]
-    recent_outcomes_24h: int
-    recent_learnings_7d: int
-    applied_learnings_7d: int
-    low_confidence_active: int
+@router.post("/plans", dependencies=[Depends(require_auth)])
+async def create_plan(req: CreatePlanRequest, db: AsyncSession = Depends(get_db)):
+    """Create a new learning plan (generates outline via LLM)."""
+    from app.services.learning_service import create_plan
+    result = await create_plan(
+        db, topic=req.topic, goal=req.goal, total_days=req.total_days,
+        schedule_cron=req.schedule_cron, delivery_channel=req.delivery_channel,
+    )
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("error"))
+    return result
 
 
-def _calculate_significance(control: List[TaskOutcome], treatment: List[TaskOutcome]) -> str:
-    """
-    Calculate statistical significance using Chi-squared test.
-    
-    Returns:
-        "significant" if p < 0.05, "not_significant" otherwise, or "insufficient_data"
-    """
-    if len(control) < 10 or len(treatment) < 10:
-        return "insufficient_data"
-    
-    try:
-        from scipy.stats import chi2_contingency
-        
-        control_success = sum(1 for o in control if o.success)
-        control_failure = len(control) - control_success
-        treatment_success = sum(1 for o in treatment if o.success)
-        treatment_failure = len(treatment) - treatment_success
-        
-        contingency_table = [
-            [control_success, control_failure],
-            [treatment_success, treatment_failure],
-        ]
-        
-        chi2, p_value, dof, expected = chi2_contingency(contingency_table)
-        
-        if p_value < 0.05:
-            return "significant"
-        else:
-            return "not_significant"
-            
-    except ImportError:
-        logger.warning("scipy not installed, cannot calculate statistical significance")
-        return "unavailable"
-    except Exception as e:
-        logger.error(f"Error calculating significance: {e}")
-        return "error"
+@router.get("/plans", dependencies=[Depends(require_auth)])
+async def list_plans(status: str = "active", db: AsyncSession = Depends(get_db)):
+    """List learning plans."""
+    query = select(LearningPlan)
+    if status != "all":
+        query = query.where(LearningPlan.status == status)
+    result = await db.execute(query.order_by(LearningPlan.created_at.desc()))
+    plans = result.scalars().all()
+    return [
+        {
+            "id": p.id, "topic": p.topic, "goal": p.goal,
+            "total_days": p.total_days, "current_day": p.current_day,
+            "status": p.status, "schedule_cron": p.schedule_cron,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in plans
+    ]
 
 
-@router.get("/stats", response_model=LearningStats)
-async def get_learning_stats(
-    agent: str = "programmer",
-    since_days: int = 14,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Get learning system performance metrics.
-    
-    Compares control group (learning_disabled=True) vs treatment group
-    to measure actual improvement.
-    """
-    since_time = datetime.now(timezone.utc) - timedelta(days=since_days)
-    
-    # Query outcomes in time window
-    outcomes_query = select(TaskOutcome).where(
-        and_(
-            TaskOutcome.agent_type == agent,
-            TaskOutcome.created_at >= since_time,
-        )
-    )
-    result = await db.execute(outcomes_query)
-    all_outcomes = result.scalars().all()
-    
-    if not all_outcomes:
-        raise HTTPException(404, f"No outcomes found for agent {agent} in last {since_days} days")
-    
-    # Split into control vs treatment
-    control = [o for o in all_outcomes if o.learning_disabled]
-    treatment = [o for o in all_outcomes if not o.learning_disabled]
-    
-    # Calculate success rates
-    control_success = sum(1 for o in control if o.success) / len(control) if control else 0.0
-    treatment_success = sum(1 for o in treatment if o.success) / len(treatment) if treatment else 0.0
-    
-    # Calculate improvement
-    if control_success > 0:
-        improvement_pct = ((treatment_success - control_success) / control_success) * 100
-    else:
-        improvement_pct = 0.0
-    
-    # Statistical significance (Chi-squared test)
-    significance = _calculate_significance(control, treatment)
-    
-    # Query learnings
-    learnings_query = select(OutcomeLearning).where(
-        OutcomeLearning.agent_type == agent
-    )
-    result = await db.execute(learnings_query)
-    learnings = result.scalars().all()
-    
-    active_learnings = [l for l in learnings if l.is_active]
-    avg_confidence = sum(l.confidence for l in active_learnings) / len(active_learnings) if active_learnings else 0.0
-    
-    # Application rate: how many treatment tasks got learnings
-    tasks_with_learnings = sum(1 for o in treatment if o.applied_learnings and len(o.applied_learnings) > 0)
-    application_rate = tasks_with_learnings / len(treatment) if treatment else 0.0
-    
-    return LearningStats(
-        agent_type=agent,
-        baseline_acceptance_rate=control_success,
-        current_acceptance_rate=treatment_success,
-        improvement_pct=improvement_pct,
-        learning_count=len(learnings),
-        active_learning_count=len(active_learnings),
-        avg_confidence=avg_confidence,
-        application_rate=application_rate,
-        tasks_with_outcomes=len(all_outcomes),
-        tasks_with_learnings=tasks_with_learnings,
-        control_group_size=len(control),
-        treatment_group_size=len(treatment),
-        control_success_rate=control_success,
-        treatment_success_rate=treatment_success,
-        statistical_significance=significance,
-    )
+@router.get("/plans/{plan_id}", dependencies=[Depends(require_auth)])
+async def get_plan(plan_id: str, db: AsyncSession = Depends(get_db)):
+    """Get a plan with its outline."""
+    plan = await db.get(LearningPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    return {
+        "id": plan.id, "topic": plan.topic, "goal": plan.goal,
+        "total_days": plan.total_days, "current_day": plan.current_day,
+        "status": plan.status, "schedule_cron": plan.schedule_cron,
+        "plan_outline": plan.plan_outline,
+        "created_at": plan.created_at.isoformat() if plan.created_at else None,
+    }
 
 
-@router.get("/health", response_model=LearningHealth)
-async def get_learning_health(
-    agent: Optional[str] = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Health check for learning system.
-    
-    Returns:
-        Status indicators and any issues detected
-    """
-    issues = []
-    
-    # Check: Are outcomes being created?
-    recent_outcomes_query = select(func.count(TaskOutcome.id)).where(
-        TaskOutcome.created_at >= datetime.now(timezone.utc) - timedelta(hours=24)
+@router.get("/plans/{plan_id}/lessons", dependencies=[Depends(require_auth)])
+async def list_lessons(plan_id: str, db: AsyncSession = Depends(get_db)):
+    """Get all generated lessons for a plan."""
+    result = await db.execute(
+        select(LearningLesson).where(LearningLesson.plan_id == plan_id)
+        .order_by(LearningLesson.day_number)
     )
-    if agent:
-        recent_outcomes_query = recent_outcomes_query.where(TaskOutcome.agent_type == agent)
-    
-    result = await db.execute(recent_outcomes_query)
-    recent_outcomes = result.scalar()
-    
-    if recent_outcomes == 0:
-        issues.append("no_recent_outcomes")
-    
-    # Check: Are learnings being created?
-    recent_learnings_query = select(func.count(OutcomeLearning.id)).where(
-        OutcomeLearning.created_at >= datetime.now(timezone.utc) - timedelta(days=7)
-    )
-    if agent:
-        recent_learnings_query = recent_learnings_query.where(OutcomeLearning.agent_type == agent)
-    
-    result = await db.execute(recent_learnings_query)
-    recent_learnings = result.scalar()
-    
-    if recent_learnings == 0:
-        issues.append("no_recent_learnings")
-    
-    # Check: Are learnings being applied?
-    applied_query = select(func.count(TaskOutcome.id)).where(
-        and_(
-            TaskOutcome.created_at >= datetime.now(timezone.utc) - timedelta(days=7),
-            TaskOutcome.applied_learnings.isnot(None),
-        )
-    )
-    if agent:
-        applied_query = applied_query.where(TaskOutcome.agent_type == agent)
-    
-    result = await db.execute(applied_query)
-    applied_count = result.scalar()
-    
-    if applied_count == 0:
-        issues.append("no_learnings_applied")
-    
-    # Check: Any low-confidence learnings that should be deactivated?
-    low_conf_query = select(func.count(OutcomeLearning.id)).where(
-        and_(
-            OutcomeLearning.is_active == True,
-            OutcomeLearning.confidence < 0.3,
-            OutcomeLearning.failure_count > 3,
-        )
-    )
-    if agent:
-        low_conf_query = low_conf_query.where(OutcomeLearning.agent_type == agent)
-    
-    result = await db.execute(low_conf_query)
-    low_conf_count = result.scalar()
-    
-    if low_conf_count > 0:
-        issues.append(f"low_confidence_learnings:{low_conf_count}")
-    
-    status = "healthy" if not issues else "degraded"
-    
-    return LearningHealth(
-        status=status,
-        issues=issues,
-        recent_outcomes_24h=recent_outcomes,
-        recent_learnings_7d=recent_learnings,
-        applied_learnings_7d=applied_count,
-        low_confidence_active=low_conf_count,
-    )
+    lessons = result.scalars().all()
+    return [
+        {
+            "id": l.id, "day": l.day_number, "title": l.title,
+            "summary": l.summary, "document_path": l.document_path,
+            "delivered_at": l.delivered_at.isoformat() if l.delivered_at else None,
+            "created_at": l.created_at.isoformat() if l.created_at else None,
+        }
+        for l in lessons
+    ]
+
+
+@router.get("/lessons/{lesson_id}", dependencies=[Depends(require_auth)])
+async def get_lesson(lesson_id: str, db: AsyncSession = Depends(get_db)):
+    """Get a specific lesson with full content."""
+    lesson = await db.get(LearningLesson, lesson_id)
+    if not lesson:
+        raise HTTPException(status_code=404, detail="Lesson not found")
+    return {
+        "id": lesson.id, "plan_id": lesson.plan_id,
+        "day": lesson.day_number, "title": lesson.title,
+        "content": lesson.content, "summary": lesson.summary,
+        "document_path": lesson.document_path,
+        "delivered_at": lesson.delivered_at.isoformat() if lesson.delivered_at else None,
+    }
+
+
+@router.post("/plans/{plan_id}/pause", dependencies=[Depends(require_auth)])
+async def pause_plan(plan_id: str, db: AsyncSession = Depends(get_db)):
+    """Pause an active plan."""
+    plan = await db.get(LearningPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    plan.status = "paused"
+    await db.commit()
+    return {"status": "paused", "plan_id": plan_id}
+
+
+@router.post("/plans/{plan_id}/resume", dependencies=[Depends(require_auth)])
+async def resume_plan(plan_id: str, db: AsyncSession = Depends(get_db)):
+    """Resume a paused plan."""
+    plan = await db.get(LearningPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Plan not found")
+    plan.status = "active"
+    await db.commit()
+    return {"status": "active", "plan_id": plan_id}
+
+
+@router.post("/plans/{plan_id}/generate-next", dependencies=[Depends(require_auth)])
+async def generate_next(plan_id: str, db: AsyncSession = Depends(get_db)):
+    """Manually trigger the next lesson generation."""
+    from app.services.learning_service import generate_next_lesson
+    result = await generate_next_lesson(db, plan_id)
+    if result.get("status") == "error":
+        raise HTTPException(status_code=500, detail=result.get("error"))
+    return result

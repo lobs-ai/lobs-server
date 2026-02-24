@@ -559,6 +559,102 @@ DEFAULT_WORKFLOWS = [
         "edges": [],
         "metadata": {"author": "lobs", "category": "tracker", "system": True},
     },
+    # ══════════════════════════════════════════════════════════════════
+    # DAILY LEARNING — Generate and deliver lessons from active plans
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "daily-learning",
+        "description": "Check active learning plans and generate+deliver the next lesson. Runs daily at 7am ET. Reusable for any topic — LLMs, distributed systems, cooking, etc.",
+        "trigger": {"type": "schedule", "cron": "0 7 * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "check_plans",
+                "type": "python_call",
+                "config": {"callable": "learning.check_due"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "check_plans.lessons_generated > 0", "goto": "deliver"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "deliver",
+                "type": "notify",
+                "config": {
+                    "channel": "discord",
+                    "message_template": "📚 **Daily Lesson**\n\n{check_plans.lessons[0].content_preview}...\n\n📄 Full lesson saved to: `{check_plans.lessons[0].document_path}`",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "learning", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # LEARNING PLAN CREATION — Event-triggered, creates outline via LLM
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "create-learning-plan",
+        "description": "Create a new learning plan when requested. Generates a full day-by-day outline via LLM. Triggered by learning.plan_requested event.",
+        "trigger": {"type": "event", "event_pattern": "learning.plan_requested"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "create",
+                "type": "python_call",
+                "config": {
+                    "callable": "learning.create_plan",
+                    "args_template": {
+                        "topic": "{trigger.topic}",
+                        "goal": "{trigger.goal}",
+                        "total_days": "{trigger.total_days}",
+                    },
+                },
+                "on_success": "check_result",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_result",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "create.status == ok", "goto": "notify_created"},
+                    ],
+                    "default": "notify_failed",
+                },
+            },
+            {
+                "id": "notify_created",
+                "type": "notify",
+                "config": {
+                    "channel": "discord",
+                    "message_template": "📚 Learning plan created: **{create.topic}** ({create.total_days} days)\n\nOutline generated with {create.outline_days} lessons. First lesson delivers tomorrow at 7am!",
+                },
+                "on_success": "done",
+            },
+            {
+                "id": "notify_failed",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Failed to create learning plan: {create.error}",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "learning", "system": True},
+    },
     # ── System Workflows (recurring/event-driven) ────────────────────
     {
         "name": "reflection-cycle",

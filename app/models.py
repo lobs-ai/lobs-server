@@ -467,6 +467,39 @@ class ScheduledEvent(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class LearningPlan(Base):
+    """A reusable multi-day learning plan on any topic."""
+    __tablename__ = "learning_plans"
+
+    id = Column(String, primary_key=True)
+    topic = Column(String, nullable=False)          # e.g. "LLMs", "Distributed Systems"
+    goal = Column(Text)                              # e.g. "Get 1% better every day"
+    total_days = Column(Integer, default=30)
+    current_day = Column(Integer, default=0)         # 0 = plan created but not started
+    status = Column(String, default="active")        # active, paused, completed, cancelled
+    schedule_cron = Column(String, default="0 7 * * *")  # when to deliver lessons
+    schedule_tz = Column(String, default="America/New_York")
+    delivery_channel = Column(String, default="discord")  # where to send lessons
+    plan_outline = Column(JSON)                      # [{day: 1, title: "...", summary: "..."}, ...]
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class LearningLesson(Base):
+    """A single lesson in a learning plan."""
+    __tablename__ = "learning_lessons"
+
+    id = Column(String, primary_key=True)
+    plan_id = Column(String, ForeignKey("learning_plans.id"), nullable=False)
+    day_number = Column(Integer, nullable=False)
+    title = Column(String, nullable=False)
+    content = Column(Text)                           # Full lesson markdown
+    summary = Column(Text)                           # Brief overview
+    delivered_at = Column(DateTime)                   # When it was sent to the user
+    document_path = Column(String)                    # Saved file path
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
 class TextDump(Base):
     """Text dump model."""
     __tablename__ = "text_dumps"
