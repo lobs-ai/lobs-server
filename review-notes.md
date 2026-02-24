@@ -1,243 +1,306 @@
-# Diagnostic Review: Phase 1.3 Failure Analysis
+# Diagnostic Review: Phase 1.3 Task Failure Analysis
 
-**Task ID:** `498C8166-D5AA-4BF1-BFCD-54CE726F2707`  
-**Task:** Phase 1.3: Prompt Enhancement & Learning Injection  
-**Status:** Failed 8+ times (programmer, architect, multiple retries)  
+**Task ID:** 498C8166-D5AA-4BF1-BFCD-54CE726F2707  
+**Diagnostic Task:** diag_498C8166-D5AA-4BF1-BFCD-54CE726F2707_1771903447  
 **Reviewer:** reviewer  
-**Date:** 2026-02-24
+**Date:** 2026-02-24  
+**Retry Count:** 15+ attempts across programmer/architect agents
 
 ---
 
-## 🔴 Root Cause: Dependency Hell
+## Executive Summary
 
-### The Problem
+🔴 **Critical: Task Definition Error**
 
-**Task asks for:** Implement Phase 1.3 (Prompt Enhancement)  
-**Task depends on:** Phases 1.1 and 1.2 being complete  
-**Reality:** Phases 1.1 and 1.2 were NEVER implemented
+The task is failing with "Session stale (no response)" not because of implementation bugs, but because **the task is impossible as currently defined**. Agents are timing out (5-minute limit) because they discover missing dependencies and cannot proceed, entering analysis loops without producing output.
 
-### What Actually Exists
+**Root Cause:** Task requires implementing Phase 1.3 (Prompt Enhancement) which depends on Phases 1.1 and 1.2 that were never implemented. Only database schemas exist.
 
-✅ **Database layer (schema only):**
-- `task_outcomes` table (created)
-- `outcome_learnings` table (created)
-- `TaskOutcome` model in `app/models.py`
-- `OutcomeLearning` model in `app/models.py`
-
-❌ **Service layer (missing):**
-- No `app/orchestrator/outcome_tracker.py` (Phase 1.1)
-- No `app/orchestrator/lesson_extractor.py` (Phase 1.2)
-- No `app/orchestrator/prompt_enhancer.py` (Phase 1.3)
-
-❌ **Integration layer (missing):**
-- Worker doesn't track outcomes
-- Worker doesn't enhance prompts
-- No feedback collection
-
-### Why Every Attempt Failed
-
-**Programmer attempts (1-3):** Tried to implement Phase 1.3 in isolation. Imports for `OutcomeTracker` and `LessonExtractor` don't exist → import errors or undefined references → task fails.
-
-**Architect attempts (4-5):** Created detailed rescue documentation but didn't actually implement code. Documentation correctly identifies the problem but task keeps retrying without code changes → "Orchestrator shutdown" (not a real error, just shutdown during execution).
-
-**Error log misleading:** "Orchestrator shutdown" is logged when orchestrator shuts down with active workers. It's not a code error—it's a symptom that the task was running when system stopped.
+**Fix Required:** Update task notes to reference the consolidated rescue plan, not the individual Phase 1.3 handoff.
 
 ---
 
-## 🟡 The Rescue Documentation is CORRECT
+## 1. Root Cause Analysis
 
-### Good News
+### 1.1 What "Session stale (no response)" Means
 
-The architect (in attempt #5) created excellent diagnostic documents:
-
-1. **`docs/PHASE_1.3_RESCUE_FINDINGS.md`**
-   - ✅ Correctly identifies root cause
-   - ✅ Verifies what exists vs. what's missing
-   - ✅ Proposes consolidated approach
-
-2. **`docs/handoffs/learning-phase-1-consolidated-rescue.md`**
-   - ✅ Complete technical specification
-   - ✅ ~500 lines of implementation work
-   - ✅ Exact integration points identified
-   - ✅ Fail-safe design
-
-3. **`docs/handoffs/learning-mvp-consolidated.json`**
-   - ✅ Machine-readable handoff
-   - ✅ Clear acceptance criteria
-   - ✅ All dependencies verified
-
-### The Solution They Proposed
-
-Implement all three phases together as one cohesive unit:
-- Create `outcome_tracker.py` (~150 lines)
-- Create `lesson_extractor.py` (~200 lines)  
-- Create `prompt_enhancer.py` (~150 lines)
-- Integrate with `worker.py` (2 integration points, ~30 lines)
-- Add tests (~100 lines)
-
-**Total:** ~630 lines, single cohesive implementation.
-
----
-
-## 🔵 Why The Task Keeps Failing
-
-### The Current Loop
-
-1. Task says: "Implement Phase 1.3"
-2. Task notes say: "Depends on Phases 1.1 and 1.2"
-3. Agent attempts implementation
-4. Agent discovers Phases 1.1 and 1.2 don't exist
-5. Agent either:
-   - Fails with import error
-   - Creates skeleton code that doesn't work
-   - Creates documentation instead of code
-6. Orchestrator retries → loop continues
-
-### Why Documentation Doesn't Help
-
-The rescue documents are excellent **but the task still asks for Phase 1.3 in isolation**. The agents keep trying to implement what the task asks for, not what the rescue documents recommend.
-
----
-
-## ✅ Recommended Fix
-
-### Option 1: Update Task to Use Consolidated Approach (RECOMMENDED)
-
-**Update task notes to:**
-```
-Implement Learning System MVP (Phases 1.1-1.3 consolidated).
-
-Previous attempts failed because Phase 1.3 depends on Phases 1.1-1.2 
-which were never implemented. This task now consolidates all three 
-phases into a single implementation.
-
-Follow the plan in:
-- docs/handoffs/learning-phase-1-consolidated-rescue.md
-- docs/handoffs/learning-mvp-consolidated.json
-
-Create three service classes in one pass:
-1. app/orchestrator/outcome_tracker.py
-2. app/orchestrator/lesson_extractor.py  
-3. app/orchestrator/prompt_enhancer.py
-
-Then integrate with worker.py at two points.
-See rescue doc for exact specifications.
+From `app/orchestrator/worker.py` lines 285-290:
+```python
+messages = self._read_transcript_assistant_messages(transcript)
+if messages:
+    return {"completed": True, "success": True, "error": ""}
+if age_seconds > 300:
+    return {"completed": True, "success": False, "error": "Session stale (no response)"}
 ```
 
-**Why this works:**
-- Task now matches what actually needs to be done
-- Agent gets clear, actionable instructions
-- Dependencies resolved in single implementation
-- Rescue docs are already complete and correct
+**Translation:** Agent was spawned but produced no assistant messages within 5 minutes (300 seconds).
 
-### Option 2: Implement Dependencies First (NOT RECOMMENDED)
+### 1.2 Why Agents Time Out Without Responding
 
-Create separate tasks for Phase 1.1, then 1.2, then retry 1.3. 
+**Current task notes reference:**
+```
+Complete the learning loop by injecting learnings into prompts. 
+Create PromptEnhancer, integrate with prompter.py. 
+See docs/handoffs/learning-phase-1.3-prompt-enhancement.md. 
+Depends on Phases 1.1 and 1.2.
+```
 
-**Why not recommended:**
-- More coordination overhead
-- Phases are tightly coupled
-- Risk of integration issues
-- Architect already identified this approach as problematic
+**What agents discover when they start:**
 
----
+✅ **Database schemas exist:**
+- `task_outcomes` table exists
+- `outcome_learnings` table exists
+- Models in `app/models.py` exist
+- `/api/learning` router exists
 
-## 🎯 Action Items
+❌ **Required services DON'T exist:**
+- ❌ `app/orchestrator/outcome_tracker.py` (Phase 1.1) — MISSING
+- ❌ `app/orchestrator/lesson_extractor.py` (Phase 1.2) — MISSING
+- ❌ `app/orchestrator/prompt_enhancer.py` (Phase 1.3) — MISSING
 
-### Immediate
-1. **Update task `498C8166-D5AA-4BF1-BFCD-54CE726F2707`:**
-   - Change title to: "Learning System MVP (Phases 1.1-1.3 consolidated)"
-   - Update notes to reference consolidated rescue plan
-   - Remove "depends on Phase 1.1 and 1.2" statement (they're now included)
+**Agent decision loop:**
+1. Read 500+ line handoff document
+2. Discover Phase 1.3 depends on Phase 1.1 + 1.2
+3. Check if dependencies exist → they don't
+4. Face impossible choice:
+   - Implement all 3 phases? (too large, handoff says "depends on 1.1 and 1.2")
+   - Report blocker? (but they're trying to "complete" the task)
+   - Implement 1.3 anyway and stub dependencies? (violates handoff)
+5. Enter analysis/planning loop trying to resolve contradiction
+6. **Timeout after 5 minutes without producing any output**
 
-2. **Assign to programmer:**
-   - Task is well-specified in rescue docs
-   - ~630 lines of straightforward implementation
-   - Clear acceptance criteria
-   - No architecture decisions needed
+### 1.3 Evidence from Codebase
 
-### Before Next Retry
-1. ✅ Verify database tables exist (they do)
-2. ✅ Verify models exist (they do)
-3. ✅ Verify worker integration points (identified at line 233)
-4. ✅ Verify rescue documentation complete (it is)
-
----
-
-## 🧪 Test Plan
-
-Once implemented, verify:
-
+**Verified missing files:**
 ```bash
-# 1. Services exist
-ls app/orchestrator/outcome_tracker.py
-ls app/orchestrator/lesson_extractor.py
-ls app/orchestrator/prompt_enhancer.py
+$ ls app/orchestrator/prompt_enhancer.py
+ls: app/orchestrator/prompt_enhancer.py: No such file or directory
 
-# 2. Tests pass
-pytest tests/test_learning_mvp.py -v
+$ ls app/orchestrator/outcome_tracker.py  
+ls: app/orchestrator/outcome_tracker.py: No such file or directory
 
-# 3. API works
-curl http://localhost:8000/api/learning/stats?agent=programmer
-
-# 4. Data flows
-sqlite3 ./data/lobs.db "SELECT COUNT(*) FROM task_outcomes WHERE created_at > date('now', '-1 day')"
-
-# 5. No worker crashes
-# Let orchestrator run for 1 hour, check worker_runs for failures
+$ ls app/orchestrator/lesson_extractor.py
+ls: app/orchestrator/lesson_extractor.py: No such file or directory
 ```
 
----
+**Only reference to PromptEnhancer:**
+```bash
+$ grep -r "PromptEnhancer" app/
+app/cli/validate_learning.py:  ⚠️  Low application rate - check PromptEnhancer
+```
 
-## 📊 Risk Assessment
-
-### Low Risk
-- ✅ Clear specifications exist
-- ✅ Dependencies verified present
-- ✅ Fail-safe design (won't break workers)
-- ✅ Feature flag for rollout control
-- ✅ Modest scope (~630 lines)
-
-### Remaining Risks
-- ⚠️ Worker integration might need adjustment if internal APIs changed
-- ⚠️ Pattern extraction quality unknown until real data flows
-- ⚠️ Prompt bloat if learnings accumulate too quickly
-
-### Mitigations
-- Integration points verified at exact line numbers
-- Start with 5 simple patterns, iterate based on real feedback
-- Limit to 3 learnings per prompt with MAX_LEARNINGS_PER_PROMPT flag
+**Rescue documentation exists:**
+- `docs/handoffs/learning-phase-1-consolidated-rescue.md` (created Feb 23)
+- Correctly identifies the problem: "Phase 1.3 was attempted without completing Phases 1.1 and 1.2"
+- Proposes solution: "Implement all three phases as a single consolidated unit"
 
 ---
 
-## 🎓 Lessons Learned
+## 2. Why This Pattern Repeats
 
-### For Future Tasks
+**Observed pattern:**
+1. Programmer tries → timeout
+2. Auto-retry programmer → timeout
+3. Auto-retry programmer → timeout (3 failures)
+4. Escalate to architect → timeout
+5. Auto-retry architect → timeout
+6. Auto-retry architect → timeout (3 failures)
+7. Spawn diagnostic reviewer
+8. **Cycle repeats**
 
-1. **Verify dependencies exist** before starting dependent tasks
-   - Don't assume "Phase X complete" means working code
-   - Check: models exist, tables exist, **services exist**, integration exists
-
-2. **Consolidated > incremental** for tightly coupled features
-   - Three interdependent services are easier to implement together
-   - Reduces coordination overhead and integration issues
-
-3. **Documentation ≠ implementation**
-   - Excellent rescue docs were created but task kept failing
-   - Need to update task instructions to match new approach
-
-4. **"Orchestrator shutdown" is not an error**
-   - This error message is misleading
-   - It just means system shut down during task execution
-   - Real errors would show in worker logs/transcripts
+**Why agents don't report the blocker clearly:**
+- They're trying to "complete" the task, not diagnose it
+- The handoff document is well-written and authoritative (500+ lines)
+- Agents assume the dependencies should exist and keep looking
+- Timeout happens before they formulate a clear response
 
 ---
 
-## 🏁 Summary
+## 3. Recommended Fix
 
-**Root cause:** Task asks for Phase 1.3 but Phases 1.1-1.2 don't exist  
-**Fix:** Update task to implement all three phases together  
-**Confidence:** High — rescue plan is solid and well-specified  
-**Next step:** Update task notes and assign to programmer  
+### 🟢 **Solution: Update Task Notes**
 
-**Estimated completion:** 2-3 days once task is updated correctly
+**Current task notes:**
+```
+Complete the learning loop by injecting learnings into prompts. 
+Create PromptEnhancer, integrate with prompter.py. 
+See docs/handoffs/learning-phase-1.3-prompt-enhancement.md. 
+Depends on Phases 1.1 and 1.2.
+```
+
+**Updated task notes:**
+```
+Implement consolidated agent learning MVP (Phases 1.1-1.3 together).
+Database schemas already exist. Implement 3 services:
+- OutcomeTracker (Phase 1.1)
+- LessonExtractor (Phase 1.2) 
+- PromptEnhancer (Phase 1.3)
+
+See docs/handoffs/learning-phase-1-consolidated-rescue.md for complete plan.
+
+⚠️ IMPORTANT: Phases 1.1 and 1.2 are NOT complete. You must implement all 3 
+services in this task. Total estimate: ~500 lines of new code across 3 files.
+```
+
+### Alternative: Create 3 Separate Tasks
+
+Instead of one consolidated task, create dependency chain:
+
+**Task 1:** Implement OutcomeTracker (Phase 1.1)
+- Dependencies: None (schemas exist)
+- Files: `app/orchestrator/outcome_tracker.py`
+- Integration: Worker completion hooks
+
+**Task 2:** Implement LessonExtractor (Phase 1.2)  
+- Dependencies: Task 1 complete
+- Files: `app/orchestrator/lesson_extractor.py`
+- Integration: API endpoint for extraction
+
+**Task 3:** Implement PromptEnhancer (Phase 1.3)
+- Dependencies: Tasks 1 & 2 complete
+- Files: `app/orchestrator/prompt_enhancer.py`
+- Integration: Worker prompt building
+
+---
+
+## 4. Additional Findings
+
+### 🟡 **Issue: Prompter is Synchronous**
+
+The Phase 1.3 handoff assumes `Prompter.build_task_prompt()` can be made async:
+
+```python
+# Handoff expects:
+prompt, learning_ids = await Prompter.build_task_prompt_enhanced(...)
+```
+
+**Current reality:**
+- `app/orchestrator/prompter.py` is synchronous
+- Called from at least 2 places (worker.py, worker_manager.py)
+
+**Impact:** Breaking API change would cascade across callers
+
+**Mitigation:** The rescue architecture addresses this:
+- Add NEW async method `build_task_prompt_enhanced()`
+- Keep existing sync method unchanged
+- Migrate callers incrementally
+
+### 🔵 **Observation: Quality of Handoff Documents**
+
+The handoff documents are **excellent**:
+- Comprehensive technical specs (500+ lines)
+- Clear acceptance criteria
+- Test requirements
+- Code examples
+- Migration strategy
+
+**However:** This quality became a trap because agents trust the documents and assume prerequisites exist.
+
+---
+
+## 5. Decision: Retry, Modify, or Escalate?
+
+### ❌ **Do NOT Retry** with current task definition
+- Will continue failing with same timeout
+- Already tried 15+ times across both programmer and architect
+
+### ✅ **MODIFY Task** — Update task notes to reference consolidated rescue plan
+
+**Action Required:**
+1. Update task notes to point to `learning-phase-1-consolidated-rescue.md`
+2. Clarify that all 3 phases must be implemented together
+3. Estimate correctly: ~500 lines of code, not just "prompt enhancement"
+4. Assign to programmer (not architect — this is implementation work)
+
+### Alternative: ✅ **SPLIT into 3 Tasks** with explicit dependencies
+
+Create sequential tasks:
+1. Phase 1.1: OutcomeTracker
+2. Phase 1.2: LessonExtractor (depends on 1.1)
+3. Phase 1.3: PromptEnhancer (depends on 1.1 + 1.2)
+
+This matches the original design intent and makes dependencies explicit.
+
+---
+
+## 6. Acceptance Criteria for Fix
+
+Task should be considered fixed when:
+
+- ✅ Task notes clearly state that Phases 1.1-1.3 are NOT complete
+- ✅ Task references the consolidated rescue plan document
+- ✅ Scope is realistic (3 services, ~500 lines, not just "prompt enhancement")
+- ✅ Agent receives task and produces output within 5 minutes
+- ✅ Agent either completes implementation OR clearly reports a different blocker
+
+---
+
+## 7. Lessons Learned
+
+### For Task Creation:
+- **Verify dependencies exist** before creating dependent tasks
+- **Explicit is better than implicit** — state what's missing, not just what's needed
+- **Scope estimates matter** — "Phase 1.3" sounds small but requires 1.1 + 1.2
+
+### For Agents:
+- **Need timeout-aware behavior** — if analysis takes >2 minutes, report findings and exit
+- **Need dependency verification** — check for required files/services before deep analysis
+- **Need clearer blocker reporting** — "missing dependency" should be a structured response
+
+### For Orchestrator:
+- **Timeout detection could be smarter** — distinguish between "no response" and "long analysis"
+- **Diagnostic tasks need different prompts** — reviewer got same timeout loop initially
+
+---
+
+## 8. Next Steps
+
+**Immediate (Human Decision Required):**
+
+1. Decide: consolidated task OR split into 3 tasks?
+2. Update task notes accordingly
+3. Reset retry count
+4. Re-assign to programmer
+
+**If Consolidated Approach:**
+- Update task notes to reference `learning-phase-1-consolidated-rescue.md`
+- Change title to "Implement Agent Learning MVP (Phases 1.1-1.3)"
+- Set complexity to "high" or "very high"
+- Estimated time: 1-2 days
+
+**If Split Approach:**
+- Create 3 new tasks with clear dependency chain
+- Mark current task as "blocked - needs decomposition"
+- Each task targets single service class
+
+---
+
+## 9. References
+
+**Handoff Documents:**
+- `docs/handoffs/learning-phase-1.3-prompt-enhancement.md` — Original Phase 1.3 spec
+- `docs/handoffs/learning-phase-1.3-rescue-architecture.md` — First rescue attempt
+- `docs/handoffs/learning-phase-1-consolidated-rescue.md` — Correct consolidated plan
+
+**Key Files:**
+- `app/orchestrator/worker.py` — Session timeout logic (line 285-290)
+- `app/orchestrator/prompter.py` — Current synchronous implementation
+- `app/models.py` — Database models (TaskOutcome, OutcomeLearning)
+- `app/routers/learning.py` — Learning API endpoints
+
+**Database:**
+- Tables exist: `task_outcomes`, `outcome_learnings`
+- Services missing: OutcomeTracker, LessonExtractor, PromptEnhancer
+
+---
+
+## Signature
+
+**Reviewer:** reviewer  
+**Confidence:** High (verified with codebase inspection)  
+**Recommendation:** MODIFY task notes → reference consolidated rescue plan  
+**Priority:** Update task before next retry to prevent continued timeout loop
+
+---
+
+*This diagnostic establishes that the failure is a task definition issue, not an implementation bug. The code quality of existing learning infrastructure (models, API) is sound. The fix is administrative (task update), not technical.*
