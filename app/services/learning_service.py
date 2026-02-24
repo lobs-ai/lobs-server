@@ -106,22 +106,18 @@ async def create_plan(
 # Lesson Generation & Delivery
 # ══════════════════════════════════════════════════════════════════════
 
-LESSON_PROMPT = """You are writing Day {day} of a {total_days}-day learning plan on: {topic}
+LESSON_PROMPT = """Write the FULL lesson content for Day {day}/{total_days} of a learning plan on "{topic}".
 
-Today's lesson: **{title}**
-Summary: {summary}
+Lesson title: {title}
+Goal: {goal}
+Previous: {previous_topics}
 
-Context from the plan:
-- Goal: {goal}
-- Previous lessons covered: {previous_topics}
+Write 500-800 words of clean markdown. Include:
+- Brief connection to previous material
+- Core concept explanation with a practical example
+- Key takeaway and one exercise
 
-Write a clear, engaging lesson document (~500-800 words) that:
-1. Starts with a brief recap/connection to previous material
-2. Explains the core concept(s) for today
-3. Includes a practical example or analogy
-4. Ends with a key takeaway and a small exercise/reflection prompt
-
-Format as clean markdown. Make it something someone could read in 5-10 minutes over coffee.
+Output ONLY the lesson content in markdown. No meta-commentary. Start writing the lesson immediately.
 """
 
 
@@ -164,7 +160,7 @@ async def generate_next_lesson(db: AsyncSession, plan_id: str) -> dict[str, Any]
         previous_topics=prev_topics,
     )
 
-    content = await _llm_generate(prompt, model="sonnet")
+    content = await _llm_generate(prompt, model="haiku")
     if not content:
         return {"status": "error", "error": "Failed to generate lesson content"}
 
