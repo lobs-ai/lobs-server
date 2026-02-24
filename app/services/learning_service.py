@@ -291,8 +291,9 @@ async def _llm_generate(prompt: str, model: str = "haiku") -> str | None:
                     "args": {
                         "task": prompt,
                         "model": model,
-                        "mode": "session",  # Persistent session — transcript persists
+                        "runTimeoutSeconds": 120,
                         "timeoutSeconds": 30,
+                        "cleanup": "keep",
                     },
                 },
                 timeout=aiohttp.ClientTimeout(total=60),
@@ -319,20 +320,12 @@ async def _llm_generate(prompt: str, model: str = "haiku") -> str | None:
             )
         logger.info("[LEARNING] Spawned %s, transcript=%s", child_key[:40], transcript_path)
 
-        # Poll for response — check transcript file AND sessions_history
+        # Poll for response via sessions_history
         import asyncio
-        for attempt in range(30):
-            await asyncio.sleep(2)
+        for attempt in range(15):
+            await asyncio.sleep(3)
 
-            # 1. Try transcript file (full content, no truncation)
-            if transcript_path and os.path.exists(transcript_path):
-                content = _extract_from_transcript(transcript_path)
-                if content and len(content) > 20:
-                    logger.info("[LEARNING] Got %d chars from transcript (attempt %d)", len(content), attempt)
-                    return content
-
-            # 2. Fallback: try sessions_history (may truncate long responses)
-            if attempt > 5 and attempt % 3 == 0:
+            try:
                 async with aiohttp.ClientSession() as session:
                     resp = await session.post(
                         f"{GATEWAY_URL}/tools/invoke",
@@ -342,9 +335,10 @@ async def _llm_generate(prompt: str, model: str = "haiku") -> str | None:
                             "sessionKey": f"{GATEWAY_SESSION_KEY}-lrn-h-{uuid.uuid4().hex[:6]}",
                             "args": {"sessionKey": child_key, "limit": 3, "includeTools": False},
                         },
-                        timeout=aiohttp.ClientTimeout(total=10),
+                        timeout=aiohttp.ClientTimeout(total=15),
                     )
                     hist_data = await resp.json()
+
                 if hist_data.get("ok"):
                     messages = hist_data.get("result", {}).get("details", {}).get("messages", [])
                     for msg in reversed(messages):
@@ -352,11 +346,13 @@ async def _llm_generate(prompt: str, model: str = "haiku") -> str | None:
                             c = msg.get("content", "")
                             if isinstance(c, list):
                                 c = "\n".join(b.get("text", "") for b in c if isinstance(b, dict) and b.get("type") == "text")
-                            if isinstance(c, str) and len(c.strip()) > 50:
-                                logger.info("[LEARNING] Got %d chars from history (attempt %d)", len(c), attempt)
+                            if isinstance(c, str) and len(c.strip()) > 30:
+                                logger.info("[LEARNING] Got %d chars (attempt %d)", len(c), attempt)
                                 return c.strip()
+            except Exception as e:
+                logger.debug("[LEARNING] Poll error: %s", e)
 
-        logger.warning("[LEARNING] No LLM response after 60s (transcript=%s)", transcript_path)
+        logger.warning("[LEARNING] No LLM response after 45s for key=%s", child_key[:30])
         return None
 
     except Exception as e:
