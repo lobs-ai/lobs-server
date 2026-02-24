@@ -15,6 +15,32 @@ from app.orchestrator import OrchestratorEngine
 router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
 
 
+def _initiative_payload(row: AgentInitiative) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "proposed_by_agent": row.proposed_by_agent,
+        "owner_agent": row.owner_agent,
+        "selected_agent": row.selected_agent,
+        "selected_project_id": row.selected_project_id,
+        "task_id": row.task_id,
+        # Forward-compatible with clients that support multiple task links.
+        "task_ids": [row.task_id] if row.task_id else [],
+        "title": row.title,
+        "description": row.description,
+        "category": row.category,
+        "risk_tier": row.risk_tier,
+        "policy_lane": row.policy_lane,
+        "policy_reason": row.policy_reason,
+        "status": row.status,
+        "rationale": row.rationale,
+        "decision_summary": row.decision_summary,
+        "learning_feedback": row.learning_feedback,
+        "approved_by": row.approved_by,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+    }
+
+
 class AutonomyBudgetUpdate(BaseModel):
     daily: dict[str, int]
 
@@ -188,30 +214,7 @@ async def list_initiatives(
 
     return {
         "count": len(rows),
-        "items": [
-            {
-                "id": row.id,
-                "proposed_by_agent": row.proposed_by_agent,
-                "owner_agent": row.owner_agent,
-                "selected_agent": row.selected_agent,
-                "selected_project_id": row.selected_project_id,
-                "task_id": row.task_id,
-                "title": row.title,
-                "description": row.description,
-                "category": row.category,
-                "risk_tier": row.risk_tier,
-                "policy_lane": row.policy_lane,
-                "policy_reason": row.policy_reason,
-                "status": row.status,
-                "rationale": row.rationale,
-                "decision_summary": row.decision_summary,
-                "learning_feedback": row.learning_feedback,
-                "approved_by": row.approved_by,
-                "created_at": row.created_at.isoformat() if row.created_at else None,
-                "updated_at": row.updated_at.isoformat() if row.updated_at else None,
-            }
-            for row in rows
-        ],
+        "items": [_initiative_payload(row) for row in rows],
     }
 
 
@@ -229,7 +232,7 @@ async def decide_initiative(
 
     engine = InitiativeDecisionEngine(db)
     try:
-        result = await engine.decide(
+        await engine.decide(
             initiative,
             decision=payload.decision,
             revised_title=payload.revised_title,
@@ -240,7 +243,9 @@ async def decide_initiative(
             learning_feedback=payload.learning_feedback,
             decided_by=payload.decided_by,
         )
-        return result
+        # Return full initiative payload for Mission Control decoder compatibility.
+        await db.refresh(initiative)
+        return _initiative_payload(initiative)
     except (ValueError, PermissionError) as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
