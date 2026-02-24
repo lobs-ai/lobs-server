@@ -196,14 +196,38 @@ DEFAULT_WORKFLOWS = [
     # ── System Workflows (recurring/event-driven) ────────────────────
     {
         "name": "reflection-cycle",
-        "description": "Strategic reflection: spawn reflection agents for all execution agents, then trigger sweep.",
+        "description": "Full strategic reflection pipeline: list agents → build context → spawn reflections → wait → sweep → notify. Replaces the hardcoded engine reflection logic.",
         "trigger": {"type": "schedule", "cron": "0 */6 * * *", "timezone": "America/New_York"},
         "is_active": False,
         "nodes": [
             {
-                "id": "run_reflections",
+                "id": "list_agents",
                 "type": "python_call",
-                "config": {"callable": "reflection_cycle.run_strategic"},
+                "config": {"callable": "reflection.list_agents"},
+                "on_success": "check_agents",
+                "on_failure": {"retry": 1, "abort_on": ["python_error"]},
+            },
+            {
+                "id": "check_agents",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "list_agents.count == 0", "goto": "done"},
+                    ],
+                    "default": "build_contexts",
+                },
+            },
+            {
+                "id": "build_contexts",
+                "type": "python_call",
+                "config": {"callable": "reflection.build_contexts"},
+                "on_success": "spawn_agents",
+                "on_failure": {"retry": 1, "abort_on": ["python_error"]},
+            },
+            {
+                "id": "spawn_agents",
+                "type": "python_call",
+                "config": {"callable": "reflection.spawn_agents"},
                 "on_success": "check_spawned",
                 "on_failure": {"retry": 1, "abort_on": ["python_error"]},
             },
@@ -212,44 +236,43 @@ DEFAULT_WORKFLOWS = [
                 "type": "branch",
                 "config": {
                     "conditions": [
-                        {"match": "run_reflections.spawned != 0", "goto": "notify_reflections"},
+                        {"match": "spawn_agents.spawned == 0", "goto": "done"},
                     ],
-                    "default": "done",
+                    "default": "wait_for_completion",
                 },
             },
             {
-                "id": "notify_reflections",
-                "type": "notify",
+                "id": "wait_for_completion",
+                "type": "python_call",
                 "config": {
-                    "channel": "internal",
-                    "message_template": "Reflection cycle spawned {run_reflections.spawned} agent(s). Sweep will run when all complete.",
+                    "callable": "reflection.check_complete",
+                    "poll": True,
                 },
-                "on_success": "done",
+                "on_success": "run_sweep",
+                "on_failure": {"retry": 3, "abort_on": ["python_error"]},
             },
-            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
-        ],
-        "edges": [],
-        "metadata": {"author": "lobs", "category": "system", "system": True},
-    },
-    {
-        "name": "initiative-sweep",
-        "description": "Collect agent-proposed initiatives, quality-filter, dedup, route to Lobs/Rafe for review.",
-        "trigger": {"type": "event", "event_pattern": "reflection.batch_complete"},
-        "is_active": False,
-        "nodes": [
             {
                 "id": "run_sweep",
                 "type": "python_call",
-                "config": {"callable": "sweep.run_once"},
-                "on_success": "notify",
-                "on_failure": {"retry": 1},
+                "config": {"callable": "reflection.run_sweep"},
+                "on_success": "notify_sweep",
+                "on_failure": {"retry": 2},
             },
             {
-                "id": "notify",
+                "id": "notify_sweep",
                 "type": "notify",
                 "config": {
                     "channel": "internal",
-                    "message_template": "Sweep complete: {run_sweep.proposed} proposed, {run_sweep.rejected} rejected, {run_sweep.llm_review} pending review.",
+                    "message_template": "Reflection cycle complete. Spawned {spawn_agents.spawned} agents. Sweep: {run_sweep.proposed} proposed, {run_sweep.rejected} rejected, {run_sweep.llm_review} pending review.",
+                },
+                "on_success": "emit_complete",
+            },
+            {
+                "id": "emit_complete",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "reflection.batch_complete",
                 },
                 "on_success": "done",
             },
@@ -304,7 +327,7 @@ DEFAULT_WORKFLOWS = [
             {
                 "id": "compress",
                 "type": "python_call",
-                "config": {"callable": "reflection_cycle.run_daily_compression"},
+                "config": {"callable": "reflection.run_compression"},
                 "on_success": "check_results",
                 "on_failure": {"retry": 1},
             },

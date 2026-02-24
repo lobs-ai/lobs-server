@@ -427,9 +427,11 @@ class NodeHandlers:
         Config:
             callable: "reflection_cycle.run_strategic"  (dotted name → registry lookup)
             args_template: {key: "{context.path}"}  (optional, rendered from context)
+            poll: true  — if result has completed=False, mark node as "running" for re-check
         """
         callable_name = config.get("callable", "")
         args_template = config.get("args_template", {})
+        is_poll = config.get("poll", False)
 
         handler = _PYTHON_CALL_REGISTRY.get(callable_name)
         if not handler:
@@ -446,10 +448,35 @@ class NodeHandlers:
         try:
             result = await handler(db=self.db, worker_manager=self.worker_manager, context=context, **rendered_args)
             if isinstance(result, dict):
+                # Poll mode: if result says not completed, keep node in "running" for re-check
+                if is_poll and result.get("completed") is False:
+                    return NodeResult(status="running", output=result)
                 return NodeResult(status="completed", output=result)
             return NodeResult(status="completed", output={"result": str(result)})
         except Exception as e:
             logger.error("[NODE:python_call] %s failed: %s", callable_name, e, exc_info=True)
+            return NodeResult(status="failed", error=str(e), error_type="python_error")
+
+    async def _check_python_call(self, node_def: dict, run: Any) -> Optional[NodeResult]:
+        """Re-check a polling python_call node."""
+        config = node_def.get("config", {})
+        if not config.get("poll", False):
+            return None  # Non-poll nodes complete synchronously
+
+        callable_name = config.get("callable", "")
+        handler = _PYTHON_CALL_REGISTRY.get(callable_name)
+        if not handler:
+            return NodeResult(status="failed", error=f"Unknown callable: {callable_name}")
+
+        context = dict(run.context or {})
+        try:
+            result = await handler(db=self.db, worker_manager=self.worker_manager, context=context)
+            if isinstance(result, dict):
+                if result.get("completed") is False:
+                    return None  # Still not done
+                return NodeResult(status="completed", output=result)
+            return NodeResult(status="completed", output={"result": str(result)})
+        except Exception as e:
             return NodeResult(status="failed", error=str(e), error_type="python_error")
 
     async def _exec_for_each(self, config: dict, context: dict, run: Any) -> NodeResult:
@@ -517,7 +544,7 @@ class NodeHandlers:
 # ══════════════════════════════════════════════════════════════════════
 
 async def _pcall_run_strategic_reflections(db, worker_manager, context, **kw):
-    """Run the strategic reflection cycle for all agents."""
+    """Run the strategic reflection cycle for all agents (legacy monolithic)."""
     from app.orchestrator.reflection_cycle import ReflectionCycleManager
     mgr = ReflectionCycleManager(db, worker_manager)
     return await mgr.run_strategic_reflection_cycle()
@@ -565,7 +592,35 @@ async def _pcall_run_memory_sync(db, worker_manager, context, **kw):
     return await svc.sync_all()
 
 
+# ── Reflection workflow discrete steps ────────────────────────────────
+
+async def _pcall_list_agents(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_reflection import list_execution_agents
+    return await list_execution_agents(db, worker_manager, context, **kw)
+
+async def _pcall_build_contexts(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_reflection import build_context_packets
+    return await build_context_packets(db, worker_manager, context, **kw)
+
+async def _pcall_spawn_reflections(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_reflection import spawn_reflection_agents
+    return await spawn_reflection_agents(db, worker_manager, context, **kw)
+
+async def _pcall_check_reflections(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_reflection import check_reflections_complete
+    return await check_reflections_complete(db, worker_manager, context, **kw)
+
+async def _pcall_run_initiative_sweep(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_reflection import run_initiative_sweep
+    return await run_initiative_sweep(db, worker_manager, context, **kw)
+
+async def _pcall_run_compression(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_reflection import run_daily_compression
+    return await run_daily_compression(db, worker_manager, context, **kw)
+
+
 _PYTHON_CALL_REGISTRY: dict[str, Any] = {
+    # Legacy monolithic callables
     "reflection_cycle.run_strategic": _pcall_run_strategic_reflections,
     "reflection_cycle.run_daily_compression": _pcall_run_daily_compression,
     "sweep.run_once": _pcall_run_sweep,
@@ -573,4 +628,11 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     "scheduler.fire_due_events": _pcall_run_scheduled_events,
     "github_sync.sync_all": _pcall_run_github_sync,
     "memory_sync.sync_all": _pcall_run_memory_sync,
+    # Discrete reflection workflow steps
+    "reflection.list_agents": _pcall_list_agents,
+    "reflection.build_contexts": _pcall_build_contexts,
+    "reflection.spawn_agents": _pcall_spawn_reflections,
+    "reflection.check_complete": _pcall_check_reflections,
+    "reflection.run_sweep": _pcall_run_initiative_sweep,
+    "reflection.run_compression": _pcall_run_compression,
 }
