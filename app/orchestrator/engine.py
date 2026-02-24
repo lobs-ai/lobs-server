@@ -227,7 +227,27 @@ class OrchestratorEngine:
                         unblocked,
                     )
 
-                # 5. Clear stale worker_status
+                # 5. Clean up stale pending reflections (>2h old = never going to complete)
+                from app.models import AgentReflection
+                stale_cutoff = datetime.now(timezone.utc) - timedelta(hours=2)
+                stale_refl_result = await db.execute(
+                    select(AgentReflection).where(
+                        AgentReflection.status == "pending",
+                        AgentReflection.created_at < stale_cutoff,
+                    )
+                )
+                stale_reflections = stale_refl_result.scalars().all()
+                if stale_reflections:
+                    for refl in stale_reflections:
+                        refl.status = "failed"
+                        refl.result = {"error": "stale: never completed (server restart)"}
+                    await db.commit()
+                    logger.info(
+                        "[ENGINE] Startup recovery: marked %d stale pending reflections as failed",
+                        len(stale_reflections),
+                    )
+
+                # 6. Clear stale worker_status
                 from app.models import WorkerStatus
                 ws_result = await db.execute(
                     select(WorkerStatus).where(WorkerStatus.id == 1)
