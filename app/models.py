@@ -186,6 +186,13 @@ class TrackerEntry(Base):
     category = Column(String)
     due_date = Column(DateTime)
     estimated_minutes = Column(Integer)
+
+    # Deadline Sentinel fields
+    commitment_type = Column(String)  # class/interview/scrim/personal/other
+    priority_score = Column(Integer)  # 0-100 computed urgency/impact score
+    next_action = Column(Text)  # concrete recommended next step
+    escalation_task_id = Column(String, ForeignKey("tasks.id"))
+    last_escalated_at = Column(DateTime)
     
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

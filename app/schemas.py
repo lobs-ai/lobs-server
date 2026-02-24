@@ -345,6 +345,11 @@ class TrackerEntryBase(BaseModel):
     category: Optional[str] = None
     due_date: Optional[datetime] = None
     estimated_minutes: Optional[int] = None
+    commitment_type: Optional[str] = None  # class/interview/scrim/personal/other
+    priority_score: Optional[int] = None
+    next_action: Optional[str] = None
+    escalation_task_id: Optional[str] = None
+    last_escalated_at: Optional[datetime] = None
 
 
 class TrackerEntryCreate(TrackerEntryBase):
@@ -358,6 +363,11 @@ class TrackerEntryUpdate(BaseModel):
     category: Optional[str] = None
     due_date: Optional[datetime] = None
     estimated_minutes: Optional[int] = None
+    commitment_type: Optional[str] = None
+    priority_score: Optional[int] = None
+    next_action: Optional[str] = None
+    escalation_task_id: Optional[str] = None
+    last_escalated_at: Optional[datetime] = None
 
 
 class TrackerEntry(TrackerEntryBase):
@@ -387,6 +397,10 @@ class DeadlineEntry(BaseModel):
     category: Optional[str]
     due_date: datetime
     estimated_minutes: Optional[int]
+    commitment_type: Optional[str] = None
+    priority_score: Optional[int] = None
+    next_action: Optional[str] = None
+    escalation_task_id: Optional[str] = None
     created_at: datetime
 
 
