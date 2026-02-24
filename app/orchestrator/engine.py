@@ -664,110 +664,20 @@ class OrchestratorEngine:
 
         return activity
 
-    async def _request_lobs_assignment(self, db: Any, task: dict[str, Any]) -> bool:
-        """LEGACY: Create a deduplicated inbox item requesting Lobs to assign an agent.
-        Replaced by workflow-based agent-assignment. Kept as backup.
-        """
-        task_id = task.get("id")
-        if not task_id:
-            return False
-
-        marker = f"assignment_request:{task_id}"
-        existing = await db.execute(
-            select(InboxItem).where(InboxItem.summary == marker)
-        )
-        if existing.scalar_one_or_none():
-            return False
-
-        title = task.get("title") or "Untitled task"
-        project_id = task.get("project_id") or "unknown"
-        notes = (task.get("notes") or "").strip()
-        notes_preview = notes[:1200] + ("..." if len(notes) > 1200 else "")
-
-        db.add(
-            InboxItem(
-                id=str(uuid.uuid4()),
-                title=f"[ASSIGNMENT] Agent needed: {title[:80]}",
-                content=(
-                    "Lobs agent assignment required before execution.\n\n"
-                    f"Task ID: {task_id}\n"
-                    f"Project ID: {project_id}\n"
-                    f"Title: {title}\n\n"
-                    "Notes:\n"
-                    f"{notes_preview or '(none)'}\n\n"
-                    "Action: set the task `agent` field explicitly."
-                ),
-                is_read=False,
-                summary=marker,
-                modified_at=datetime.now(timezone.utc),
-            )
-        )
-        await db.commit()
-        return True
+    # Legacy _request_lobs_assignment removed — agent-assignment workflow handles this
 
     async def _refresh_runtime_settings(self, db: Any) -> None:
         """Load runtime loop intervals from DB without restart."""
-        SETTINGS_KEY_MEMORY_MAINTENANCE_LAST_DATE_ET = "memory_maintenance_last_date_et"
-        keys = (
-            SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
-            SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
-            SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
-            SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
-            SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
-            SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
-            SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
-            SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET,
-            SETTINGS_KEY_MEMORY_MAINTENANCE_LAST_DATE_ET,
-        )
+        # Only load the OpenClaw model sync interval — everything else is workflow-managed
+        keys = (SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,)
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
 
-        def _as_int(key: str) -> int:
-            default = int(DEFAULT_RUNTIME_SETTINGS[key])
-            raw = rows.get(key, default)
-            try:
-                return max(30, int(raw))
-            except Exception:
-                return default
-
-        self._reflection_interval = _as_int(SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS)
-        # Sweep interval no longer used — sweep is triggered after reflections complete
-        self._diagnostic_interval = _as_int(SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS)
-        self._github_sync_interval = _as_int(SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS)
-        self._openclaw_model_sync_interval = _as_int(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS)
-        # Prefer ET-local setting; fall back to legacy UTC key for compatibility.
-        daily_hour_raw = rows.get(
-            SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
-            rows.get(
-                SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
-                DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET],
-            ),
-        )
+        raw = rows.get(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS, DEFAULT_RUNTIME_SETTINGS.get(SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS, 900))
         try:
-            self._daily_compression_hour_et = max(0, min(23, int(daily_hour_raw)))
+            self._openclaw_model_sync_interval = max(30, int(raw))
         except Exception:
-            self._daily_compression_hour_et = int(DEFAULT_RUNTIME_SETTINGS[SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET])
-
-        # Load persistent daily compression marker so restarts don't lose "already ran today" state.
-        raw_last_compression = rows.get(SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET)
-        if isinstance(raw_last_compression, str) and raw_last_compression.strip():
-            self._last_daily_compression_date_et = raw_last_compression.strip()
-
-        # Load persistent memory maintenance marker.
-        raw_maint = rows.get(SETTINGS_KEY_MEMORY_MAINTENANCE_LAST_DATE_ET)
-        if isinstance(raw_maint, str) and raw_maint.strip():
-            self._last_memory_maintenance_date_et = raw_maint.strip()
-
-        # Load persistent reflection anchor so restarts don't reset the 6h cadence.
-        if not self._reflection_anchor_loaded:
-            raw_last = rows.get(SETTINGS_KEY_REFLECTION_LAST_RUN_AT)
-            if isinstance(raw_last, str) and raw_last:
-                try:
-                    last_dt = datetime.fromisoformat(raw_last.replace("Z", "+00:00"))
-                    self._last_reflection_check = max(self._last_reflection_check, last_dt.timestamp())
-                except Exception:
-                    logger.warning("[ENGINE] Invalid reflection anchor timestamp: %s", raw_last)
-            self._reflection_anchor_loaded = True
+            self._openclaw_model_sync_interval = 900
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
