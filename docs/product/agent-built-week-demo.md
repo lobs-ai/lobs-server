@@ -174,3 +174,19 @@ Use this file as source-of-truth and repurpose into:
 
 ### Footer evidence note
 “All claims in this demo map to inspectable repository artifacts and dated documentation. Metrics are labeled estimated unless telemetry-backed exports are attached.”
+
+---
+
+## 11) Evidence ledger template (fill before publishing)
+
+Use this mini-ledger to bind every screenshot and metric to a concrete artifact.
+
+| Claim ID | Claim | Artifact type | Pointer (commit/PR/doc/log) | Owner | Verification status |
+|---|---|---|---|---|---|
+| C-01 | Routing became tier-aware | Commit diff | `<hash>` | Eng | [ ] |
+| C-02 | Reflection reliability improved | Run log + commit | `<log path>`, `<hash>` | Eng | [ ] |
+| C-03 | Docs onboarding improved | Docs tree diff | `<before/after paths>` | PM | [ ] |
+| C-04 | Founder hours reclaimed (~7–9h) | Time log estimate sheet | `<sheet/doc link>` | Founder | [ ] |
+| C-05 | Decision latency reduced | Decision log timestamps | `<log/export>` | Ops | [ ] |
+
+**Rule for public release:** no unlinked claim survives review. If a claim cannot be tied to an artifact pointer, remove or relabel it.
