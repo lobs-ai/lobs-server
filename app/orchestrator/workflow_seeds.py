@@ -970,4 +970,22 @@ DEFAULT_WORKFLOWS = [
         "edges": [],
         "metadata": {"author": "lobs", "category": "system", "system": True},
     },
+    {
+        "name": "inbox-processing",
+        "description": "Process inbox threads with user responses — analyze with LLM, create tasks, respond, resolve.",
+        "trigger": {"type": "schedule", "cron": "* * * * *", "timezone": "UTC"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "process",
+                "type": "python_call",
+                "config": {"callable": "inbox.process_threads"},
+                "on_success": "done",
+                "on_failure": {"retry": 1, "abort_on": ["python_error"]},
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
 ]

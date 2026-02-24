@@ -92,7 +92,8 @@ lobs-server/
 │   │   ├── calendar.py
 │   │   ├── status.py
 │   │   ├── agents.py
-│   │   ├── learning.py        # Learning system stats and management
+│   │   ├── learning.py        # Personal learning plans (separate from agent learning)
+│   │   ├── agent_learning.py  # ❌ Not yet built — /api/agent-learning/* endpoints
 │   │   ├── orchestrator.py
 │   │   └── ...
 │   ├── orchestrator/           # Task execution engine
@@ -103,15 +104,15 @@ lobs-server/
 │   │   ├── monitor_enhanced.py      # Stuck task detection
 │   │   ├── escalation_enhanced.py   # Multi-tier failure handling
 │   │   ├── circuit_breaker.py       # Infrastructure failure isolation
-│   │   ├── lesson_extractor.py      # Extract learnings from outcomes
-│   │   ├── prompt_enhancer.py       # Inject learnings into prompts
+│   │   ├── prompt_enhancer.py       # ✅ Inject learnings into prompts (A/B split live)
+│   │   ├── outcome_tracker.py       # ❌ Not yet built — log outcomes at task completion
+│   │   ├── learning_batch.py        # ❌ Not yet built — daily 2am pattern aggregation
 │   │   ├── agent_tracker.py         # Agent status tracking
 │   │   ├── prompter.py              # Task prompt builder
 │   │   └── registry.py              # Agent config loader
 │   ├── services/
 │   │   ├── chat_manager.py    # WebSocket connection management
-│   │   ├── openclaw_bridge.py # Webhook handler for agent responses
-│   │   └── outcome_tracker.py # Track task outcomes for learning
+│   │   └── openclaw_bridge.py # Webhook handler for agent responses
 │   ├── models.py              # SQLAlchemy database models
 │   ├── schemas.py             # Pydantic request/response schemas
 │   ├── database.py            # Database session management

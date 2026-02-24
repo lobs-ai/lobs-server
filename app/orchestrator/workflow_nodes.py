@@ -1185,6 +1185,13 @@ async def _pcall_scan_unassigned(db, worker_manager, context, **kw):
     return await scan_unassigned(db, worker_manager, context, **kw)
 
 
+async def _pcall_inbox_process_threads(db, worker_manager, context, **kw):
+    """Process inbox threads with user responses."""
+    from app.orchestrator.inbox_processor import InboxProcessor
+    processor = InboxProcessor(db)
+    return await processor.process_threads()
+
+
 _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Legacy monolithic callables
     "reflection_cycle.run_strategic": _pcall_run_strategic_reflections,
@@ -1216,6 +1223,8 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Learning
     "learning.check_due": lambda db, wm, ctx, **kw: _pcall_learning("check_due_lessons", db, wm, ctx, **kw),
     "learning.create_plan": lambda db, wm, ctx, **kw: _pcall_learning("create_plan_from_request", db, wm, ctx, **kw),
+    # Inbox processing
+    "inbox.process_threads": _pcall_inbox_process_threads,
 }
 
 

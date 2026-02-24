@@ -28,7 +28,7 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.scheduler import EventScheduler
 from app.orchestrator.routine_runner import RoutineRunner
-from app.orchestrator.inbox_processor import InboxProcessor
+# Inbox processing now handled by inbox-processing workflow
 from app.orchestrator.provider_health import ProviderHealthRegistry
 from app.orchestrator.config import POLL_INTERVAL, GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
 from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat, AgentReflection
@@ -71,8 +71,7 @@ class OrchestratorEngine:
         self._scheduler_interval = 60
         self._last_routine_check = 0.0
         self._routine_interval = 60
-        self._last_inbox_check = 0.0
-        self._inbox_interval = 45
+        # Inbox processing moved to inbox-processing workflow
         self._last_capability_sync = 0.0
         self._capability_sync_interval = 3600
         self._last_runtime_settings_refresh = 0.0
@@ -455,18 +454,7 @@ class OrchestratorEngine:
                     logger.error("[ENGINE] OpenClaw model sync failed: %s", e, exc_info=True)
                     await db.rollback()
 
-            # 2. Process inbox threads (every 45 seconds, only if not paused)
-            if not self._paused and current_time - self._last_inbox_check >= self._inbox_interval:
-                try:
-                    inbox_processor = InboxProcessor(db)
-                    result = await inbox_processor.process_threads()
-                    if result["threads_processed"] > 0:
-                        activity = True
-                    self._last_inbox_check = current_time
-                    # Commit happens inside process_threads()
-                except Exception as e:
-                    logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
-                    await db.rollback()
+            # 2. Inbox processing now handled by inbox-processing workflow (every minute)
 
             # 3. Capability registry sync (hourly)
             if current_time - self._last_capability_sync >= self._capability_sync_interval:

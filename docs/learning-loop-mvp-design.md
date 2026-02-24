@@ -500,6 +500,7 @@ The MVP is complete when:
 | [docs/agent-learning-READY.md](agent-learning-READY.md) | Architect sign-off and readiness checklist |
 | [docs/PHASE_1.3_RESCUE_FINDINGS.md](PHASE_1.3_RESCUE_FINDINGS.md) | Root cause analysis of previous attempts |
 | [ARCHITECTURE.md](../ARCHITECTURE.md) | System overview and component diagram |
+| [docs/agent-learning-operator-guide.md](agent-learning-operator-guide.md) | Human operator guide — how to review, approve, and interpret learnings |
 
 ---
 
