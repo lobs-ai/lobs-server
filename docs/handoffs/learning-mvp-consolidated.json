@@ -1,0 +1,20 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "agent-learning-system",
+    "title": "Implement Learning System MVP (Phases 1.1-1.3 consolidated)",
+    "context": "Complete minimal viable agent learning system in one cohesive implementation. Previous attempts failed because Phase 1.3 depends on Phases 1.1-1.2 which were never implemented (only schemas exist). This handoff consolidates all three phases into a single unit. Create 3 service classes (OutcomeTracker, LessonExtractor, PromptEnhancer), integrate with worker.py at 2 points (before spawn + after completion), add 2 API endpoints (/extract, /feedback), write basic tests. All dependencies verified present: models exist, tables created, worker integration points identified. See detailed plan: docs/handoffs/learning-phase-1-consolidated-rescue.md",
+    "acceptance": "1) Three service files exist: app/orchestrator/outcome_tracker.py, app/orchestrator/lesson_extractor.py, app/orchestrator/prompt_enhancer.py. 2) Worker.py integrates: enhances prompts before spawn (line ~233) and tracks outcomes after completion. 3) LEARNING_ENABLED env flag controls all learning features. 4) Control group (20%) gets learning_disabled=True and unmodified prompts. 5) Applied learning IDs stored in TaskOutcome.applied_learnings as JSON array. 6) 5+ programmer patterns in LessonExtractor (missing_tests, unclear_names, missing_error_handling, missing_docs, missing_validation). 7) Two new API endpoints in app/routers/learning.py: POST /extract and POST /tasks/{id}/feedback. 8) Basic test file tests/test_learning_mvp.py with 6+ tests covering outcome tracking, pattern extraction, prompt enhancement, and full cycle. 9) All learning code wrapped in try/except - no worker crashes. 10) /api/learning/stats endpoint returns valid data after outcomes exist.",
+    "files": [
+      "docs/handoffs/learning-phase-1-consolidated-rescue.md",
+      "app/models.py",
+      "app/orchestrator/worker.py",
+      "app/routers/learning.py",
+      "migrations/create_learning_tables.py"
+    ],
+    "depends_on": [],
+    "estimated_complexity": "medium",
+    "estimated_days": 2,
+    "notes": "All dependencies verified: TaskOutcome and OutcomeLearning models exist in app/models.py, database tables created (task_outcomes, outcome_learnings), API router exists with stats/health endpoints. This consolidates the original separate handoffs for phases 1.1, 1.2, and 1.3 into one implementable unit to avoid coordination issues. Total new code: ~500 lines across 3 service files + integration code + tests."
+  }
+]
