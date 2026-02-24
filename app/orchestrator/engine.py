@@ -198,7 +198,36 @@ class OrchestratorEngine:
                         len(stale_runs),
                     )
 
-                # 4. Clear stale worker_status
+                # 4. Unblock tasks that were blocked due to transient errors
+                blocked_result = await db.execute(
+                    select(TaskModel).where(
+                        TaskModel.work_state == "blocked",
+                        TaskModel.failure_reason.isnot(None),
+                    )
+                )
+                blocked_tasks = blocked_result.scalars().all()
+                transient_reasons = [
+                    "No matching workflow for agent",
+                    "Stuck - no progress",
+                    "Infrastructure failure detected",
+                    "Stale:",
+                ]
+                unblocked = 0
+                for task in blocked_tasks:
+                    reason = task.failure_reason or ""
+                    if any(r in reason for r in transient_reasons):
+                        task.work_state = "not_started"
+                        task.failure_reason = None
+                        task.updated_at = datetime.now(timezone.utc)
+                        unblocked += 1
+                if unblocked:
+                    await db.commit()
+                    logger.info(
+                        "[ENGINE] Startup recovery: unblocked %d task(s) blocked by transient errors",
+                        unblocked,
+                    )
+
+                # 5. Clear stale worker_status
                 from app.models import WorkerStatus
                 ws_result = await db.execute(
                     select(WorkerStatus).where(WorkerStatus.id == 1)
