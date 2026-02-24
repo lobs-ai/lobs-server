@@ -134,14 +134,22 @@ Why this week is a strong public proof window:
 
 ## 7) Screenshot production checklist
 
-- [ ] **SS-01** Model routing commit history + config diff
-- [ ] **SS-02** Orchestrator/reflection timeline + module view
-- [ ] **SS-03** Reflection reliability evidence (run/log)
-- [ ] **SS-04** Docs structure before/after
-- [ ] **SS-05** Worker completion persistence flow
-- [ ] **SS-06** CI/schema/metrics validation artifacts
-- [ ] **SS-07** Product narrative asset folder (`docs/product/`)
-- [ ] Final summary slide with before/after metrics
+- [ ] **SS-01** Model routing commit history + config diff  
+  Suggested file: `assets/agent-built-week/ss-01-routing-diff.png`
+- [ ] **SS-02** Orchestrator/reflection timeline + module view  
+  Suggested file: `assets/agent-built-week/ss-02-orchestrator-timeline.png`
+- [ ] **SS-03** Reflection reliability evidence (run/log)  
+  Suggested file: `assets/agent-built-week/ss-03-reflection-fix-proof.png`
+- [ ] **SS-04** Docs structure before/after  
+  Suggested file: `assets/agent-built-week/ss-04-docs-tree-before-after.png`
+- [ ] **SS-05** Worker completion persistence flow  
+  Suggested file: `assets/agent-built-week/ss-05-completion-persistence.png`
+- [ ] **SS-06** CI/schema/metrics validation artifacts  
+  Suggested file: `assets/agent-built-week/ss-06-ci-schema-metrics.png`
+- [ ] **SS-07** Product narrative asset folder (`docs/product/`)  
+  Suggested file: `assets/agent-built-week/ss-07-gtm-assets.png`
+- [ ] Final summary slide with before/after metrics  
+  Suggested file: `assets/agent-built-week/ss-08-impact-summary.png`
 
 ---
 
