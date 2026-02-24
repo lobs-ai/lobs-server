@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 # Valid agent types that can be assigned
 VALID_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]
 
+# Agents eligible for task assignment (inbox-responder is excluded —
+# it is only for internal inbox triage, not general task execution).
+ASSIGNABLE_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer"]
+
 ASSIGNMENT_PROMPT = """You are an agent router for a multi-agent system. Given a task, determine which specialist agent should handle it.
 
 Available agents:
@@ -31,7 +35,6 @@ Available agents:
 - **writer**: Create documentation, write-ups, summaries, reports, content. Use for prose, docs, and written deliverables.
 - **architect**: System design, technical strategy, design docs, architecture planning. Use for high-level design decisions and technical planning.
 - **reviewer**: Code review, quality checks, feedback on existing work. Use for reviewing PRs, code quality, and providing feedback.
-- **inbox-responder**: Quick responses, triage, simple actions. Use for lightweight tasks that need a fast response.
 
 Task to assign:
 - Title: {title}
@@ -228,7 +231,11 @@ def _extract_output_from_history(hist: dict | None) -> str | None:
 
 
 def _parse_agent_response(text: str) -> str | None:
-    """Extract agent type from LLM JSON response."""
+    """Extract agent type from LLM JSON response.
+
+    Only returns agents in ASSIGNABLE_AGENTS (excludes inbox-responder
+    which is reserved for internal inbox triage).
+    """
     if not text:
         return None
 
@@ -240,14 +247,14 @@ def _parse_agent_response(text: str) -> str | None:
         if start >= 0 and end > start:
             parsed = json.loads(text[start:end])
             agent = parsed.get("agent", "").strip().lower()
-            if agent in VALID_AGENTS:
+            if agent in ASSIGNABLE_AGENTS:
                 return agent
     except (json.JSONDecodeError, AttributeError):
         pass
 
     # Fallback: look for agent name directly in text
     text_lower = text.lower()
-    for agent in VALID_AGENTS:
+    for agent in ASSIGNABLE_AGENTS:
         if agent in text_lower:
             return agent
 

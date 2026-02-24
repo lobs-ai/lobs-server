@@ -126,6 +126,23 @@ class WorkflowExecutor:
 
         if task:
             task_id = task.get("id")
+
+            # Dedup: don't create a new run if one already exists for this task
+            if task_id:
+                existing_result = await self.db.execute(
+                    select(WorkflowRun).where(
+                        WorkflowRun.task_id == task_id,
+                        WorkflowRun.status.in_(["pending", "running"]),
+                    )
+                )
+                existing_run = existing_result.scalar_one_or_none()
+                if existing_run:
+                    logger.debug(
+                        "[WORKFLOW] Skipping duplicate run for task %s — active run exists",
+                        task_id[:8],
+                    )
+                    return existing_run
+
             context["task"] = task
             # Resolve project info
             project_id = task.get("project_id")

@@ -44,7 +44,9 @@ class InitiativeDecisionEngine:
 
         result = await self.db.execute(select(AgentCapability))
         rows = result.scalars().all()
-        fallback = initiative.owner_agent or initiative.proposed_by_agent or "programmer"
+        # inbox-responder should never be assigned to execute real work tasks
+        raw_fallback = initiative.owner_agent or initiative.proposed_by_agent or "programmer"
+        fallback = "programmer" if raw_fallback == "inbox-responder" else raw_fallback
         if not rows:
             return fallback, False
 
@@ -61,6 +63,9 @@ class InitiativeDecisionEngine:
                 continue
             overlap = matches / len(tokens)
             scores[row.agent_type] += overlap * float(row.confidence or 0.5)
+
+        # Remove inbox-responder from scoring — it's for triage, not task execution
+        scores.pop("inbox-responder", None)
 
         if not scores:
             return fallback, False

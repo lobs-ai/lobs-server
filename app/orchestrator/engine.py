@@ -180,7 +180,25 @@ class OrchestratorEngine:
                         len(orphaned),
                     )
 
-                # 3. Clear stale worker_status
+                # 3. Cancel stale workflow runs (no workers alive after restart)
+                from app.models import WorkflowRun
+                wf_result = await db.execute(
+                    select(WorkflowRun).where(WorkflowRun.status == "running")
+                )
+                stale_runs = wf_result.scalars().all()
+                if stale_runs:
+                    for wf_run in stale_runs:
+                        wf_run.status = "failed"
+                        wf_run.error = "Stale: cancelled during startup recovery"
+                        wf_run.finished_at = datetime.now(timezone.utc)
+                        wf_run.updated_at = datetime.now(timezone.utc)
+                    await db.commit()
+                    logger.info(
+                        "[ENGINE] Startup recovery: cancelled %d stale workflow run(s)",
+                        len(stale_runs),
+                    )
+
+                # 4. Clear stale worker_status
                 from app.models import WorkerStatus
                 ws_result = await db.execute(
                     select(WorkerStatus).where(WorkerStatus.id == 1)
