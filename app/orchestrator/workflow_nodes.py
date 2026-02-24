@@ -417,8 +417,68 @@ class NodeHandlers:
         # For now, just mark as completed — full sub-workflow support is Phase 4
         return NodeResult(status="completed", output={"sub_workflow_id": workflow_id, "note": "sub_workflow not yet implemented"})
 
+    async def _exec_python_call(self, config: dict, context: dict, run: Any) -> NodeResult:
+        """Execute a registered Python callable by name.
+
+        This is the bridge between workflow definitions and existing Python
+        business logic (reflections, sweeps, diagnostics, compression, etc.).
+        Instead of rewriting that logic, we call it as a workflow node.
+
+        Config:
+            callable: "reflection_cycle.run_strategic"  (dotted name → registry lookup)
+            args_template: {key: "{context.path}"}  (optional, rendered from context)
+        """
+        callable_name = config.get("callable", "")
+        args_template = config.get("args_template", {})
+
+        handler = _PYTHON_CALL_REGISTRY.get(callable_name)
+        if not handler:
+            return NodeResult(status="failed", error=f"Unknown callable: {callable_name}")
+
+        # Render args from context
+        rendered_args = {}
+        for k, v in args_template.items():
+            if isinstance(v, str):
+                rendered_args[k] = _render_template(v, context)
+            else:
+                rendered_args[k] = v
+
+        try:
+            result = await handler(db=self.db, worker_manager=self.worker_manager, context=context, **rendered_args)
+            if isinstance(result, dict):
+                return NodeResult(status="completed", output=result)
+            return NodeResult(status="completed", output={"result": str(result)})
+        except Exception as e:
+            logger.error("[NODE:python_call] %s failed: %s", callable_name, e, exc_info=True)
+            return NodeResult(status="failed", error=str(e), error_type="python_error")
+
+    async def _exec_for_each(self, config: dict, context: dict, run: Any) -> NodeResult:
+        """Iterate over a context list and collect results.
+
+        This is a synchronous fan-out — it runs sequentially for simplicity.
+        For parallel fan-out, use multiple spawn_agent nodes.
+
+        Config:
+            items_ref: "context.path.to.list"
+            node_template: {type: "spawn_agent", config: {..., prompt_template: "... {item} ..."}}
+        """
+        items_ref = config.get("items_ref", "")
+        # Resolve items from context
+        items = context
+        for part in items_ref.split("."):
+            if isinstance(items, dict):
+                items = items.get(part, [])
+            else:
+                items = []
+                break
+
+        if not isinstance(items, list):
+            return NodeResult(status="completed", output={"items_processed": 0, "note": "items_ref did not resolve to a list"})
+
+        return NodeResult(status="completed", output={"items": items, "count": len(items)})
+
     @staticmethod
-    def _evaluate_condition(expr: str, context: dict) -> bool:
+    def _evaluate_condition(expr: str, context: dict) -> bool:  # noqa: C901
         """Evaluate a simple condition expression."""
         # Support: "path.to.value == expected"
         # Support: "path.to.value != expected"
@@ -450,3 +510,67 @@ class NodeHandlers:
             else:
                 return False
         return bool(value)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Python Call Registry — bridges workflow nodes to existing business logic
+# ══════════════════════════════════════════════════════════════════════
+
+async def _pcall_run_strategic_reflections(db, worker_manager, context, **kw):
+    """Run the strategic reflection cycle for all agents."""
+    from app.orchestrator.reflection_cycle import ReflectionCycleManager
+    mgr = ReflectionCycleManager(db, worker_manager)
+    return await mgr.run_strategic_reflection_cycle()
+
+
+async def _pcall_run_daily_compression(db, worker_manager, context, **kw):
+    """Run daily identity compression across all agents."""
+    from app.orchestrator.reflection_cycle import ReflectionCycleManager
+    mgr = ReflectionCycleManager(db, worker_manager)
+    return await mgr.run_daily_compression()
+
+
+async def _pcall_run_sweep(db, worker_manager, context, **kw):
+    """Run the initiative sweep arbitrator."""
+    from app.orchestrator.sweep_arbitrator import SweepArbitrator
+    arb = SweepArbitrator(db, worker_manager)
+    return await arb.run_once()
+
+
+async def _pcall_run_diagnostics(db, worker_manager, context, **kw):
+    """Run the diagnostic trigger engine."""
+    from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
+    engine = DiagnosticTriggerEngine(db, worker_manager)
+    return await engine.run_once()
+
+
+async def _pcall_run_scheduled_events(db, worker_manager, context, **kw):
+    """Fire due scheduled events (calendar → tasks)."""
+    from app.orchestrator.scheduler import EventScheduler
+    sched = EventScheduler(db)
+    return await sched.fire_due_events()
+
+
+async def _pcall_run_github_sync(db, worker_manager, context, **kw):
+    """Sync GitHub issues/PRs for all tracked projects."""
+    from app.services.github_sync import GitHubSyncService
+    svc = GitHubSyncService(db)
+    return await svc.sync_all()
+
+
+async def _pcall_run_memory_sync(db, worker_manager, context, **kw):
+    """Sync agent memory files to DB."""
+    from app.services.memory_sync import MemorySyncService
+    svc = MemorySyncService(db)
+    return await svc.sync_all()
+
+
+_PYTHON_CALL_REGISTRY: dict[str, Any] = {
+    "reflection_cycle.run_strategic": _pcall_run_strategic_reflections,
+    "reflection_cycle.run_daily_compression": _pcall_run_daily_compression,
+    "sweep.run_once": _pcall_run_sweep,
+    "diagnostics.run_once": _pcall_run_diagnostics,
+    "scheduler.fire_due_events": _pcall_run_scheduled_events,
+    "github_sync.sync_all": _pcall_run_github_sync,
+    "memory_sync.sync_all": _pcall_run_memory_sync,
+}

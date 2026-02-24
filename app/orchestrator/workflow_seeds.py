@@ -193,4 +193,206 @@ DEFAULT_WORKFLOWS = [
         "edges": [],
         "metadata": {"author": "lobs", "category": "research"},
     },
+    # ── System Workflows (recurring/event-driven) ────────────────────
+    {
+        "name": "reflection-cycle",
+        "description": "Strategic reflection: spawn reflection agents for all execution agents, then trigger sweep.",
+        "trigger": {"type": "schedule", "cron": "0 */6 * * *", "timezone": "America/New_York"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "run_reflections",
+                "type": "python_call",
+                "config": {"callable": "reflection_cycle.run_strategic"},
+                "on_success": "check_spawned",
+                "on_failure": {"retry": 1, "abort_on": ["python_error"]},
+            },
+            {
+                "id": "check_spawned",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_reflections.spawned != 0", "goto": "notify_reflections"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify_reflections",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Reflection cycle spawned {run_reflections.spawned} agent(s). Sweep will run when all complete.",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "initiative-sweep",
+        "description": "Collect agent-proposed initiatives, quality-filter, dedup, route to Lobs/Rafe for review.",
+        "trigger": {"type": "event", "event_pattern": "reflection.batch_complete"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "run_sweep",
+                "type": "python_call",
+                "config": {"callable": "sweep.run_once"},
+                "on_success": "notify",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "notify",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Sweep complete: {run_sweep.proposed} proposed, {run_sweep.rejected} rejected, {run_sweep.llm_review} pending review.",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "diagnostic-scan",
+        "description": "Detect stalls, failures, idle agents, performance drops, repo drift. Spawn targeted diagnostics.",
+        "trigger": {"type": "schedule", "cron": "*/30 * * * *", "timezone": "UTC"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "run_diagnostics",
+                "type": "python_call",
+                "config": {"callable": "diagnostics.run_once"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1, "abort_on": ["python_error"]},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_diagnostics.spawned != 0", "goto": "notify"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Diagnostics: {run_diagnostics.triggers} triggers, {run_diagnostics.fired} fired, {run_diagnostics.spawned} spawned, {run_diagnostics.suppressed} suppressed.",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "daily-compression",
+        "description": "Compress agent reflections into versioned identity snapshots with validation gate.",
+        "trigger": {"type": "schedule", "cron": "0 4 * * *", "timezone": "America/New_York"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "compress",
+                "type": "python_call",
+                "config": {"callable": "reflection_cycle.run_daily_compression"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "compress.validation_failures != 0", "goto": "notify_failures"},
+                    ],
+                    "default": "notify_success",
+                },
+            },
+            {
+                "id": "notify_failures",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Daily compression: {compress.rewritten} rewritten, {compress.validation_failures} validation failures.",
+                },
+                "on_success": "done",
+            },
+            {
+                "id": "notify_success",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Daily compression complete: {compress.rewritten} identities updated across {compress.agents} agents.",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "scheduled-events",
+        "description": "Fire due calendar scheduled events and create tasks from them.",
+        "trigger": {"type": "schedule", "cron": "* * * * *", "timezone": "UTC"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "fire_events",
+                "type": "python_call",
+                "config": {"callable": "scheduler.fire_due_events"},
+                "on_success": "done",
+                "on_failure": {"retry": 1},
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "github-sync",
+        "description": "Sync GitHub issues and PRs for all tracked projects.",
+        "trigger": {"type": "schedule", "cron": "*/15 * * * *", "timezone": "UTC"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "sync",
+                "type": "python_call",
+                "config": {"callable": "github_sync.sync_all"},
+                "on_success": "done",
+                "on_failure": {"retry": 2, "abort_on": ["timeout"]},
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "memory-sync",
+        "description": "Sync agent memory files from disk to database.",
+        "trigger": {"type": "schedule", "cron": "0 * * * *", "timezone": "UTC"},
+        "is_active": False,
+        "nodes": [
+            {
+                "id": "sync",
+                "type": "python_call",
+                "config": {"callable": "memory_sync.sync_all"},
+                "on_success": "done",
+                "on_failure": {"retry": 1},
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
 ]
