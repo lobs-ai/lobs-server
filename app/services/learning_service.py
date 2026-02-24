@@ -313,48 +313,69 @@ async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
         if not child_key:
             return None
 
-        # Poll for response — use sessions_list to find transcript path, then read directly
+        # Poll for response — try both history API and transcript file
         import asyncio
-        for attempt in range(15):
+        for attempt in range(20):
             await asyncio.sleep(3)
 
-            # First check if session is still active
+            # Try sessions_history first (with high limit to avoid truncation)
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
                     f"{GATEWAY_URL}/tools/invoke",
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
-                        "tool": "sessions_list",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-list-{uuid.uuid4().hex[:6]}",
-                        "args": {"limit": 50, "messageLimit": 0},
+                        "tool": "sessions_history",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-hist-{uuid.uuid4().hex[:6]}",
+                        "args": {"sessionKey": child_key, "limit": 3, "includeTools": False},
                     },
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 )
-                list_data = await resp.json()
+                hist_data = await resp.json()
 
-            if not list_data.get("ok"):
-                continue
+            if hist_data.get("ok"):
+                details = hist_data.get("result", {}).get("details", hist_data.get("result", {}))
+                messages = details.get("messages", [])
+                was_truncated = details.get("contentTruncated", False)
 
-            sessions = list_data.get("result", {}).get("details", {}).get("sessions", [])
-            target = None
-            for s in sessions:
-                if s.get("key") == child_key:
-                    target = s
-                    break
+                # If not truncated, try extracting from messages
+                if not was_truncated:
+                    for msg in reversed(messages):
+                        if msg.get("role") == "assistant":
+                            content = msg.get("content", "")
+                            if isinstance(content, list):
+                                content = "\n".join(
+                                    b.get("text", "") for b in content
+                                    if isinstance(b, dict) and b.get("type") == "text"
+                                )
+                            if isinstance(content, str) and len(content.strip()) > 20:
+                                return content.strip()
 
-            if not target:
-                # Session gone — try to read transcript from disk before giving up
-                break
+                # If truncated or no content, try reading transcript file
+                # Find transcript path from sessions_list
+                if was_truncated or not messages:
+                    async with aiohttp.ClientSession() as session2:
+                        resp2 = await session2.post(
+                            f"{GATEWAY_URL}/tools/invoke",
+                            headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                            json={
+                                "tool": "sessions_list",
+                                "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-list-{uuid.uuid4().hex[:6]}",
+                                "args": {"limit": 50, "messageLimit": 0},
+                            },
+                            timeout=aiohttp.ClientTimeout(total=10),
+                        )
+                        list_data = await resp2.json()
 
-            transcript_path = target.get("transcriptPath")
-            if not transcript_path:
-                continue
-
-            # Check if transcript file exists and has content
-            if os.path.exists(transcript_path):
-                content = _extract_from_transcript(transcript_path)
-                if content and len(content) > 20:
-                    return content
+                    if list_data.get("ok"):
+                        sessions_list = list_data.get("result", {}).get("details", {}).get("sessions", [])
+                        for s in sessions_list:
+                            if s.get("key") == child_key:
+                                tp = s.get("transcriptPath")
+                                if tp and os.path.exists(tp):
+                                    content = _extract_from_transcript(tp)
+                                    if content and len(content) > 20:
+                                        return content
+                                break
 
         logger.warning("[LEARNING] No LLM response after polling")
         return None
