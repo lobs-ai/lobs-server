@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Any
 
 from app.database import get_db
-from app.models import OrchestratorSetting, AgentInitiative, AgentReflection, SystemSweep
+from app.models import OrchestratorSetting, AgentInitiative, AgentReflection, SystemSweep, InitiativeMessage
 from app.orchestrator.sweep_arbitrator import DEFAULT_DAILY_BUDGET
 from app.orchestrator.initiative_decisions import InitiativeDecisionEngine
 from app.orchestrator import OrchestratorEngine
@@ -426,6 +426,72 @@ async def batch_decide_initiatives(
             "created": len(created_tasks),
             "tasks": created_tasks,
         },
+    }
+
+
+class InitiativeMessageRequest(BaseModel):
+    text: str
+    author: str = "rafe"
+
+
+@router.get("/intelligence/initiatives/{initiative_id}/thread")
+async def get_initiative_thread(
+    initiative_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Get discussion thread for an initiative."""
+    initiative = await db.get(AgentInitiative, initiative_id)
+    if initiative is None:
+        raise HTTPException(status_code=404, detail="Initiative not found")
+
+    result = await db.execute(
+        select(InitiativeMessage)
+        .where(InitiativeMessage.initiative_id == initiative_id)
+        .order_by(InitiativeMessage.created_at.asc())
+    )
+    messages = result.scalars().all()
+
+    return {
+        "messages": [
+            {
+                "id": m.id,
+                "author": m.author,
+                "text": m.text,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in messages
+        ]
+    }
+
+
+@router.post("/intelligence/initiatives/{initiative_id}/thread")
+async def post_initiative_message(
+    initiative_id: str,
+    payload: InitiativeMessageRequest,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Post a message to an initiative's discussion thread."""
+    import uuid
+
+    initiative = await db.get(AgentInitiative, initiative_id)
+    if initiative is None:
+        raise HTTPException(status_code=404, detail="Initiative not found")
+
+    msg = InitiativeMessage(
+        id=str(uuid.uuid4()),
+        initiative_id=initiative_id,
+        author=payload.author,
+        text=payload.text,
+    )
+    db.add(msg)
+    await db.commit()
+    await db.refresh(msg)
+
+    return {
+        "id": msg.id,
+        "author": msg.author,
+        "text": msg.text,
+        "created_at": msg.created_at.isoformat() if msg.created_at else None,
     }
 
 

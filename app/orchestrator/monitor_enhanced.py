@@ -255,6 +255,58 @@ class MonitorEnhanced:
             await self.db.rollback()
             return 0
 
+    async def recover_escalation_blocked_tasks(self) -> int:
+        """
+        Recover tasks stuck in escalation-blocked state (tier 3+).
+        
+        After a cooldown period (1 hour), reset blocked tasks so they can
+        be retried fresh. Transient failures (gateway timeouts, model stalls)
+        will likely succeed on retry.
+        
+        Returns count of recovered tasks.
+        """
+        try:
+            cooldown = timedelta(hours=1)
+            cutoff = datetime.now(timezone.utc) - cooldown
+
+            result = await self.db.execute(
+                select(Task).where(
+                    Task.work_state == "blocked",
+                    Task.status == "active",
+                    Task.escalation_tier >= 3,
+                    Task.updated_at < cutoff,
+                )
+            )
+            blocked_tasks = result.scalars().all()
+
+            recovered = 0
+            for task in blocked_tasks:
+                task.work_state = "not_started"
+                task.escalation_tier = 0
+                task.retry_count = 0
+                task.failure_reason = None
+                task.updated_at = datetime.now(timezone.utc)
+                recovered += 1
+
+                logger.info(
+                    "[MONITOR] Recovered escalation-blocked task %s "
+                    "(was tier %s, retries %s)",
+                    task.id[:8],
+                    task.escalation_tier,
+                    task.retry_count,
+                )
+
+            if recovered > 0:
+                await self.db.commit()
+                logger.info("[MONITOR] Recovered %d escalation-blocked task(s)", recovered)
+
+            return recovered
+
+        except Exception as e:
+            logger.error("Failed to recover escalation-blocked tasks: %s", e, exc_info=True)
+            await self.db.rollback()
+            return 0
+
     async def detect_failure_patterns(self) -> list[dict[str, Any]]:
         """
         Detect tasks that have failed repeatedly and should be escalated.
@@ -457,12 +509,14 @@ class MonitorEnhanced:
             # Run all checks
             stuck_tasks = await self.check_stuck_tasks()
             unblocked_count = await self.auto_unblock_tasks()
+            recovered_count = await self.recover_escalation_blocked_tasks()
             failure_patterns = await self.detect_failure_patterns()
             worker_health = await self.check_worker_health()
             
             return {
                 "stuck_tasks": len(stuck_tasks),
                 "unblocked_tasks": unblocked_count,
+                "recovered_tasks": recovered_count,
                 "failure_patterns": len(failure_patterns),
                 "worker_healthy": worker_health.get("healthy", True),
                 "issues_found": (

@@ -837,3 +837,14 @@ class OutcomeLearning(Base):
     is_active = Column(Boolean, default=True, nullable=False, index=True)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class InitiativeMessage(Base):
+    """Discussion messages on initiatives (replaces inbox threads for intelligence)."""
+    __tablename__ = "initiative_messages"
+
+    id = Column(String, primary_key=True)
+    initiative_id = Column(String, ForeignKey("agent_initiatives.id"), nullable=False, index=True)
+    author = Column(String, nullable=False)  # "rafe", agent name, or "lobs"
+    text = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=func.now(), nullable=False)

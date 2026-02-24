@@ -5,7 +5,7 @@ High-level overview of the backend system design, data flow, and key components.
 **Last Updated:** 2026-02-23
 
 **Recent Architectural Changes (Feb 21-23):**
-- **Agent learning system** — Closed-loop feedback from task outcomes to prompt improvement (✅ design complete, validated, ready for implementation - see [docs/agent-learning-READY.md](docs/agent-learning-READY.md))
+- **Agent learning system** — Closed-loop feedback from task outcomes to prompt improvement (✅ design complete, validated, ready for implementation - see [docs/agent-learning-READY.md](docs/agent-learning-READY.md); Phase 1.3 retry plan in [docs/handoffs/learning-phase-1.3-rescue-architecture.md](docs/handoffs/learning-phase-1.3-rescue-architecture.md))
 - **5-tier model routing** — Upgraded to micro/small/medium/standard/strong tier system with Ollama auto-discovery
 - **Reflection system improvements** — Domain-specific prompts, isolated sessions, manual trigger endpoint
 - **Token usage tracking** — Extract and track token usage from session transcripts
