@@ -1,0 +1,58 @@
+{
+  "to": "programmer",
+  "initiative": "daily-ops-brief",
+  "title": "Implement Daily Ops Brief — full vertical slice",
+  "context": "Implement an automated 8am daily summary delivered to the assistant chat thread. It aggregates: today's Google Calendar blocks, unread priority emails, GitHub blocker issues, and top 3 agent tasks. Design doc at docs/daily-ops-brief-design.md. All three data services already exist: app/services/google_calendar.py, app/services/email_service.py, app/services/github_sync.py. The RoutineRunner system (app/orchestrator/routine_runner.py + engine.py) already supports named hooks on a cron schedule. The chat persistence+broadcast pattern is already established in app/routers/chat.py.",
+  "acceptance": "1. GET /api/brief/today returns 200 with JSON containing calendar_events, priority_emails, github_blockers, top_tasks, errors fields. 2. POST /api/brief/today/send persists a ChatMessage(role='assistant') to the 'assistant' session and returns the message_id. 3. The 'daily_ops_brief' hook is registered in engine.py's RoutineRunner and fires correctly. 4. A RoutineRegistry row with key='daily_ops_brief' and schedule='0 13 * * *' (8am ET) is seeded into the DB. 5. Each data section degrades gracefully: if Google Calendar is not configured, the calendar section is skipped and the error is listed in data.errors — the other sections still render. 6. Unit tests cover: assemble() with all sources OK, assemble() with each source failing independently, format_markdown() with full data, format_markdown() with empty sections. 7. Integration tests cover: GET /brief/today returns 200, POST /brief/today/send creates ChatMessage in DB, unauthenticated request returns 401.",
+  "files": [
+    "docs/daily-ops-brief-design.md",
+    "app/services/google_calendar.py",
+    "app/services/email_service.py",
+    "app/services/github_sync.py",
+    "app/routers/chat.py",
+    "app/services/chat_manager.py",
+    "app/orchestrator/engine.py",
+    "app/orchestrator/routine_runner.py",
+    "app/main.py",
+    "app/models.py",
+    "tests/"
+  ],
+  "tasks": [
+    {
+      "order": 1,
+      "title": "Create app/services/brief_service.py",
+      "size": "medium",
+      "notes": "Implement BriefData dataclass, assemble() with graceful degradation, format_markdown(), post_to_chat(). For post_to_chat(): replicate the chat.py pattern — write ChatMessage to DB using SQLAlchemy, then call manager.broadcast_to_session(session_key, {...}). Use ensure_session_exists() pattern from chat.py to guarantee the 'assistant' session exists before writing."
+    },
+    {
+      "order": 2,
+      "title": "Create app/routers/brief.py",
+      "size": "small",
+      "notes": "Two endpoints: GET /brief/today (returns BriefData as JSON) and POST /brief/today/send (generates + posts to chat, returns message_id). Both require auth."
+    },
+    {
+      "order": 3,
+      "title": "Register router in app/main.py",
+      "size": "trivial",
+      "notes": "Import brief.router and add app.include_router(brief.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])"
+    },
+    {
+      "order": 4,
+      "title": "Register hook in app/orchestrator/engine.py",
+      "size": "small",
+      "notes": "In the RoutineRunner instantiation (around line 357), add 'daily_ops_brief': _make_daily_brief_hook(db) to the hooks dict. Implement _make_daily_brief_hook as a closure that returns an async function calling BriefService."
+    },
+    {
+      "order": 5,
+      "title": "Seed RoutineRegistry for daily brief",
+      "size": "small",
+      "notes": "Add a migration script (follow existing pattern in migrations/) or use a startup seed that inserts: key='daily_ops_brief', label='Daily Ops Brief', schedule='0 13 * * *', execution_policy='auto', enabled=True. Use INSERT OR IGNORE so it's idempotent. Check app/models.py for RoutineRegistry field names."
+    },
+    {
+      "order": 6,
+      "title": "Write tests",
+      "size": "medium",
+      "notes": "tests/test_brief_service.py (unit tests with mocked services) and tests/test_brief_router.py (integration tests). See testing strategy in docs/daily-ops-brief-design.md."
+    }
+  ]
+}

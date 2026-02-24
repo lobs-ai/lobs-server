@@ -1,289 +1,283 @@
 # Daily Ops Brief — Design Document
 
 **Status:** Ready for implementation  
-**Author:** Architect  
-**Date:** 2026-02-24  
-**Task ID:** bc10aeab-75e0-4ac8-9df3-e78bffcc1b77
+**Created:** 2026-02-24  
+**Task ID:** bc10aeab-75e0-4ac8-9df3-e78bffcc1b77  
+**Risk tier:** B (approved feature)
 
 ---
 
-## Problem Statement
+## 1. Problem Statement
 
-Rafe spends non-trivial time each morning mentally assembling context from disparate sources: Google Calendar, email, GitHub issues, and the agent task queue. This design delivers an automated 8am summary directly into the assistant chat thread, aggregating all four sources into a single markdown card.
-
-Secondary goal: prove that the integration layer (existing Google Calendar, Gmail, GitHub services) can be composed into user-facing value quickly.
+Rafe loses time each morning manually checking calendar, email, GitHub, and task queue. We need a single daily brief injected into the assistant chat thread at 8am ET that aggregates the most important information from all sources into a 60-second-readable markdown card. This is the first vertical slice of the unified integrations layer — a concrete proof of integration value.
 
 ---
 
-## Proposed Solution
+## 2. Proposed Solution
 
-### Architecture Overview
+### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  RoutineRunner (engine.py, every 60s poll)              │
-│  → triggers "daily_ops_brief" hook at 8am ET daily     │
-│         │                                               │
-│         ▼                                               │
-│  BriefService.assemble(db)                              │
-│  ├── GoogleCalendarService.get_rafe_schedule(days=1)   │
-│  ├── EmailService.list_messages(unread=True, limit=20) │
-│  ├── gh issue list --state open (GitHub blockers)      │
-│  └── DB query: top 3 tasks by priority                 │
-│         │                                               │
-│         ▼                                               │
-│  Format markdown card                                   │
-│         │                                               │
-│         ▼                                               │
-│  Persist ChatMessage (role=assistant) + WS broadcast   │
-└─────────────────────────────────────────────────────────┘
-
-Also exposed as:
-  GET  /api/brief/today        → JSON data (all sections)
-  POST /api/brief/today/send   → generate + post to chat
+Orchestrator Engine (8am ET hook, same pattern as daily_compression)
+        │
+        ▼
+BriefService (app/services/brief_service.py)
+        │
+        ├── CalendarAdapter → GoogleCalendarService.get_rafe_schedule(days=1)
+        │                     + internal ScheduledEvent table fallback
+        ├── EmailAdapter    → EmailService.read_emails(filter=unread, priority)
+        ├── GitHubAdapter   → `gh issue list --label=blocker` via subprocess
+        └── TasksAdapter    → DB query: top 3 tasks by priority_score / status
+        │
+        ▼
+BriefFormatter → markdown card string
+        │
+        ├── /api/brief/today (on-demand trigger, returns {markdown, sections, generated_at})
+        └── ChatManager.store_message(role="assistant", session_key=BRIEF_SESSION_KEY)
+                + manager.broadcast_to_session(...)
 ```
 
-### New Files
+### Normalized Event Schema
 
-| File | Purpose |
-|------|---------|
-| `app/services/brief_service.py` | Core aggregation logic |
-| `app/routers/brief.py` | `/api/brief/today` endpoints |
+Simple Python dataclass — no new DB table needed. All data is read live from existing services.
 
-### Modified Files
-
-| File | Change |
-|------|--------|
-| `app/orchestrator/engine.py` | Register `daily_ops_brief` hook in RoutineRunner |
-| `app/main.py` | Include `brief.router` |
-
-### No New DB Tables
-
-Brief data is fetched fresh at runtime. `RoutineAuditEvent` already captures result JSON as a side-effect of routine execution. No schema migration needed.
-
----
-
-## BriefService Design (`app/services/brief_service.py`)
-
-```python
-class BriefService:
-    def __init__(self, db: AsyncSession): ...
-    
-    async def assemble(self, target_date: date | None = None) -> BriefData:
-        """Gather all sections. Sections that fail degrade gracefully."""
-        
-    async def format_markdown(self, data: BriefData) -> str:
-        """Render BriefData to markdown card string."""
-        
-    async def post_to_chat(self, markdown: str, session_key: str = "assistant") -> str:
-        """Persist ChatMessage(role='assistant') + broadcast via manager. Returns message id."""
-```
-
-**BriefData** is a plain dataclass:
 ```python
 @dataclass
-class BriefData:
-    date: date
-    calendar_events: list[CalendarEvent]  # today's time blocks
-    priority_emails: list[EmailSummary]   # unread priority emails
-    github_blockers: list[GitHubIssue]    # open blocker-labeled issues
-    top_tasks: list[TaskSummary]          # top 3 agent tasks by priority
-    errors: list[str]                     # sections that failed (degrade gracefully)
+class BriefItem:
+    source: str          # "calendar" | "email" | "github" | "tasks"
+    title: str
+    detail: Optional[str] = None
+    priority: str = "normal"  # "high" | "normal" | "low"
+    url: Optional[str] = None
+    time: Optional[datetime] = None
+
+@dataclass
+class BriefSection:
+    name: str            # "Calendar", "Priority Messages", "GitHub Blockers", "Agent Tasks"
+    icon: str            # emoji
+    items: list[BriefItem]
+    error: Optional[str] = None   # filled if adapter failed
+    available: bool = True        # False if integration not configured
+
+@dataclass
+class DailyBrief:
+    generated_at: datetime
+    sections: list[BriefSection]
+    suggested_plan: str           # 1-3 sentence narrative
 ```
 
-### Section Specs
-
-**Calendar events:**
-- Call `GoogleCalendarService.get_rafe_schedule(days=1)`, filter to today only
-- Include: title, start_time, end_time, location (if any)
-- If Google Calendar not configured: skip section, note in errors
-
-**Priority emails:**
-- Call `EmailService.list_messages()` — get unread emails
-- Filter heuristic: `is:unread is:important` (Gmail IMPORTANT label)
-- Limit to 5 most recent
-- Include: sender name/email, subject, snippet (first 100 chars)
-- If email not configured: skip, note in errors
-
-**GitHub blockers:**
-- Run `gh issue list --state open --label blocker --json number,title,url,assignees`
-- Across all GitHub-tracked projects in the DB
-- Deduplicate by issue URL
-- Limit to 10
-- If `gh` not available or no projects: skip, note in errors
-
-**Top agent tasks:**
-- DB query: tasks where `status IN ('pending', 'in_progress')` AND `priority IN ('high', 'urgent')` (or any priority if fewer than 3 high/urgent), ordered by priority desc then created_at desc, limit 3
-- Include: title, project name, status, assigned_agent
-
-### Markdown Card Format
+### Example Output
 
 ```markdown
-## 📋 Daily Ops Brief — {date}
+## 🗓 Daily Ops Brief — Tuesday Feb 24
 
-### 📅 Today's Calendar
-- **9:00–10:00** — Weekly standup (Google Meet)
-- **14:00–15:30** — Code review session
-*(no events today)* ← if empty
+### 📅 Calendar Today
+- **10:00–11:00** — Engineering Standup (Zoom)
+- **14:00–15:00** — Design Review: Auth System
 
-### 📧 Priority Email ({count} unread)
-- **Alice Smith** — "Re: Deploy blocked" — *needs your sign-off on...*
-- **GitHub** — "PR #142 approved" — *Your PR was reviewed...*
-*(no priority emails)* ← if empty
+### 📨 Priority Messages
+- `boss@example.com` — "Need PR review ASAP" *(3h ago)*
+- `ci@github.com` — "Build failed on main" *(1h ago)*
 
-### 🚫 GitHub Blockers ({count})
-- [#88](url) — Cannot deploy to prod (unassigned)
-*(no open blockers)* ← if empty
+### 🚧 GitHub Blockers
+- [#142](https://github.com/...) — CI fails on main (lobs-server)
+- [#88](https://github.com/...) — Merge conflict in feature/auth
 
-### ✅ Top Agent Tasks
-1. **[high]** Implement auth middleware — *programmer* (in_progress)
-2. **[high]** Fix memory search latency — *researcher* (pending)
-3. **[normal]** Update CHANGELOG — *writer* (pending)
+### 🤖 Top Agent Tasks
+1. **[high]** Implement learning phase 1.3 retry
+2. **[medium]** Fix document lifecycle transition
+3. **[medium]** Update ARCHITECTURE.md
 
----
-*Generated at {time} ET · [Refresh](/api/brief/today/send)*
+**Suggested plan:** Start with #142 (CI blocker affects all dev work), then tackle the learning phase retry while CI runs. Design review at 2pm may touch auth — review #88 context beforehand.
 ```
 
 ---
 
-## Router Design (`app/routers/brief.py`)
+## 3. Key Design Decisions
 
-```python
-GET  /api/brief/today
-     → BriefService.assemble()
-     → return BriefData as JSON (all sections)
-     → query param: ?date=YYYY-MM-DD (default: today)
-
-POST /api/brief/today/send
-     → BriefService.assemble()
-     → BriefService.post_to_chat()
-     → return {"status": "sent", "message_id": "..."}
-     → query param: ?session_key=assistant (default: "assistant")
-```
-
----
-
-## Routine Hook Registration
-
-In `engine.py`, the RoutineRunner hooks dict already accepts arbitrary keys:
-
-```python
-runner = RoutineRunner(db, hooks={
-    "noop": ...,
-    "daily_ops_brief": _make_daily_brief_hook(db),
-})
-```
-
-The hook function:
-```python
-async def _daily_brief_hook(routine: RoutineRegistry) -> dict:
-    svc = BriefService(db)
-    data = await svc.assemble()
-    md = await svc.format_markdown(data)
-    msg_id = await svc.post_to_chat(md)
-    return {"status": "ok", "message_id": msg_id, "errors": data.errors}
-```
-
-### RoutineRegistry DB Seed
-
-The routine must be seeded into the `routine_registry` table. The programmer should add a migration script or use the existing `/api/routines` endpoint (if it exists) to insert:
-
-```json
-{
-  "key": "daily_ops_brief",
-  "label": "Daily Ops Brief",
-  "description": "8am daily summary: calendar, email, GitHub blockers, top tasks",
-  "schedule": "0 13 * * *",
-  "timezone": "America/New_York",
-  "execution_policy": "auto",
-  "enabled": true
-}
-```
-
-Note: `0 13 * * *` = 1pm UTC = 8am ET (EST). In EDT (summer), use `0 12 * * *`. **Best approach:** store in UTC. The programmer should check if the RoutineRegistry model supports timezone-aware cron or if UTC offset is manual.
-
-**Simpler alternative:** Seed with `0 13 * * *` and add a comment in the code. If Rafe wants timezone-aware scheduling, that's a separate feature.
-
----
-
-## Tradeoffs
-
-### Real-time fetch vs cached brief
-- **Chose: real-time** — Calendar/email/GitHub change constantly. Cache would go stale. Acceptable performance for once-daily generation.
-
-### LLM summarization vs template formatting
-- **Chose: template formatting** — Faster, cheaper, more reliable, no model dependency. The data is already structured; a template produces a perfectly readable card. LLM can optionally be added later as a "smart summary" layer.
-
-### New router vs extending integrations.py
-- **Chose: new router** — `/api/brief/today` is a first-class user-facing feature. Integrations.py is plumbing. Separation keeps each file focused.
+### No new DB tables
+All data is read live. Brief items are ephemeral — they become chat messages in the existing `ChatMessage` table. No schema migrations needed.
 
 ### Graceful degradation
-- Each section is fetched independently. If Google Calendar credentials expired, we still deliver the GitHub + task sections. Errors are listed at the bottom of the brief. **This is the most important reliability tradeoff.**
+Every adapter is wrapped in try/except. If Google Calendar isn't configured, the Calendar section shows `*(not configured)*`. If `gh` CLI fails, GitHub section shows error note. The brief is always produced, even if some sections are empty.
 
-### Timezone handling
-- Cron stored in UTC, hardcoded offset for now. The scheduler already uses `compute_next_fire_time()` with croniter; no change needed. If summer/winter offset matters, Rafe can adjust via RoutineRegistry update.
+### Session key for brief delivery
+The brief is posted to a configurable session via env var `BRIEF_CHAT_SESSION_KEY` (default: `"main"`). This follows the existing `session_key` convention used throughout the chat system. The message role is `"assistant"` with metadata `{"source": "daily_brief", "generated_at": "..."}` so the UI can style it distinctively if desired.
 
----
+### 8am trigger uses existing engine pattern
+The engine already has `_daily_compression_hour_et` (3am) and memory maintenance checks. We add:
+- `_brief_hour_et = 8` (configurable via runtime settings)
+- `_last_brief_date_et: str | None = None` (same marker pattern)
+The check runs in the same `now_et.hour >= X` gate, with a date key `"daily_brief_last_date_et"` persisted to SystemSettings.
 
-## Testing Strategy
-
-### Unit tests (brief_service.py)
-
-1. `test_assemble_all_sources_ok` — mock all services, verify BriefData fields populated
-2. `test_assemble_calendar_fails` — mock calendar raising exception, verify error in data.errors and other sections still populated
-3. `test_assemble_email_fails` — same for email
-4. `test_assemble_github_fails` — same for GitHub
-5. `test_format_markdown_full` — verify markdown output contains expected sections
-6. `test_format_markdown_empty_sections` — verify "no events today" fallbacks render correctly
-7. `test_top_tasks_query` — seed 5 tasks with varying priorities, verify top 3 returned correctly
-
-### Integration tests (test_brief_router.py)
-
-1. `test_get_brief_today` — GET /api/brief/today returns 200 with expected JSON shape
-2. `test_post_brief_send` — POST /api/brief/today/send creates a ChatMessage in DB
-3. `test_brief_no_auth` — returns 401 without token
-
-### Manual smoke test
-
-1. Call `POST /api/brief/today/send` via curl
-2. Verify message appears in chat with all 4 sections (or graceful skips)
-3. Verify RoutineAuditEvent shows `status=ok`
+### On-demand endpoint
+`GET /api/brief/today` lets Rafe (or the UI) trigger the brief anytime. Returns JSON with `markdown` string and structured `sections`. Optional `?send_to_chat=true` param injects it into the chat thread. This is useful for testing and for a "Refresh Brief" button in Mission Control.
 
 ---
 
-## Risks & Mitigations
+## 4. Source Adapters — Detailed Specs
 
-| Risk | Likelihood | Mitigation |
-|------|-----------|-----------|
-| Google Calendar OAuth expired | Medium | Section skips with error note; existing pattern in integrations.py |
-| `gh` CLI not in PATH at runtime | Low | Subprocess fallback with clear error message |
-| Email service IMAP/SMTP auth failure | Medium | Skip section, log, continue |
-| Cron fires at wrong time (DST) | Low | Document the UTC offset; trivially adjustable |
-| Chat session "assistant" doesn't exist yet | Low | `ensure_session_exists()` pattern already in chat.py — replicate it |
+### CalendarAdapter
+```python
+async def fetch(self) -> BriefSection:
+    # 1. Try GoogleCalendarService.get_rafe_schedule(days=1)
+    #    → filter events where start_time is today (ET)
+    # 2. Fallback: query internal ScheduledEvent table for today
+    # 3. Return BriefItems sorted by start time
+    # Error: mark section.error, section.available = False if not configured
+```
+
+### EmailAdapter
+```python
+async def fetch(self) -> BriefSection:
+    # 1. Call EmailService.read_emails(filter="unread", limit=20)
+    # 2. Filter: sender in priority list OR subject contains urgent keywords
+    #    Priority keywords: "urgent", "ASAP", "blocker", "critical", "action required"
+    # 3. Return top 5 items sorted by recency
+    # Note: EmailService already handles Gmail API + IMAP fallback
+```
+
+### GitHubAdapter
+```python
+async def fetch(self) -> BriefSection:
+    # 1. Run: gh issue list --state=open --label=blocker --json number,title,url,updatedAt --limit=10
+    #    (label "blocker" — adjust filter to project conventions)
+    # 2. Also check: gh pr list --state=open --review-requested=@me (PRs needing Rafe's review)
+    # 3. subprocess with 15s timeout; catch FileNotFoundError for missing gh CLI
+    # 4. Return items sorted by updatedAt desc
+```
+
+### TasksAdapter
+```python
+async def fetch(self) -> BriefSection:
+    # DB query: tasks WHERE status IN ('inbox', 'active') 
+    #           ORDER BY priority_score DESC, created_at ASC 
+    #           LIMIT 5
+    # Map to BriefItems with priority from task.status/priority_score
+    # This always works (no external dependency)
+```
 
 ---
 
-## Implementation Plan
+## 5. Implementation Plan
 
-Ordered tasks for the programmer:
+### Task 1 — BriefService + Adapters (medium)
+**File:** `app/services/brief_service.py`
 
-1. **`app/services/brief_service.py`** (medium) — Core aggregation + markdown formatting
-   - BriefData dataclass
-   - assemble() with graceful degradation per section
-   - format_markdown()
-   - post_to_chat() using DB write + manager.broadcast_to_session()
-   - See chat.py for the exact pattern to persist ChatMessage and broadcast
+Create:
+- `BriefItem`, `BriefSection`, `DailyBrief` dataclasses
+- `CalendarAdapter`, `EmailAdapter`, `GitHubAdapter`, `TasksAdapter` classes
+- `BriefService.generate(db)` → calls all adapters concurrently (asyncio.gather), returns `DailyBrief`
+- `BriefFormatter.to_markdown(brief: DailyBrief) -> str` — renders the markdown card
+- `BriefFormatter.suggest_plan(brief: DailyBrief) -> str` — simple heuristic: high-priority items first, blockers before meetings
 
-2. **`app/routers/brief.py`** (small) — Two endpoints
-   - GET /brief/today
-   - POST /brief/today/send
+**Acceptance criteria:**
+- `BriefService.generate()` returns `DailyBrief` even when all adapters fail
+- Each failed adapter has `section.error` set, not an exception raised
+- `BriefFormatter.to_markdown()` produces valid markdown with all populated sections
 
-3. **`app/main.py`** (trivial) — Include brief.router
+### Task 2 — `/api/brief/today` endpoint (small)
+**Files:** `app/routers/brief.py`, `app/main.py`
 
-4. **`app/orchestrator/engine.py`** (small) — Register `daily_ops_brief` hook in RoutineRunner hooks dict
+Create router with:
+```python
+GET /api/brief/today?send_to_chat=false
+→ {"markdown": "...", "sections": [...], "generated_at": "..."}
+```
 
-5. **DB seed: RoutineRegistry** (small) — Add seed script or migration to insert the daily_ops_brief routine at 8am ET
+- Wire into `main.py` like all other routers
+- `send_to_chat=true` writes to `BRIEF_CHAT_SESSION_KEY` (env var, default `"main"`)
+  - Use `store_message(session_key=..., role="assistant", content=markdown, metadata={"source": "daily_brief"})` 
+  - Use `manager.broadcast_to_session(...)` to push to connected WebSocket clients
 
-6. **Tests** (`tests/test_brief_service.py`, `tests/test_brief_router.py`) (medium) — Unit + integration tests per testing strategy above
+**Acceptance criteria:**
+- `GET /api/brief/today` returns 200 with `markdown` key
+- `GET /api/brief/today?send_to_chat=true` stores a ChatMessage with role=assistant
+- Auth required (Bearer token)
 
-**All 6 tasks can be done in a single programmer session.** They're tightly coupled (the service is referenced by both the router and the engine hook) and collectively form the complete vertical slice.
+### Task 3 — 8am engine trigger (small)
+**File:** `app/orchestrator/engine.py`
+
+Add to engine's control loop (same pattern as `_daily_compression_hour_et`):
+```python
+self._brief_hour_et = 8  # loaded from runtime settings
+self._last_brief_date_et: str | None = None  # loaded from SystemSettings
+
+# In the control loop:
+if (self._last_brief_date_et != today_key_et
+        and now_et.hour >= self._brief_hour_et):
+    self._last_brief_date_et = today_key_et
+    await self._run_daily_brief(db)
+```
+
+`_run_daily_brief(db)` calls `BriefService.generate(db)`, formats markdown, and posts to chat (same code path as `send_to_chat=true`).
+
+Add `"daily_brief_last_date_et"` to SystemSettings persistence (same as `"memory_maintenance_last_date_et"`).
+
+**Acceptance criteria:**
+- Brief fires once per day at 8am ET, not on restart
+- `_last_brief_date_et` persisted to SystemSettings so restarts don't re-fire
+- Brief appears in chat session after 8am trigger
+
+### Task 4 — Tests (small)
+**File:** `tests/test_brief_service.py`
+
+Write:
+1. Unit test `BriefFormatter.to_markdown()` with a constructed `DailyBrief` (all sections populated)
+2. Unit test `BriefFormatter.to_markdown()` with all sections errored (degraded mode)
+3. Unit test `TasksAdapter.fetch()` with mocked DB (no external deps)
+4. Integration test `GET /api/brief/today` returns 200 (use test client, mock adapters)
+
+---
+
+## 6. Tradeoffs Considered
+
+| Option | Choice | Reason |
+|--------|--------|--------|
+| New DB table for `BriefItem` | No — use dataclasses | Brief items are ephemeral; message history suffices |
+| Full integration plugin system | No — simple adapters | Plugin system ADR exists but isn't built yet; adapters are the simplest path |
+| Async adapters with `asyncio.gather` | Yes | Parallel fetching keeps latency low (~1-2s total) |
+| Hard-code session key "main" | No — use env var | "main" is the obvious default but may vary per deployment |
+| Store brief in dedicated table | No — post as chat message | Reuses existing UI rendering and WebSocket delivery |
+| GitHub label filter ("blocker") | Configurable via env var `GITHUB_BLOCKER_LABEL` (default: "blocker") | Projects use different label conventions |
+
+---
+
+## 7. Testing Strategy
+
+**Unit tests (no network):**
+- `BriefFormatter` with mock data — verify markdown structure
+- `TasksAdapter` with mock async DB session
+- Each adapter handles service-not-configured gracefully
+
+**Integration tests:**
+- `GET /api/brief/today` with TestClient
+- Calendar + email adapters skipped when env vars absent (graceful degradation)
+
+**Manual verification:**
+- After implementation, hit `GET /api/brief/today?send_to_chat=true` and verify message appears in chat UI
+- Check that 8am trigger fires once (not twice on restart)
+
+---
+
+## 8. Files to Create/Modify
+
+| File | Action |
+|------|--------|
+| `app/services/brief_service.py` | **Create** |
+| `app/routers/brief.py` | **Create** |
+| `app/main.py` | **Modify** — add brief router import |
+| `app/orchestrator/engine.py` | **Modify** — add 8am trigger |
+| `tests/test_brief_service.py` | **Create** |
+
+---
+
+## 9. Risks & Mitigations
+
+| Risk | Mitigation |
+|------|-----------|
+| GCal/email not configured | Adapter marks section unavailable, brief still generates |
+| `gh` CLI not installed | Catch `FileNotFoundError`, mark GitHub section unavailable |
+| Brief session key wrong | Env var `BRIEF_CHAT_SESSION_KEY` with clear docs; on-demand endpoint for testing |
+| 8am trigger fires on every restart before 8am | Date key `_last_brief_date_et` prevents re-firing (same pattern as memory maintenance) |
+| Slow adapter (email IMAP) blocks others | `asyncio.gather` with per-adapter timeout (10s) |

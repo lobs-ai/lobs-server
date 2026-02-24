@@ -1,0 +1,42 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "daily-ops-brief",
+    "title": "Task 1: BriefService + Source Adapters",
+    "context": "First slice of unified integrations. Create app/services/brief_service.py containing the core aggregation service and all source adapters. See full design at docs/daily-ops-brief-design.md.\n\nCreate:\n- BriefItem, BriefSection, DailyBrief dataclasses (see design doc §2)\n- CalendarAdapter: calls existing GoogleCalendarService.get_rafe_schedule(days=1) (import from app.services.google_calendar); fallback to internal ScheduledEvent table query\n- EmailAdapter: calls existing EmailService.read_emails(filter='unread', limit=20); filter by priority keywords in subject: 'urgent', 'ASAP', 'blocker', 'critical', 'action required'\n- GitHubAdapter: subprocess(['gh','issue','list','--state=open','--label=blocker','--json','number,title,url,updatedAt','--limit=10'], timeout=15); catch FileNotFoundError for missing gh CLI. Use env var GITHUB_BLOCKER_LABEL (default: 'blocker').\n- TasksAdapter: async DB query — tasks WHERE status IN ('inbox','active') ORDER BY priority_score DESC NULLS LAST, created_at ASC LIMIT 5\n- BriefService.generate(db) → asyncio.gather all adapters with per-adapter timeout (10s), returns DailyBrief even if all fail\n- BriefFormatter.to_markdown(brief) → markdown string (see example in design doc §2)\n- BriefFormatter.suggest_plan(brief) → 1-3 sentence heuristic narrative (highest priority item first, blockers before meetings)\n\nEvery adapter must catch all exceptions and return BriefSection(error=str(e), available=False) — never raise.",
+    "acceptance": "1) app/services/brief_service.py created with all dataclasses and adapters. 2) BriefService.generate(db) returns DailyBrief with 4 sections always. 3) All adapters degrade gracefully (exception → section.error set, not raised). 4) BriefFormatter.to_markdown() produces valid markdown with emoji headers matching design doc. 5) CalendarAdapter uses GoogleCalendarService if configured, falls back to ScheduledEvent table. 6) GitHubAdapter uses GITHUB_BLOCKER_LABEL env var. 7) asyncio.gather runs all adapters concurrently.",
+    "files": ["docs/daily-ops-brief-design.md"],
+    "depends_on": [],
+    "estimated_days": 2
+  },
+  {
+    "to": "programmer",
+    "initiative": "daily-ops-brief",
+    "title": "Task 2: /api/brief/today endpoint",
+    "context": "Create app/routers/brief.py and wire into app/main.py. Depends on Task 1 (BriefService).\n\nEndpoint: GET /api/brief/today?send_to_chat=false\n- Requires Bearer auth (Depends(require_auth))\n- Calls BriefService.generate(db), BriefFormatter.to_markdown(brief)\n- Returns: {markdown: str, sections: [{name, icon, items: [{source, title, detail, priority, url, time}], error, available}], generated_at: str}\n- If send_to_chat=true:\n  - Read session key from env var BRIEF_CHAT_SESSION_KEY (default 'main')\n  - Call store_message(session_key=..., role='assistant', content=markdown, db=db) — reuse the helper from app/routers/chat.py\n  - Call await manager.broadcast_to_session(session_key, {type: 'message', data: {...}}) — reuse pattern from chat.py webhook_receive_message\n  - Message metadata: {source: 'daily_brief', generated_at: iso_string}\n\nIn app/main.py, import and include the brief router like all other routers.",
+    "acceptance": "1) GET /api/brief/today returns 200 with {markdown, sections, generated_at}. 2) Auth required — 401 without token. 3) send_to_chat=true stores ChatMessage with role=assistant and metadata.source='daily_brief'. 4) send_to_chat=true broadcasts via WebSocket manager. 5) Router registered in main.py. 6) BRIEF_CHAT_SESSION_KEY env var respected.",
+    "files": ["docs/daily-ops-brief-design.md", "app/routers/chat.py", "app/main.py"],
+    "depends_on": ["daily-ops-brief:task-1"],
+    "estimated_days": 1
+  },
+  {
+    "to": "programmer",
+    "initiative": "daily-ops-brief",
+    "title": "Task 3: 8am daily trigger in orchestrator engine",
+    "context": "Add the daily ops brief auto-trigger to app/orchestrator/engine.py. Depends on Tasks 1 and 2. Follow the exact same pattern as _daily_compression_hour_et (3am) and _last_memory_maintenance_date_et.\n\nChanges to OrchestratorEngine.__init__:\n  self._brief_hour_et = 8  # default; load from runtime settings like compression hour\n  self._last_brief_date_et: str | None = None  # load from SystemSettings key 'daily_brief_last_date_et'\n\nIn the control loop (same block as memory maintenance check, around line 577):\n  if (self._last_brief_date_et != today_key_et\n          and now_et.hour >= self._brief_hour_et):\n      self._last_brief_date_et = today_key_et\n      await self._run_daily_brief(db)\n\nAdd private method _run_daily_brief(db):\n  - Import BriefService, BriefFormatter from app.services.brief_service\n  - Generate brief, format to markdown\n  - Post to chat (same logic as send_to_chat=true in the endpoint)\n  - Log with [BRIEF] prefix\n  - catch all exceptions — never crash the engine\n\nPersist _last_brief_date_et to SystemSettings (key: 'daily_brief_last_date_et') same way _last_memory_maintenance_date_et is persisted. Add to _load_runtime_settings() and the status dict.\n\nAdd BRIEF_HOUR_ET setting key to DEFAULT_RUNTIME_SETTINGS dict (value: 8).",
+    "acceptance": "1) Brief fires once daily at 8am ET. 2) _last_brief_date_et persisted to SystemSettings — survives restart without re-firing. 3) Engine crash-safe — exceptions in _run_daily_brief are caught and logged with [BRIEF]. 4) _brief_hour_et appears in orchestrator status endpoint output. 5) 'daily_brief_last_date_et' key in SystemSettings after first run.",
+    "files": ["docs/daily-ops-brief-design.md", "app/orchestrator/engine.py"],
+    "depends_on": ["daily-ops-brief:task-1", "daily-ops-brief:task-2"],
+    "estimated_days": 1
+  },
+  {
+    "to": "programmer",
+    "initiative": "daily-ops-brief",
+    "title": "Task 4: Tests for BriefService",
+    "context": "Create tests/test_brief_service.py. Depends on Tasks 1 and 2.\n\nWrite:\n1. Unit test BriefFormatter.to_markdown() with a fully-populated DailyBrief (all 4 sections with items). Assert markdown contains expected headers (Calendar, Priority Messages, GitHub Blockers, Top Agent Tasks).\n2. Unit test BriefFormatter.to_markdown() with all 4 sections errored (items=[], error='service unavailable'). Assert brief still renders (graceful degradation).\n3. Unit test TasksAdapter.fetch() with a mock async DB session that returns 3 tasks. Assert 3 BriefItems returned, section.error is None.\n4. Integration test: GET /api/brief/today with TestClient (use the FastAPI test setup already in tests/). Mock BriefService.generate to return a fixed DailyBrief. Assert response 200, response JSON has 'markdown' key.",
+    "acceptance": "1) tests/test_brief_service.py created. 2) All 4 test cases pass with `python -m pytest tests/test_brief_service.py -v`. 3) No real external calls in tests (all adapters mocked). 4) Tests cover graceful degradation path.",
+    "files": ["docs/daily-ops-brief-design.md", "app/services/brief_service.py"],
+    "depends_on": ["daily-ops-brief:task-1", "daily-ops-brief:task-2"],
+    "estimated_days": 1
+  }
+]
