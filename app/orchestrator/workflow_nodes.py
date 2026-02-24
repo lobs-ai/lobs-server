@@ -2,6 +2,21 @@
 
 Each node type (spawn_agent, tool_call, branch, etc.) has an execute()
 and optionally a check() method for async operations.
+
+## Adding a New Node Type
+
+    from app.orchestrator.workflow_nodes import register_node
+
+    @register_node("my_node_type")
+    async def exec_my_node(config, context, run, *, db, worker_manager):
+        # ... do work ...
+        return NodeResult(status="completed", output={"key": "value"})
+
+    # Optional: register a checker for async nodes
+    @register_node_checker("my_node_type")
+    async def check_my_node(node_def, run, *, db, worker_manager):
+        # Return None if still running, NodeResult when done
+        return None
 """
 
 import asyncio
@@ -12,7 +27,7 @@ import subprocess
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import aiohttp
 
@@ -20,6 +35,10 @@ from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_
 
 logger = logging.getLogger(__name__)
 
+
+# ══════════════════════════════════════════════════════════════════════
+# Node Result
+# ══════════════════════════════════════════════════════════════════════
 
 @dataclass
 class NodeResult:
@@ -30,6 +49,54 @@ class NodeResult:
     error_type: str = ""
     session_key: Optional[str] = None
 
+
+# ══════════════════════════════════════════════════════════════════════
+# Node Registry — the plugin system
+# ══════════════════════════════════════════════════════════════════════
+
+# Handler signature: async (config, context, run, *, db, worker_manager) -> NodeResult
+# Checker signature: async (node_def, run, *, db, worker_manager) -> Optional[NodeResult]
+
+_NODE_EXECUTORS: dict[str, Callable] = {}
+_NODE_CHECKERS: dict[str, Callable] = {}
+
+
+def register_node(node_type: str):
+    """Decorator to register a node executor.
+
+    Usage:
+        @register_node("my_type")
+        async def exec_my_type(config, context, run, *, db, worker_manager):
+            return NodeResult(status="completed", output={})
+    """
+    def decorator(fn: Callable) -> Callable:
+        _NODE_EXECUTORS[node_type] = fn
+        return fn
+    return decorator
+
+
+def register_node_checker(node_type: str):
+    """Decorator to register a node checker for async nodes.
+
+    Usage:
+        @register_node_checker("my_type")
+        async def check_my_type(node_def, run, *, db, worker_manager):
+            return None  # still running
+    """
+    def decorator(fn: Callable) -> Callable:
+        _NODE_CHECKERS[node_type] = fn
+        return fn
+    return decorator
+
+
+def get_registered_node_types() -> list[str]:
+    """Return all registered node type names."""
+    return sorted(_NODE_EXECUTORS.keys())
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Template rendering
+# ══════════════════════════════════════════════════════════════════════
 
 def _render_template(template: str, context: dict[str, Any]) -> str:
     """Render a template string with {path.to.value} substitutions from context."""
@@ -48,8 +115,69 @@ def _render_template(template: str, context: dict[str, Any]) -> str:
     return re.sub(r"\{([a-zA-Z0-9_.]+)\}", replacer, template)
 
 
+def _resolve_context_path(context: dict, path: str) -> Any:
+    """Walk a dotted path in context, returning the value or None."""
+    value = context
+    for part in path.split("."):
+        if isinstance(value, dict):
+            value = value.get(part)
+        else:
+            return None
+    return value
+
+
+def _evaluate_condition(expr: str, context: dict) -> bool:
+    """Evaluate a simple condition expression.
+
+    Supports: "path == value", "path != value", "path" (truthiness),
+    "path > N", "path < N", "path >= N", "path <= N", "path in [a,b,c]"
+    """
+    expr = expr.strip()
+
+    # Comparison operators (order matters — check multi-char first)
+    for op in ("!=", ">=", "<=", "==", ">", "<"):
+        if op in expr:
+            parts = expr.split(op, 1)
+            path = parts[0].strip()
+            expected = parts[1].strip().strip("'\"")
+            value = _resolve_context_path(context, path)
+
+            if op == "==":
+                return str(value) == expected
+            elif op == "!=":
+                return str(value) != expected
+            elif op in (">", "<", ">=", "<="):
+                try:
+                    fval = float(value) if value is not None else 0
+                    fexp = float(expected)
+                    if op == ">": return fval > fexp
+                    if op == "<": return fval < fexp
+                    if op == ">=": return fval >= fexp
+                    if op == "<=": return fval <= fexp
+                except (ValueError, TypeError):
+                    return False
+
+    # "path in [a, b, c]"
+    if " in " in expr:
+        parts = expr.split(" in ", 1)
+        path = parts[0].strip()
+        list_str = parts[1].strip()
+        value = _resolve_context_path(context, path)
+        if list_str.startswith("[") and list_str.endswith("]"):
+            items = [i.strip().strip("'\"") for i in list_str[1:-1].split(",")]
+            return str(value) in items
+
+    # Truthiness check
+    value = _resolve_context_path(context, expr)
+    return bool(value)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# NodeHandlers — dispatcher (backward compat + registry)
+# ══════════════════════════════════════════════════════════════════════
+
 class NodeHandlers:
-    """Registry of node-type handlers."""
+    """Registry of node-type handlers. Dispatches to registered functions."""
 
     def __init__(self, db: Any, worker_manager: Any = None):
         self.db = db
@@ -61,24 +189,23 @@ class NodeHandlers:
         config = node_def.get("config", {})
         context = dict(run.context or {})
 
-        handler = getattr(self, f"_exec_{node_type}", None)
-        if handler is None:
+        executor = _NODE_EXECUTORS.get(node_type)
+        if executor is None:
             return NodeResult(status="failed", error=f"Unknown node type: {node_type}")
 
         try:
-            return await handler(config, context, run)
+            return await executor(config, context, run, db=self.db, worker_manager=self.worker_manager)
         except Exception as e:
             logger.error("[NODE:%s] Execution error: %s", node_def.get("id"), e, exc_info=True)
             return NodeResult(status="failed", error=str(e))
 
     async def check(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Check if an async node has completed.  Returns None if still running."""
+        """Check if an async node has completed. Returns None if still running."""
         node_type = node_def.get("type", "")
-        checker = getattr(self, f"_check_{node_type}", None)
+        checker = _NODE_CHECKERS.get(node_type)
         if checker is None:
-            # Node types without a checker complete synchronously
             return None
-        return await checker(node_def, run)
+        return await checker(node_def, run, db=self.db, worker_manager=self.worker_manager)
 
     async def delete_session(self, session_key: str) -> None:
         """Delete an OpenClaw session via Gateway."""
@@ -102,551 +229,887 @@ class NodeHandlers:
         except Exception as e:
             logger.debug("[NODE] Session delete failed: %s", e)
 
-    async def _resolve_model_tier(self, tier: str, agent_type: str, context: dict) -> str | None:
-        """Resolve a model tier name to an actual model using ModelChooser.
 
-        If the tier is already a model id (contains '/' or is an alias like 'sonnet'),
-        return it as-is. Otherwise use the full ModelChooser pipeline.
-        """
-        # If it looks like an explicit model or alias, pass through
-        KNOWN_TIERS = {"micro", "small", "medium", "standard", "strong"}
-        if tier not in KNOWN_TIERS:
-            return tier  # Treat as explicit model/alias
+# ══════════════════════════════════════════════════════════════════════
+# Helper: model tier resolution
+# ══════════════════════════════════════════════════════════════════════
 
-        try:
-            from app.orchestrator.model_chooser import ModelChooser
-            chooser = ModelChooser(self.db, provider_health=None)
-            task_ctx = context.get("task", {})
-            if not isinstance(task_ctx, dict):
-                task_ctx = {}
-            # Inject model_tier into the task dict for decide_models
-            task_for_chooser = {**task_ctx, "model_tier": tier}
-            choice = await chooser.choose(agent_type=agent_type, task=task_for_chooser)
-            return choice.model
-        except Exception as e:
-            logger.warning("[NODE] Model tier resolution failed for tier=%s: %s", tier, e)
-            return None
-
-    # ── Node Type Handlers ───────────────────────────────────────────
-
-    async def _exec_spawn_agent(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Spawn an agent via the WorkerManager, which handles:
-        - Model selection (ModelChooser with fallback chain)
-        - Prompt building (Prompter with learning enhancement)
-        - Worker tracking (active_workers, project_locks)
-        - Completion handling (task status, agent tracker, circuit breaker,
-          git auto-commit, escalation, provider health)
-
-        Config:
-            agent_type: str — agent template id (programmer, researcher, writer, etc.)
-            prompt_template: str — optional override template (if empty, WorkerManager builds prompt)
-            model_tier: str — optional tier name (micro/small/medium/standard/strong)
-            model: str — explicit model override (takes priority over model_tier)
-            timeout_seconds: int — max session runtime (default 900)
-        """
-        agent_type = config.get("agent_type", "programmer")
-        model_tier = config.get("model_tier")
-        prompt_template = config.get("prompt_template")
-
+async def _resolve_model_tier(tier: str, agent_type: str, context: dict, db: Any) -> str | None:
+    """Resolve a model tier name to an actual model using ModelChooser."""
+    KNOWN_TIERS = {"micro", "small", "medium", "standard", "strong"}
+    if tier not in KNOWN_TIERS:
+        return tier  # Treat as explicit model/alias
+    try:
+        from app.orchestrator.model_chooser import ModelChooser
+        chooser = ModelChooser(db, provider_health=None)
         task_ctx = context.get("task", {})
         if not isinstance(task_ctx, dict):
-            return NodeResult(status="failed", error="No task in workflow context")
+            task_ctx = {}
+        task_for_chooser = {**task_ctx, "model_tier": tier}
+        choice = await chooser.choose(agent_type=agent_type, task=task_for_chooser)
+        return choice.model
+    except Exception as e:
+        logger.warning("[NODE] Model tier resolution failed for tier=%s: %s", tier, e)
+        return None
 
+
+# ══════════════════════════════════════════════════════════════════════
+# Built-in Node Types
+# ══════════════════════════════════════════════════════════════════════
+
+
+# ── spawn_agent ──────────────────────────────────────────────────────
+
+@register_node("spawn_agent")
+async def _exec_spawn_agent(config, context, run, *, db, worker_manager):
+    """Spawn an agent via the WorkerManager.
+
+    Config:
+        agent_type: str — agent template id (programmer, researcher, writer, etc.)
+        prompt_template: str — optional override template
+        model_tier: str — optional tier name (micro/small/medium/standard/strong)
+        model: str — explicit model override
+        timeout_seconds: int — max session runtime (default 900)
+    """
+    agent_type = config.get("agent_type", "programmer")
+    model_tier = config.get("model_tier")
+    prompt_template = config.get("prompt_template")
+
+    task_ctx = context.get("task", {})
+    if not isinstance(task_ctx, dict):
+        return NodeResult(status="failed", error="No task in workflow context")
+
+    task_id = task_ctx.get("id")
+    project_id = task_ctx.get("project_id")
+    if not task_id or not project_id:
+        return NodeResult(status="failed", error="Task missing id or project_id")
+
+    task_for_spawn = dict(task_ctx)
+    if model_tier:
+        task_for_spawn["model_tier"] = model_tier
+    elif config.get("model"):
+        task_for_spawn["model_tier"] = config["model"]
+
+    if isinstance(prompt_template, str) and prompt_template.strip():
+        rendered = _render_template(prompt_template, context).strip()
+        if rendered:
+            task_for_spawn["notes"] = rendered
+
+    if not worker_manager:
+        return NodeResult(status="failed", error="No worker_manager available — cannot spawn agent")
+
+    try:
+        spawned = await worker_manager.spawn_worker(
+            task=task_for_spawn,
+            project_id=project_id,
+            agent_type=agent_type,
+        )
+
+        if not spawned:
+            return NodeResult(
+                status="running",
+                output={"queued": True, "reason": "capacity or project lock"},
+            )
+
+        child_key = None
+        run_id = None
+        for wid, winfo in worker_manager.active_workers.items():
+            if winfo.task_id == task_id:
+                child_key = winfo.child_session_key
+                run_id = winfo.run_id
+                break
+
+        return NodeResult(
+            status="running",
+            output={
+                "runId": run_id or "",
+                "childSessionKey": child_key or "",
+                "spawned_via": "worker_manager",
+            },
+            session_key=child_key,
+        )
+    except Exception as e:
+        return NodeResult(status="failed", error=str(e), error_type="spawn_error")
+
+
+@register_node_checker("spawn_agent")
+async def _check_spawn_agent(node_def, run, *, db, worker_manager):
+    """Check if a spawned agent has completed."""
+    node_id = node_def["id"]
+    ns = (run.node_states or {}).get(node_id, {})
+    output = ns.get("output", {})
+
+    # If queued, retry spawn
+    if output.get("queued"):
+        task_ctx = (run.context or {}).get("task", {})
+        if not isinstance(task_ctx, dict):
+            return NodeResult(status="failed", error="No task in workflow context")
         task_id = task_ctx.get("id")
         project_id = task_ctx.get("project_id")
         if not task_id or not project_id:
             return NodeResult(status="failed", error="Task missing id or project_id")
+        if not worker_manager:
+            return NodeResult(status="failed", error="No worker_manager available")
 
-        # Apply model_tier to the task dict so ModelChooser picks it up
-        task_for_spawn = dict(task_ctx)
-        if model_tier:
-            task_for_spawn["model_tier"] = model_tier
-        elif config.get("model"):
-            # Explicit model — store so worker can use it
-            task_for_spawn["model_tier"] = config["model"]
-
-        # Optional prompt override for retry/fix nodes.
-        # WorkerManager's prompt builder consumes task title/notes, so we can
-        # shape retries by overriding notes from a rendered template.
-        if isinstance(prompt_template, str) and prompt_template.strip():
-            rendered = _render_template(prompt_template, context).strip()
-            if rendered:
-                task_for_spawn["notes"] = rendered
-
-        if not self.worker_manager:
-            return NodeResult(status="failed", error="No worker_manager available — cannot spawn agent")
-
-        try:
-            spawned = await self.worker_manager.spawn_worker(
-                task=task_for_spawn,
-                project_id=project_id,
-                agent_type=agent_type,
-            )
-
-            if not spawned:
-                # Queued due to capacity/locks — not a hard failure
-                return NodeResult(
-                    status="running",
-                    output={"queued": True, "reason": "capacity or project lock"},
-                )
-
-            # Find the worker info that was just created
-            child_key = None
-            run_id = None
-            for wid, winfo in self.worker_manager.active_workers.items():
-                if winfo.task_id == task_id:
-                    child_key = winfo.child_session_key
-                    run_id = winfo.run_id
-                    break
-
-            return NodeResult(
-                status="running",
-                output={
-                    "runId": run_id or "",
-                    "childSessionKey": child_key or "",
-                    "spawned_via": "worker_manager",
-                },
-                session_key=child_key,
-            )
-
-        except Exception as e:
-            return NodeResult(status="failed", error=str(e), error_type="spawn_error")
-
-    async def _check_spawn_agent(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Check if a spawned agent has completed.
-
-        Since we now spawn via worker_manager, it handles all completion
-        processing (task status, git commit, escalation, etc.) automatically.
-        We just need to check if the worker is still active.
-        """
-        node_id = node_def["id"]
-        ns = (run.node_states or {}).get(node_id, {})
-        output = ns.get("output", {})
-
-        # If queued (capacity/lock), actively retry spawn on each check.
-        if output.get("queued"):
-            task_ctx = (run.context or {}).get("task", {})
-            if not isinstance(task_ctx, dict):
-                return NodeResult(status="failed", error="No task in workflow context")
-
-            task_id = task_ctx.get("id")
-            project_id = task_ctx.get("project_id")
-            if not task_id or not project_id:
-                return NodeResult(status="failed", error="Task missing id or project_id")
-
-            if not self.worker_manager:
-                return NodeResult(status="failed", error="No worker_manager available — cannot retry queued spawn")
-
-            # Retry queue pickup
-            spawned = await self.worker_manager.spawn_worker(
-                task=task_ctx,
-                project_id=project_id,
-                agent_type=node_def.get("config", {}).get("agent_type", "programmer"),
-            )
-            if not spawned:
-                return None
-
-            child_key = None
-            run_id = None
-            for _, winfo in self.worker_manager.active_workers.items():
-                if winfo.task_id == task_id:
-                    child_key = winfo.child_session_key
-                    run_id = winfo.run_id
-                    break
-
-            return NodeResult(
-                status="running",
-                output={
-                    "queued": False,
-                    "runId": run_id or "",
-                    "childSessionKey": child_key or "",
-                    "spawned_via": "worker_manager",
-                },
-                session_key=child_key,
-            )
-
-        task_id = (run.context or {}).get("task", {}).get("id")
-        if not task_id:
-            return NodeResult(status="failed", error="No task_id in run context")
-
-        if not self.worker_manager:
-            return NodeResult(status="failed", error="No worker_manager — can't check status")
-
-        # Check if the worker is still active
-        worker_active = any(
-            w.task_id == task_id
-            for w in self.worker_manager.active_workers.values()
+        spawned = await worker_manager.spawn_worker(
+            task=task_ctx,
+            project_id=project_id,
+            agent_type=node_def.get("config", {}).get("agent_type", "programmer"),
         )
-
-        if worker_active:
-            return None  # Still running — worker_manager handles everything
-
-        # Worker is no longer active — it completed (success or failure).
-        # worker_manager._handle_worker_completion already handled:
-        # - Task status update (completed/failed)
-        # - Agent tracker update
-        # - Circuit breaker recording
-        # - Git auto-commit and push
-        # - Failure escalation
-        # - Provider health recording
-
-        # Check the task's final state to determine our result
-        from app.models import Task
-        db_task = await self.db.get(Task, task_id)
-        if db_task and db_task.work_state == "completed":
-            return NodeResult(
-                status="completed",
-                output={"task_status": "completed", "task_id": task_id},
-            )
-        elif db_task and db_task.work_state == "blocked":
-            return NodeResult(
-                status="failed",
-                output={"task_status": "blocked", "task_id": task_id},
-                error="Task blocked after worker failure",
-            )
-        else:
-            # Task reverted to not_started or other state — worker failed
-            return NodeResult(
-                status="failed",
-                output={"task_status": db_task.work_state if db_task else "unknown", "task_id": task_id},
-                error=f"Worker completed but task state is {db_task.work_state if db_task else 'unknown'}",
-            )
-
-    async def _exec_send_to_session(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Send a message to an existing session (for fix loops)."""
-        session_ref = config.get("session_ref", "")
-        message_template = config.get("message_template", "")
-
-        # Resolve session key from context — try flat key first, then dot-path
-        session_key = context.get(session_ref)
-        if not session_key and "." in session_ref:
-            # Navigate dot path: "run_code_task.session_key" → context["run_code_task"]["session_key"]
-            parts = session_ref.split(".")
-            val = context
-            for p in parts:
-                if isinstance(val, dict):
-                    val = val.get(p)
-                else:
-                    val = None
-                    break
-            session_key = val
-        if not session_key:
-            return NodeResult(status="failed", error=f"Session ref '{session_ref}' not found in context")
-
-        message = _render_template(message_template, context)
-        if not message.strip():
-            return NodeResult(status="failed", error="Empty message after rendering")
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_send",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-send-{uuid.uuid4().hex[:6]}",
-                        "args": {"sessionKey": session_key, "message": message},
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30),
-                )
-                data = await resp.json()
-
-            if not data.get("ok"):
-                return NodeResult(status="failed", error=f"sessions_send failed: {data}")
-
-            wait_seconds = int(config.get("wait_seconds", 20))
-            return NodeResult(
-                status="running",
-                output={
-                    "message_sent": True,
-                    "session_key": session_key,
-                    "wait_until": (datetime.now(timezone.utc).timestamp() + max(1, wait_seconds)),
-                },
-            )
-
-        except Exception as e:
-            return NodeResult(status="failed", error=str(e))
-
-    async def _check_send_to_session(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Wait a short grace period after sending follow-up instructions."""
-        node_id = node_def["id"]
-        ns = (run.node_states or {}).get(node_id, {})
-        output = ns.get("output", {}) if isinstance(ns, dict) else {}
-        wait_until = output.get("wait_until")
-        if not wait_until:
-            return NodeResult(status="completed", output={"message_sent": True})
-
-        if datetime.now(timezone.utc).timestamp() < float(wait_until):
+        if not spawned:
             return None
 
-        return NodeResult(status="completed", output={"message_sent": True, "wait_elapsed": True})
-
-    async def _exec_tool_call(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Execute a shell command directly (no LLM)."""
-        command_template = config.get("command", "")
-        timeout_seconds = config.get("timeout_seconds", 300)
-        command = _render_template(command_template, context)
-
-        if not command.strip():
-            return NodeResult(status="failed", error="Empty command")
-
-        try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-
-            output = {
-                "stdout": result.stdout[-4000:] if result.stdout else "",
-                "stderr": result.stderr[-4000:] if result.stderr else "",
-                "returncode": result.returncode,
-            }
-
-            if result.returncode == 0:
-                return NodeResult(status="completed", output=output)
-            else:
-                return NodeResult(
-                    status="failed",
-                    output=output,
-                    error=f"Command exited with code {result.returncode}",
-                    error_type="command_failed",
-                )
-
-        except subprocess.TimeoutExpired:
-            return NodeResult(status="failed", error="Command timed out", error_type="timeout")
-        except Exception as e:
-            return NodeResult(status="failed", error=str(e))
-
-    async def _exec_branch(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Evaluate conditions and determine next node."""
-        conditions = config.get("conditions", [])
-        default = config.get("default")
-
-        for cond in conditions:
-            match_expr = cond.get("match", "")
-            goto = cond.get("goto")
-            if self._evaluate_condition(match_expr, context) and goto:
-                return NodeResult(status="completed", output={"goto": goto})
-
-        if default:
-            return NodeResult(status="completed", output={"goto": default})
-
-        return NodeResult(status="failed", error="No branch condition matched and no default")
-
-    async def _exec_gate(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Create an inbox item and wait for human approval."""
-        from app.models import InboxItem
-
-        prompt = _render_template(config.get("prompt", "Workflow requires approval"), context)
-
-        item = InboxItem(
-            id=str(uuid.uuid4()),
-            title=f"[WORKFLOW GATE] {prompt[:80]}",
-            content=f"Workflow run {run.id} is waiting for approval.\n\n{prompt}",
-            is_read=False,
-            summary=f"workflow_gate:{run.id}",
-            modified_at=datetime.now(timezone.utc),
-        )
-        self.db.add(item)
-        await self.db.commit()
-
-        return NodeResult(status="running", output={"inbox_item_id": item.id, "gate_type": "human_approval"})
-
-    async def _check_gate(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Check if a gate has been approved (inbox item read = approved for now)."""
-        from app.models import InboxItem
-
-        node_id = node_def["id"]
-        ns = (run.node_states or {}).get(node_id, {})
-        output = ns.get("output", {})
-        item_id = output.get("inbox_item_id")
-
-        if not item_id:
-            return NodeResult(status="failed", error="No inbox item to check")
-
-        item = await self.db.get(InboxItem, item_id)
-        if item and item.is_read:
-            return NodeResult(status="completed", output={"approved": True})
-
-        # Check timeout
-        timeout_hours = node_def.get("config", {}).get("timeout_hours", 24)
-        started = ns.get("started_at")
-        if started:
-            start_dt = datetime.fromisoformat(started)
-            elapsed = (datetime.now(timezone.utc) - start_dt.replace(tzinfo=timezone.utc)).total_seconds() / 3600
-            if elapsed > timeout_hours:
-                auto_approve = node_def.get("config", {}).get("auto_approve_after")
-                if auto_approve:
-                    return NodeResult(status="completed", output={"approved": True, "auto_approved": True})
-                return NodeResult(status="failed", error="Gate timed out without approval")
-
-        return None  # Still waiting
-
-    async def _exec_notify(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Send a notification."""
-        channel = config.get("channel", "internal")
-        message_template = config.get("message_template", "")
-        message = _render_template(message_template, context)
-
-        if channel == "internal":
-            # Just log it
-            logger.info("[WORKFLOW NOTIFY] %s", message[:200])
-            return NodeResult(status="completed", output={"notified": True, "channel": channel})
-
-        # For Discord/external, we'd integrate with messaging here
-        # For now, emit a workflow event that can be picked up
-        from app.models import WorkflowEvent
-        self.db.add(WorkflowEvent(
-            id=str(uuid.uuid4()),
-            event_type="workflow.notification",
-            payload={"channel": channel, "message": message, "run_id": run.id},
-            source="workflow_executor",
-        ))
-        await self.db.commit()
-
-        return NodeResult(status="completed", output={"notified": True, "channel": channel})
-
-    async def _exec_cleanup(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Clean up sessions and artifacts."""
-        delete_session = config.get("delete_session", True)
-
-        if delete_session and run.session_key:
-            await self.delete_session(run.session_key)
-
-        return NodeResult(status="completed", output={"cleaned_up": True})
-
-    async def _exec_sub_workflow(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Start a sub-workflow (placeholder — advanced feature)."""
-        workflow_id = config.get("workflow_id")
-        if not workflow_id:
-            return NodeResult(status="failed", error="No workflow_id specified for sub_workflow")
-
-        # For now, just mark as completed — full sub-workflow support is Phase 4
-        return NodeResult(status="completed", output={"sub_workflow_id": workflow_id, "note": "sub_workflow not yet implemented"})
-
-    async def _exec_python_call(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Execute a registered Python callable by name.
-
-        This is the bridge between workflow definitions and existing Python
-        business logic (reflections, sweeps, diagnostics, compression, etc.).
-        Instead of rewriting that logic, we call it as a workflow node.
-
-        Config:
-            callable: "reflection_cycle.run_strategic"  (dotted name → registry lookup)
-            args_template: {key: "{context.path}"}  (optional, rendered from context)
-            poll: true  — if result has completed=False, mark node as "running" for re-check
-        """
-        callable_name = config.get("callable", "")
-        args_template = config.get("args_template", {})
-        is_poll = config.get("poll", False)
-
-        handler = _PYTHON_CALL_REGISTRY.get(callable_name)
-        if not handler:
-            return NodeResult(status="failed", error=f"Unknown callable: {callable_name}")
-
-        # Render args from context
-        rendered_args = {}
-        for k, v in args_template.items():
-            if isinstance(v, str):
-                rendered_args[k] = _render_template(v, context)
-            else:
-                rendered_args[k] = v
-
-        try:
-            result = await handler(db=self.db, worker_manager=self.worker_manager, context=context, **rendered_args)
-            if isinstance(result, dict):
-                # Poll mode: if result says not completed, keep node in "running" for re-check
-                if is_poll and result.get("completed") is False:
-                    return NodeResult(status="running", output=result)
-                return NodeResult(status="completed", output=result)
-            return NodeResult(status="completed", output={"result": str(result)})
-        except Exception as e:
-            logger.error("[NODE:python_call] %s failed: %s", callable_name, e, exc_info=True)
-            return NodeResult(status="failed", error=str(e), error_type="python_error")
-
-    async def _check_python_call(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Re-check a polling python_call node."""
-        config = node_def.get("config", {})
-        if not config.get("poll", False):
-            return None  # Non-poll nodes complete synchronously
-
-        callable_name = config.get("callable", "")
-        handler = _PYTHON_CALL_REGISTRY.get(callable_name)
-        if not handler:
-            return NodeResult(status="failed", error=f"Unknown callable: {callable_name}")
-
-        context = dict(run.context or {})
-        try:
-            result = await handler(db=self.db, worker_manager=self.worker_manager, context=context)
-            if isinstance(result, dict):
-                if result.get("completed") is False:
-                    return None  # Still not done
-                return NodeResult(status="completed", output=result)
-            return NodeResult(status="completed", output={"result": str(result)})
-        except Exception as e:
-            return NodeResult(status="failed", error=str(e), error_type="python_error")
-
-    async def _exec_for_each(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Iterate over a context list and collect results.
-
-        This is a synchronous fan-out — it runs sequentially for simplicity.
-        For parallel fan-out, use multiple spawn_agent nodes.
-
-        Config:
-            items_ref: "context.path.to.list"
-            node_template: {type: "spawn_agent", config: {..., prompt_template: "... {item} ..."}}
-        """
-        items_ref = config.get("items_ref", "")
-        # Resolve items from context
-        items = context
-        for part in items_ref.split("."):
-            if isinstance(items, dict):
-                items = items.get(part, [])
-            else:
-                items = []
+        child_key = None
+        run_id = None
+        for _, winfo in worker_manager.active_workers.items():
+            if winfo.task_id == task_id:
+                child_key = winfo.child_session_key
+                run_id = winfo.run_id
                 break
 
-        if not isinstance(items, list):
-            return NodeResult(status="completed", output={"items_processed": 0, "note": "items_ref did not resolve to a list"})
+        return NodeResult(
+            status="running",
+            output={
+                "queued": False,
+                "runId": run_id or "",
+                "childSessionKey": child_key or "",
+                "spawned_via": "worker_manager",
+            },
+            session_key=child_key,
+        )
 
-        return NodeResult(status="completed", output={"items": items, "count": len(items)})
+    task_id = (run.context or {}).get("task", {}).get("id")
+    if not task_id:
+        return NodeResult(status="failed", error="No task_id in run context")
+    if not worker_manager:
+        return NodeResult(status="failed", error="No worker_manager")
 
-    @staticmethod
-    def _evaluate_condition(expr: str, context: dict) -> bool:  # noqa: C901
-        """Evaluate a simple condition expression."""
-        # Support: "path.to.value == expected"
-        # Support: "path.to.value != expected"
-        # Support: "path.to.value" (truthiness)
-        for op in ("!=", "=="):
-            if op in expr:
-                parts = expr.split(op, 1)
-                path = parts[0].strip()
-                expected = parts[1].strip().strip("'\"")
+    worker_active = any(
+        w.task_id == task_id
+        for w in worker_manager.active_workers.values()
+    )
+    if worker_active:
+        return None
 
-                value = context
-                for p in path.split("."):
-                    if isinstance(value, dict):
-                        value = value.get(p)
-                    else:
-                        value = None
-                        break
+    from app.models import Task
+    db_task = await db.get(Task, task_id)
+    if db_task and db_task.work_state == "completed":
+        return NodeResult(status="completed", output={"task_status": "completed", "task_id": task_id})
+    elif db_task and db_task.work_state == "blocked":
+        return NodeResult(status="failed", output={"task_status": "blocked", "task_id": task_id}, error="Task blocked after worker failure")
+    else:
+        return NodeResult(
+            status="failed",
+            output={"task_status": db_task.work_state if db_task else "unknown", "task_id": task_id},
+            error=f"Worker completed but task state is {db_task.work_state if db_task else 'unknown'}",
+        )
 
-                if op == "==":
-                    return str(value) == expected
-                else:
-                    return str(value) != expected
 
-        # Truthiness check
-        value = context
-        for p in expr.strip().split("."):
-            if isinstance(value, dict):
-                value = value.get(p)
+# ── send_to_session ──────────────────────────────────────────────────
+
+@register_node("send_to_session")
+async def _exec_send_to_session(config, context, run, *, db, worker_manager):
+    """Send a message to an existing session (for fix loops)."""
+    session_ref = config.get("session_ref", "")
+    message_template = config.get("message_template", "")
+
+    session_key = _resolve_context_path(context, session_ref)
+    if not session_key:
+        return NodeResult(status="failed", error=f"Session ref '{session_ref}' not found in context")
+
+    message = _render_template(message_template, context)
+    if not message.strip():
+        return NodeResult(status="failed", error="Empty message after rendering")
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={
+                    "tool": "sessions_send",
+                    "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-send-{uuid.uuid4().hex[:6]}",
+                    "args": {"sessionKey": session_key, "message": message},
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+            data = await resp.json()
+
+        if not data.get("ok"):
+            return NodeResult(status="failed", error=f"sessions_send failed: {data}")
+
+        wait_seconds = int(config.get("wait_seconds", 20))
+        return NodeResult(
+            status="running",
+            output={
+                "message_sent": True,
+                "session_key": session_key,
+                "wait_until": (datetime.now(timezone.utc).timestamp() + max(1, wait_seconds)),
+            },
+        )
+    except Exception as e:
+        return NodeResult(status="failed", error=str(e))
+
+
+@register_node_checker("send_to_session")
+async def _check_send_to_session(node_def, run, *, db, worker_manager):
+    """Wait a short grace period after sending follow-up instructions."""
+    node_id = node_def["id"]
+    ns = (run.node_states or {}).get(node_id, {})
+    output = ns.get("output", {}) if isinstance(ns, dict) else {}
+    wait_until = output.get("wait_until")
+    if not wait_until:
+        return NodeResult(status="completed", output={"message_sent": True})
+    if datetime.now(timezone.utc).timestamp() < float(wait_until):
+        return None
+    return NodeResult(status="completed", output={"message_sent": True, "wait_elapsed": True})
+
+
+# ── tool_call ────────────────────────────────────────────────────────
+
+@register_node("tool_call")
+async def _exec_tool_call(config, context, run, *, db, worker_manager):
+    """Execute a shell command directly (no LLM)."""
+    command_template = config.get("command", "")
+    timeout_seconds = config.get("timeout_seconds", 300)
+    command = _render_template(command_template, context)
+
+    if not command.strip():
+        return NodeResult(status="failed", error="Empty command")
+
+    try:
+        result = subprocess.run(
+            command, shell=True, capture_output=True, text=True, timeout=timeout_seconds,
+        )
+        output = {
+            "stdout": result.stdout[-4000:] if result.stdout else "",
+            "stderr": result.stderr[-4000:] if result.stderr else "",
+            "returncode": result.returncode,
+        }
+        if result.returncode == 0:
+            return NodeResult(status="completed", output=output)
+        else:
+            return NodeResult(status="failed", output=output, error=f"Command exited with code {result.returncode}", error_type="command_failed")
+    except subprocess.TimeoutExpired:
+        return NodeResult(status="failed", error="Command timed out", error_type="timeout")
+    except Exception as e:
+        return NodeResult(status="failed", error=str(e))
+
+
+# ── branch ───────────────────────────────────────────────────────────
+
+@register_node("branch")
+async def _exec_branch(config, context, run, *, db, worker_manager):
+    """Evaluate conditions and determine next node."""
+    conditions = config.get("conditions", [])
+    default = config.get("default")
+
+    for cond in conditions:
+        match_expr = cond.get("match", "")
+        goto = cond.get("goto")
+        if _evaluate_condition(match_expr, context) and goto:
+            return NodeResult(status="completed", output={"goto": goto})
+
+    if default:
+        return NodeResult(status="completed", output={"goto": default})
+
+    return NodeResult(status="failed", error="No branch condition matched and no default")
+
+
+# ── gate ─────────────────────────────────────────────────────────────
+
+@register_node("gate")
+async def _exec_gate(config, context, run, *, db, worker_manager):
+    """Create an inbox item and wait for human approval."""
+    from app.models import InboxItem
+
+    prompt = _render_template(config.get("prompt", "Workflow requires approval"), context)
+
+    item = InboxItem(
+        id=str(uuid.uuid4()),
+        title=f"[WORKFLOW GATE] {prompt[:80]}",
+        content=f"Workflow run {run.id} is waiting for approval.\n\n{prompt}",
+        is_read=False,
+        summary=f"workflow_gate:{run.id}",
+        modified_at=datetime.now(timezone.utc),
+    )
+    db.add(item)
+    await db.commit()
+
+    return NodeResult(status="running", output={"inbox_item_id": item.id, "gate_type": "human_approval"})
+
+
+@register_node_checker("gate")
+async def _check_gate(node_def, run, *, db, worker_manager):
+    """Check if a gate has been approved (inbox item read = approved)."""
+    from app.models import InboxItem
+
+    node_id = node_def["id"]
+    ns = (run.node_states or {}).get(node_id, {})
+    output = ns.get("output", {})
+    item_id = output.get("inbox_item_id")
+
+    if not item_id:
+        return NodeResult(status="failed", error="No inbox item to check")
+
+    item = await db.get(InboxItem, item_id)
+    if item and item.is_read:
+        return NodeResult(status="completed", output={"approved": True})
+
+    timeout_hours = node_def.get("config", {}).get("timeout_hours", 24)
+    started = ns.get("started_at")
+    if started:
+        start_dt = datetime.fromisoformat(started)
+        elapsed = (datetime.now(timezone.utc) - start_dt.replace(tzinfo=timezone.utc)).total_seconds() / 3600
+        if elapsed > timeout_hours:
+            auto_approve = node_def.get("config", {}).get("auto_approve_after")
+            if auto_approve:
+                return NodeResult(status="completed", output={"approved": True, "auto_approved": True})
+            return NodeResult(status="failed", error="Gate timed out without approval")
+
+    return None
+
+
+# ── notify ───────────────────────────────────────────────────────────
+
+@register_node("notify")
+async def _exec_notify(config, context, run, *, db, worker_manager):
+    """Send a notification. Supports internal, discord, and inbox channels."""
+    channel = config.get("channel", "internal")
+    message_template = config.get("message_template", "")
+    message = _render_template(message_template, context)
+
+    if channel == "internal":
+        logger.info("[WORKFLOW NOTIFY] %s", message[:200])
+        return NodeResult(status="completed", output={"notified": True, "channel": channel})
+
+    if channel == "discord":
+        # Create an inbox item so it surfaces to the user
+        from app.models import InboxItem
+        db.add(InboxItem(
+            id=str(uuid.uuid4()),
+            title=f"[Workflow] {message[:80]}",
+            content=message,
+            is_read=False,
+            summary=f"workflow_notify:{run.id}",
+            modified_at=datetime.now(timezone.utc),
+        ))
+        await db.commit()
+        return NodeResult(status="completed", output={"notified": True, "channel": "discord", "surfaced_as": "inbox_item"})
+
+    if channel == "inbox":
+        from app.models import InboxItem
+        db.add(InboxItem(
+            id=str(uuid.uuid4()),
+            title=config.get("title", f"[Workflow] Notification"),
+            content=message,
+            is_read=False,
+            summary=f"workflow_notify:{run.id}",
+            modified_at=datetime.now(timezone.utc),
+        ))
+        await db.commit()
+        return NodeResult(status="completed", output={"notified": True, "channel": "inbox"})
+
+    # Fallback: emit workflow event
+    from app.models import WorkflowEvent
+    db.add(WorkflowEvent(
+        id=str(uuid.uuid4()),
+        event_type="workflow.notification",
+        payload={"channel": channel, "message": message, "run_id": run.id},
+        source="workflow_executor",
+    ))
+    await db.commit()
+    return NodeResult(status="completed", output={"notified": True, "channel": channel})
+
+
+# ── cleanup ──────────────────────────────────────────────────────────
+
+@register_node("cleanup")
+async def _exec_cleanup(config, context, run, *, db, worker_manager):
+    """Clean up sessions and artifacts."""
+    handlers = NodeHandlers(db, worker_manager)
+    if config.get("delete_session", True) and run.session_key:
+        await handlers.delete_session(run.session_key)
+    return NodeResult(status="completed", output={"cleaned_up": True})
+
+
+# ── sub_workflow ─────────────────────────────────────────────────────
+
+@register_node("sub_workflow")
+async def _exec_sub_workflow(config, context, run, *, db, worker_manager):
+    """Start a child workflow run and wait for it to complete.
+
+    Config:
+        workflow_id: str — ID or name of the workflow to run
+        context_merge: dict — extra context to merge into the child run
+    """
+    workflow_id = config.get("workflow_id")
+    if not workflow_id:
+        return NodeResult(status="failed", error="No workflow_id specified for sub_workflow")
+
+    from app.models import WorkflowDefinition
+    from app.orchestrator.workflow_executor import WorkflowExecutor
+
+    # Try by ID first, then by name
+    wf = await db.get(WorkflowDefinition, workflow_id)
+    if not wf:
+        from sqlalchemy import select
+        result = await db.execute(
+            select(WorkflowDefinition).where(WorkflowDefinition.name == workflow_id).where(WorkflowDefinition.is_active == True)
+        )
+        wf = result.scalar_one_or_none()
+
+    if not wf:
+        return NodeResult(status="failed", error=f"Workflow '{workflow_id}' not found")
+
+    # Merge parent context + any extra context
+    child_context = dict(context)
+    extra = config.get("context_merge", {})
+    if isinstance(extra, dict):
+        for k, v in extra.items():
+            if isinstance(v, str) and "{" in v:
+                child_context[k] = _render_template(v, context)
             else:
-                return False
-        return bool(value)
+                child_context[k] = v
+
+    executor = WorkflowExecutor(db, worker_manager=worker_manager)
+    child_run = await executor.start_run(
+        wf,
+        trigger_type="sub_workflow",
+        trigger_payload={"parent_run_id": run.id},
+        initial_context=child_context,
+    )
+
+    return NodeResult(
+        status="running",
+        output={"child_run_id": child_run.id, "child_workflow": wf.name},
+    )
+
+
+@register_node_checker("sub_workflow")
+async def _check_sub_workflow(node_def, run, *, db, worker_manager):
+    """Check if the child workflow run has completed."""
+    from app.models import WorkflowRun as WfRun
+
+    node_id = node_def["id"]
+    ns = (run.node_states or {}).get(node_id, {})
+    output = ns.get("output", {})
+    child_run_id = output.get("child_run_id")
+
+    if not child_run_id:
+        return NodeResult(status="failed", error="No child_run_id found")
+
+    child_run = await db.get(WfRun, child_run_id)
+    if not child_run:
+        return NodeResult(status="failed", error=f"Child run {child_run_id} not found")
+
+    if child_run.status in ("pending", "running"):
+        return None  # Still going
+
+    if child_run.status == "completed":
+        return NodeResult(
+            status="completed",
+            output={
+                "child_run_id": child_run_id,
+                "child_status": "completed",
+                "child_context": child_run.context or {},
+            },
+        )
+
+    return NodeResult(
+        status="failed",
+        output={"child_run_id": child_run_id, "child_status": child_run.status},
+        error=child_run.error or f"Child workflow {child_run.status}",
+    )
+
+
+# ── python_call ──────────────────────────────────────────────────────
+
+@register_node("python_call")
+async def _exec_python_call(config, context, run, *, db, worker_manager):
+    """Execute a registered Python callable by name.
+
+    Config:
+        callable: "reflection_cycle.run_strategic"
+        args_template: {key: "{context.path}"}
+        poll: true — if result.completed is False, mark as "running"
+    """
+    callable_name = config.get("callable", "")
+    args_template = config.get("args_template", {})
+    is_poll = config.get("poll", False)
+
+    handler = _PYTHON_CALL_REGISTRY.get(callable_name)
+    if not handler:
+        return NodeResult(status="failed", error=f"Unknown callable: {callable_name}")
+
+    rendered_args = {}
+    for k, v in args_template.items():
+        if isinstance(v, str):
+            rendered_args[k] = _render_template(v, context)
+        else:
+            rendered_args[k] = v
+
+    try:
+        result = await handler(db=db, worker_manager=worker_manager, context=context, **rendered_args)
+        if isinstance(result, dict):
+            if is_poll and result.get("completed") is False:
+                return NodeResult(status="running", output=result)
+            return NodeResult(status="completed", output=result)
+        return NodeResult(status="completed", output={"result": str(result)})
+    except Exception as e:
+        logger.error("[NODE:python_call] %s failed: %s", callable_name, e, exc_info=True)
+        return NodeResult(status="failed", error=str(e), error_type="python_error")
+
+
+@register_node_checker("python_call")
+async def _check_python_call(node_def, run, *, db, worker_manager):
+    """Re-check a polling python_call node."""
+    config = node_def.get("config", {})
+    if not config.get("poll", False):
+        return None
+
+    callable_name = config.get("callable", "")
+    handler = _PYTHON_CALL_REGISTRY.get(callable_name)
+    if not handler:
+        return NodeResult(status="failed", error=f"Unknown callable: {callable_name}")
+
+    context = dict(run.context or {})
+    try:
+        result = await handler(db=db, worker_manager=worker_manager, context=context)
+        if isinstance(result, dict):
+            if result.get("completed") is False:
+                return None
+            return NodeResult(status="completed", output=result)
+        return NodeResult(status="completed", output={"result": str(result)})
+    except Exception as e:
+        return NodeResult(status="failed", error=str(e), error_type="python_error")
+
+
+# ── for_each ─────────────────────────────────────────────────────────
+
+@register_node("for_each")
+async def _exec_for_each(config, context, run, *, db, worker_manager):
+    """Iterate over a context list and execute a node template for each item.
+
+    Config:
+        items_ref: "path.to.list" — dotted path to a list in context
+        item_key: "item" — key name to inject each item as (default: "item")
+        node_template: {type: "tool_call", config: {command: "echo {item}"}}
+        collect_key: "results" — key to store collected results (default: "results")
+    """
+    items_ref = config.get("items_ref", "")
+    item_key = config.get("item_key", "item")
+    node_template = config.get("node_template")
+    collect_key = config.get("collect_key", "results")
+
+    items = _resolve_context_path(context, items_ref)
+    if not isinstance(items, list):
+        return NodeResult(status="completed", output={"items_processed": 0, "note": "items_ref did not resolve to a list"})
+
+    if not node_template:
+        return NodeResult(status="completed", output={"items": items, "count": len(items), "note": "no node_template provided"})
+
+    # Execute the template node for each item sequentially
+    results = []
+    handlers = NodeHandlers(db, worker_manager)
+
+    for i, item in enumerate(items):
+        # Build a per-item context
+        item_context = dict(context)
+        item_context[item_key] = item
+        item_context["_for_each_index"] = i
+
+        # Create a virtual node def from the template
+        virtual_node = {
+            "id": f"for_each_{run.id}_{i}",
+            "type": node_template.get("type", "tool_call"),
+            "config": node_template.get("config", {}),
+        }
+
+        # Render any templates in the config with item context
+        rendered_config = {}
+        for k, v in virtual_node["config"].items():
+            if isinstance(v, str):
+                rendered_config[k] = _render_template(v, item_context)
+            else:
+                rendered_config[k] = v
+        virtual_node["config"] = rendered_config
+
+        # Create a temporary run-like object with item context
+        class _VirtualRun:
+            def __init__(self, ctx, node_states_dict, rid, sk):
+                self.context = ctx
+                self.node_states = node_states_dict
+                self.id = rid
+                self.session_key = sk
+
+        virtual_run = _VirtualRun(item_context, {}, run.id, run.session_key)
+
+        result = await handlers.execute(virtual_node, virtual_run)
+        results.append({
+            "index": i,
+            "item": item if not isinstance(item, dict) else item,
+            "status": result.status,
+            "output": result.output,
+            "error": result.error,
+        })
+
+        # If a sub-node fails, we still continue (collect all results)
+
+    succeeded = sum(1 for r in results if r["status"] == "completed")
+    return NodeResult(
+        status="completed",
+        output={
+            "items_processed": len(items),
+            "succeeded": succeeded,
+            "failed": len(items) - succeeded,
+            collect_key: results,
+        },
+    )
+
+
+# ── http_request ─────────────────────────────────────────────────────
+
+@register_node("http_request")
+async def _exec_http_request(config, context, run, *, db, worker_manager):
+    """Make an HTTP request and capture the response.
+
+    Config:
+        url: str — URL (supports template rendering)
+        method: str — GET, POST, PUT, DELETE, PATCH (default: GET)
+        headers: dict — optional headers
+        body: dict|str — optional JSON body (for POST/PUT/PATCH)
+        timeout_seconds: int — request timeout (default: 30)
+        capture_body: bool — capture response body (default: true, max 10KB)
+    """
+    url = _render_template(config.get("url", ""), context)
+    method = config.get("method", "GET").upper()
+    headers = config.get("headers", {})
+    body = config.get("body")
+    timeout_seconds = config.get("timeout_seconds", 30)
+    capture_body = config.get("capture_body", True)
+
+    if not url:
+        return NodeResult(status="failed", error="No URL provided")
+
+    # Render header values
+    rendered_headers = {}
+    for k, v in headers.items():
+        rendered_headers[k] = _render_template(str(v), context) if isinstance(v, str) else str(v)
+
+    # Render body if string template
+    json_body = None
+    if body is not None:
+        if isinstance(body, str):
+            rendered = _render_template(body, context)
+            try:
+                json_body = json.loads(rendered)
+            except json.JSONDecodeError:
+                json_body = {"raw": rendered}
+        elif isinstance(body, dict):
+            # Render template values in body dict
+            json_body = {}
+            for k, v in body.items():
+                if isinstance(v, str):
+                    json_body[k] = _render_template(v, context)
+                else:
+                    json_body[k] = v
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            kwargs = {
+                "headers": rendered_headers,
+                "timeout": aiohttp.ClientTimeout(total=timeout_seconds),
+            }
+            if json_body and method in ("POST", "PUT", "PATCH"):
+                kwargs["json"] = json_body
+
+            async with session.request(method, url, **kwargs) as resp:
+                status_code = resp.status
+                resp_headers = dict(resp.headers)
+                resp_body = ""
+                if capture_body:
+                    raw = await resp.read()
+                    resp_body = raw[:10240].decode("utf-8", errors="replace")
+
+        output = {
+            "status_code": status_code,
+            "headers": {k: v for k, v in resp_headers.items() if k.lower() in ("content-type", "location", "x-request-id")},
+        }
+        if capture_body:
+            # Try to parse as JSON
+            try:
+                output["body"] = json.loads(resp_body)
+            except (json.JSONDecodeError, ValueError):
+                output["body_text"] = resp_body[:4000]
+
+        if 200 <= status_code < 300:
+            return NodeResult(status="completed", output=output)
+        else:
+            return NodeResult(status="failed", output=output, error=f"HTTP {status_code}", error_type="http_error")
+
+    except asyncio.TimeoutError:
+        return NodeResult(status="failed", error="HTTP request timed out", error_type="timeout")
+    except Exception as e:
+        return NodeResult(status="failed", error=str(e), error_type="http_error")
+
+
+# ── transform ────────────────────────────────────────────────────────
+
+@register_node("transform")
+async def _exec_transform(config, context, run, *, db, worker_manager):
+    """Transform context data using simple expressions.
+
+    Config:
+        mappings: dict — {output_key: "input.path"} or {output_key: {"expr": "..."}}
+        template: str — optional Jinja-like template string to render
+    """
+    mappings = config.get("mappings", {})
+    template = config.get("template")
+
+    output = {}
+
+    for out_key, source in mappings.items():
+        if isinstance(source, str):
+            # Simple path reference
+            output[out_key] = _resolve_context_path(context, source)
+        elif isinstance(source, dict):
+            expr = source.get("expr", "")
+            if expr == "len" and "of" in source:
+                val = _resolve_context_path(context, source["of"])
+                output[out_key] = len(val) if isinstance(val, (list, dict, str)) else 0
+            elif expr == "join":
+                val = _resolve_context_path(context, source.get("of", ""))
+                sep = source.get("sep", ", ")
+                output[out_key] = sep.join(str(v) for v in val) if isinstance(val, list) else str(val)
+            elif expr == "filter":
+                val = _resolve_context_path(context, source.get("of", ""))
+                condition = source.get("where", "")
+                if isinstance(val, list) and condition:
+                    output[out_key] = [
+                        item for item in val
+                        if _evaluate_condition(condition, {**context, "item": item})
+                    ]
+                else:
+                    output[out_key] = val
+            elif expr == "default":
+                val = _resolve_context_path(context, source.get("of", ""))
+                output[out_key] = val if val is not None else source.get("value")
+            elif expr == "concat":
+                parts = source.get("parts", [])
+                output[out_key] = "".join(
+                    _render_template(p, context) if isinstance(p, str) else str(p)
+                    for p in parts
+                )
+            else:
+                # Unknown expr, try as template
+                output[out_key] = _render_template(expr, context)
+
+    if template:
+        output["rendered"] = _render_template(template, context)
+
+    return NodeResult(status="completed", output=output)
+
+
+# ── parallel ─────────────────────────────────────────────────────────
+
+@register_node("parallel")
+async def _exec_parallel(config, context, run, *, db, worker_manager):
+    """Run multiple node definitions concurrently and wait for all.
+
+    Config:
+        branches: list of {id: str, type: str, config: dict}
+        fail_fast: bool — abort all on first failure (default: false)
+    """
+    branches = config.get("branches", [])
+    fail_fast = config.get("fail_fast", False)
+
+    if not branches:
+        return NodeResult(status="completed", output={"branches": 0})
+
+    handlers = NodeHandlers(db, worker_manager)
+
+    async def run_branch(branch_def):
+        node_def = {
+            "id": branch_def.get("id", f"parallel_{uuid.uuid4().hex[:6]}"),
+            "type": branch_def.get("type", "tool_call"),
+            "config": branch_def.get("config", {}),
+        }
+
+        class _VirtualRun:
+            def __init__(self):
+                self.context = dict(context)
+                self.node_states = {}
+                self.id = run.id
+                self.session_key = run.session_key
+
+        return await handlers.execute(node_def, _VirtualRun())
+
+    tasks = [run_branch(b) for b in branches]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    branch_results = []
+    any_failed = False
+    for i, (branch, result) in enumerate(zip(branches, results)):
+        bid = branch.get("id", f"branch_{i}")
+        if isinstance(result, Exception):
+            branch_results.append({"id": bid, "status": "failed", "error": str(result)})
+            any_failed = True
+        else:
+            branch_results.append({"id": bid, "status": result.status, "output": result.output, "error": result.error})
+            if result.status == "failed":
+                any_failed = True
+
+    if fail_fast and any_failed:
+        return NodeResult(
+            status="failed",
+            output={"branches": branch_results},
+            error="One or more parallel branches failed (fail_fast=true)",
+        )
+
+    return NodeResult(
+        status="completed",
+        output={
+            "branches": branch_results,
+            "total": len(branches),
+            "succeeded": sum(1 for r in branch_results if r["status"] == "completed"),
+            "failed": sum(1 for r in branch_results if r["status"] == "failed"),
+        },
+    )
+
+
+# ── delay ────────────────────────────────────────────────────────────
+
+@register_node("delay")
+async def _exec_delay(config, context, run, *, db, worker_manager):
+    """Wait for a specified duration before proceeding.
+
+    Config:
+        seconds: int — duration in seconds
+    """
+    seconds = int(config.get("seconds", 60))
+    wait_until = datetime.now(timezone.utc).timestamp() + seconds
+    return NodeResult(
+        status="running",
+        output={"wait_until": wait_until, "delay_seconds": seconds},
+    )
+
+
+@register_node_checker("delay")
+async def _check_delay(node_def, run, *, db, worker_manager):
+    """Check if the delay period has elapsed."""
+    node_id = node_def["id"]
+    ns = (run.node_states or {}).get(node_id, {})
+    output = ns.get("output", {})
+    wait_until = output.get("wait_until")
+
+    if not wait_until:
+        return NodeResult(status="completed", output={"delayed": True})
+
+    if datetime.now(timezone.utc).timestamp() >= float(wait_until):
+        return NodeResult(status="completed", output={"delayed": True, "delay_seconds": output.get("delay_seconds", 0)})
+
+    return None  # Still waiting
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -654,56 +1117,41 @@ class NodeHandlers:
 # ══════════════════════════════════════════════════════════════════════
 
 async def _pcall_run_strategic_reflections(db, worker_manager, context, **kw):
-    """Run the strategic reflection cycle for all agents (legacy monolithic)."""
     from app.orchestrator.reflection_cycle import ReflectionCycleManager
     mgr = ReflectionCycleManager(db, worker_manager)
     return await mgr.run_strategic_reflection_cycle()
 
-
 async def _pcall_run_daily_compression(db, worker_manager, context, **kw):
-    """Run daily identity compression across all agents."""
     from app.orchestrator.reflection_cycle import ReflectionCycleManager
     mgr = ReflectionCycleManager(db, worker_manager)
     return await mgr.run_daily_compression()
 
-
 async def _pcall_run_sweep(db, worker_manager, context, **kw):
-    """Run the initiative sweep arbitrator."""
     from app.orchestrator.sweep_arbitrator import SweepArbitrator
     arb = SweepArbitrator(db, worker_manager)
     return await arb.run_once()
 
-
 async def _pcall_run_diagnostics(db, worker_manager, context, **kw):
-    """Run the diagnostic trigger engine."""
     from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
     engine = DiagnosticTriggerEngine(db, worker_manager)
     return await engine.run_once()
 
-
 async def _pcall_run_scheduled_events(db, worker_manager, context, **kw):
-    """Fire due scheduled events (calendar → tasks)."""
     from app.orchestrator.scheduler import EventScheduler
     sched = EventScheduler(db)
     return await sched.fire_due_events()
 
-
 async def _pcall_run_github_sync(db, worker_manager, context, **kw):
-    """Sync GitHub issues/PRs for all tracked projects."""
     from app.services.github_sync import GitHubSyncService
     svc = GitHubSyncService(db)
     return await svc.sync_all()
 
-
 async def _pcall_run_memory_sync(db, worker_manager, context, **kw):
-    """Sync agent memory files to DB."""
     from app.services.memory_sync import MemorySyncService
     svc = MemorySyncService(db)
     return await svc.sync_all()
 
-
-# ── Reflection workflow discrete steps ────────────────────────────────
-
+# Reflection workflow discrete steps
 async def _pcall_list_agents(db, worker_manager, context, **kw):
     from app.orchestrator.workflow_reflection import list_execution_agents
     return await list_execution_agents(db, worker_manager, context, **kw)
@@ -728,11 +1176,9 @@ async def _pcall_run_compression(db, worker_manager, context, **kw):
     from app.orchestrator.workflow_reflection import run_daily_compression
     return await run_daily_compression(db, worker_manager, context, **kw)
 
-
 async def _pcall_assign_agent(db, worker_manager, context, **kw):
     from app.orchestrator.workflow_assignment import assign_agent
     return await assign_agent(db, worker_manager, context, **kw)
-
 
 async def _pcall_scan_unassigned(db, worker_manager, context, **kw):
     from app.orchestrator.workflow_assignment import scan_unassigned
@@ -771,6 +1217,15 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     "learning.check_due": lambda db, wm, ctx, **kw: _pcall_learning("check_due_lessons", db, wm, ctx, **kw),
     "learning.create_plan": lambda db, wm, ctx, **kw: _pcall_learning("create_plan_from_request", db, wm, ctx, **kw),
 }
+
+
+def register_python_callable(name: str, handler: Callable):
+    """Register a new Python callable for use in python_call nodes.
+
+    Usage:
+        register_python_callable("my_service.do_thing", my_handler_fn)
+    """
+    _PYTHON_CALL_REGISTRY[name] = handler
 
 
 async def _pcall_integration(func_name: str, db, worker_manager, context, **kw):

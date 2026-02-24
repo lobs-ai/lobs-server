@@ -24,7 +24,7 @@ from app.models import (
     Task,
     Project,
 )
-from app.orchestrator.workflow_nodes import NodeHandlers, NodeResult
+from app.orchestrator.workflow_nodes import NodeHandlers, NodeResult, _evaluate_condition
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +119,10 @@ class WorkflowExecutor:
         task: Optional[dict[str, Any]] = None,
         trigger_type: str = "manual",
         trigger_payload: Optional[dict[str, Any]] = None,
+        initial_context: Optional[dict[str, Any]] = None,
     ) -> WorkflowRun:
         """Create and persist a new workflow run."""
-        context: dict[str, Any] = {}
+        context: dict[str, Any] = dict(initial_context or {})
         task_id = None
 
         if task:
@@ -414,7 +415,7 @@ class WorkflowExecutor:
             for edge in (workflow.edges or []):
                 if edge.get("from") == node_def["id"]:
                     condition = edge.get("condition")
-                    if not condition or self._evaluate_simple_condition(condition, run.context):
+                    if not condition or _evaluate_condition(condition, run.context or {}):
                         goto = edge["to"]
                         break
 
