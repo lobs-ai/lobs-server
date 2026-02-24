@@ -126,12 +126,12 @@ This demonstrates execution quality, not just model quality.
 
 ## Proof: Task → Outcome → Business Effect
 
-| Workstream | Shipped Artifact | Task Outcome | Business Effect |
-|---|---|---|---|
-| Positioning | `docs/product/landing-page-v1.md` | ICP-focused messaging draft shipped | Faster top-of-funnel experiments |
-| Sales enablement | `docs/product/objection-handling.md` | Repeatable objection responses documented | Stronger conversion conversations |
-| Narrative clarity | `docs/product/elevator-pitch-v3.md` | Tight founder pitch with clear value statement | Better stakeholder alignment |
-| Proof packaging | `docs/product/agent-built-week-demo.md` | Public demo narrative + metrics + script | Easier demand generation and demos |
+| Task ID (replace with real) | Workstream | Shipped Artifact | Task Outcome | Business Effect |
+|---|---|---|---|---|
+| `TASK-###` | Positioning | `docs/product/landing-page-v1.md` | ICP-focused messaging draft shipped | Faster top-of-funnel experiments |
+| `TASK-###` | Sales enablement | `docs/product/objection-handling.md` | Repeatable objection responses documented | Stronger conversion conversations |
+| `TASK-###` | Narrative clarity | `docs/product/elevator-pitch-v3.md` | Tight founder pitch with clear value statement | Better stakeholder alignment |
+| `TASK-###` | Proof packaging | `docs/product/agent-built-week-demo.md` | Public demo narrative + metrics + script | Easier demand generation and demos |
 
 ---
 
