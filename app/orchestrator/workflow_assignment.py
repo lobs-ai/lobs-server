@@ -127,7 +127,7 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
                 "model": "haiku",  # Cheap + fast for routing decisions
                 "runTimeoutSeconds": 60,
                 "timeoutSeconds": 30,
-                "cleanup": "delete",
+                "cleanup": "keep",  # Keep session alive so we can read history
                 "label": label,
             },
         )
@@ -137,10 +137,10 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
             logger.warning("[ASSIGNMENT] Spawn missing childSessionKey: %s", spawn_data)
             return {"assigned": False, "reason": "spawn failed — no child session", "task_title": task.title}
 
-        # 2. Poll history for the LLM response (up to ~16 seconds)
+        # 2. Poll history for the LLM response (up to ~30 seconds)
         output = None
-        for _ in range(8):
-            await _asyncio.sleep(2)
+        for _ in range(10):
+            await _asyncio.sleep(3)
             hist = await _gateway_invoke(
                 "sessions_history",
                 f"{GATEWAY_SESSION_KEY}-assign-hist-{uuid.uuid4().hex[:6]}",
@@ -149,6 +149,16 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
             output = _extract_output_from_history(hist)
             if output:
                 break
+
+        # Clean up the session regardless of outcome
+        try:
+            await _gateway_invoke(
+                "sessions_kill",
+                f"{GATEWAY_SESSION_KEY}-assign-kill-{uuid.uuid4().hex[:6]}",
+                {"sessionKey": child_key, "reason": "assignment complete"},
+            )
+        except Exception:
+            pass
 
         if not output:
             logger.warning("[ASSIGNMENT] No LLM response for task %s after polling", task.id[:8])
