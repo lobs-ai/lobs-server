@@ -2,61 +2,62 @@
 
 **Last Updated:** 2026-02-24  
 **Audience:** Prospects, pilot customers, partners, technical evaluators  
-**Primary Goal:** Prove business value with one concrete 7-day execution window (not architecture slides).
+**Primary Goal:** Prove real business value from one concrete 7-day execution window (not architecture slides).
 
 ---
 
-## 1) Executive Narrative (What happened in one sentence)
+## 1) Executive Story (Use this verbatim)
 
-Between **Feb 17–23, 2026**, Lobs used its own multi-agent system to ship engineering, reliability, quality, and GTM work in parallel—while reducing founder coordination load and moving key decisions from next-day to same-day.
-
----
-
-## 2) Demo Window Selection
-
-**Fixed window:** **Mon Feb 17 → Sun Feb 23, 2026**
-
-Why this week is strong for a public proof story:
-- Includes both **core product execution** and **go-to-market outputs**
-- Shows multiple agent roles (`programmer`, `researcher`, `writer`, `reviewer`, `architect`) contributing to one system
-- Claims are auditable via commit history, docs artifacts, and CI evidence
+From **Feb 17–23, 2026**, we ran an “Agent-Built Week” inside our real product workflow. Agents shipped engineering, reliability, documentation, and go-to-market outputs in parallel while the human owner stayed in approval control.  
+**Result:** roughly **7–8 founder hours reclaimed** and key cross-functional decisions moved from **next-day to same-day**.
 
 ---
 
-## 3) Before vs After (Operator Reality)
+## 2) Scope of the Proof Week
+
+**Window:** **Mon Feb 17 → Sun Feb 23, 2026**
+
+Why this week is demo-safe:
+- Mixed work types (core code, quality/reliability, documentation, GTM)
+- Multiple agent roles operating in parallel (`programmer`, `researcher`, `writer`, `reviewer`, `architect`)
+- Verifiable artifacts in git/docs/CI, not just chat transcripts
+
+---
+
+## 3) Before vs After Narrative
 
 ### Before (typical founder-led week)
-- Founder/operator is the bottleneck for triage, synthesis, and follow-through
-- Decisions stall while context is manually stitched across threads/tools
-- Parallel throughput capped by context switching and handoff overhead
+- Founder is the bottleneck for triage, synthesis, and follow-through
+- Decisions wait on manual context assembly
+- Parallel work is limited by context-switch overhead
 
 ### After (Agent-Built Week)
-- Agents execute scoped tasks in parallel with explicit handoffs
-- Human remains final decision-maker, but not the micro-execution bottleneck
-- Outputs are durable artifacts (docs, CI improvements, implementation changes), not ephemeral chat
+- Agents execute scoped tasks with explicit handoffs
+- Human remains final decision-maker, but no longer micro-execution bottleneck
+- Output quality improves because artifacts are durable (commits, docs, test/CI evidence)
 
 ---
 
-## 4) Timeline: Task → Outcome → Proof
+## 4) Timeline: Work → Outcome → Evidence
 
-> Replace each screenshot placeholder with a real image before external publication.
+> Replace screenshot placeholders before external publishing.
 
-| Day | Work shipped (examples) | Business outcome | Proof hook | Screenshot placeholder |
+| Day | Work shipped | Business outcome | Evidence hook | Screenshot placeholder |
 |---|---|---|---|---|
-| **Mon (Feb 17)** | Tier-based model routing runtime configurability (`5179d39`, `e332a95`, `5531a94`) | More controllable automation behavior across workload types | Commit diffs + routing config changes | `[SS-01: model routing commit history + diff]` |
-| **Tue (Feb 18)** | Orchestrator control-loop + reflection improvements (`5bf4c0a`, `f66ac91`, `e087e4d`, `401f8c6`, `9c25237`) | Faster operational feedback and cleaner initiative flow | Orchestrator module changes + architecture cross-reference | `[SS-02: orchestrator timeline + module view]` |
-| **Wed (Feb 19)** | Reflection pipeline reliability fix (`778388b`) | Fewer broken feedback loops; more trustworthy autonomous cycles | Commit + runtime/log evidence | `[SS-03: reflection fix proof snapshot]` |
-| **Thu (Feb 20)** | Documentation system restructuring (`6edf48a`) | Faster onboarding + lower coordination drag | Docs tree/diff evidence | `[SS-04: docs before/after tree]` |
-| **Fri–Sat (Feb 21–22)** | Batch commit + worker completion persistence (`325554a`, `300682a`) | Lower orchestration friction; more predictable closure | Completion persistence flow + commit diffs | `[SS-05: worker completion persistence flow]` |
-| **Sun (Feb 23)** | CI/security/docs/metrics upgrades (`224af0b`, `e5c606e`, `9364e12`, `37292e9`, `b32a3c5`) | Higher shipping confidence + stronger quality gates | CI runs, docs artifacts, metrics endpoint work | `[SS-06: CI green + metrics/docs artifacts]` |
+| **Mon (Feb 17)** | Tier-based model routing runtime configurability (`5179d39`, `e332a95`, `5531a94`) | Better control of automation quality/cost tradeoffs | Git commits + routing config diffs | `[SS-01: model routing commit history + config diff]` |
+| **Tue (Feb 18)** | Orchestrator control-loop and reflection improvements (`5bf4c0a`, `f66ac91`, `e087e4d`, `401f8c6`, `9c25237`) | Faster operational feedback and fewer stalled initiatives | Orchestrator module diffs + architecture references | `[SS-02: orchestrator timeline + module view]` |
+| **Wed (Feb 19)** | Reflection pipeline reliability fix (`778388b`) | Higher trust in autonomous feedback loops | Commit + logs/run evidence | `[SS-03: reflection reliability fix proof]` |
+| **Thu (Feb 20)** | Documentation restructuring (`6edf48a`) | Faster onboarding and reduced coordination friction | Docs tree + before/after diff | `[SS-04: docs structure before/after]` |
+| **Fri–Sat (Feb 21–22)** | Batch commit and worker completion persistence improvements (`325554a`, `300682a`) | More predictable task closure, less manual cleanup | Completion records + persistence diffs | `[SS-05: completion persistence flow]` |
+| **Sun (Feb 23)** | CI/security/docs + metrics advances (`224af0b`, `e5c606e`, `9364e12`, `37292e9`, `b32a3c5`) | Higher shipping confidence via stronger quality gates | CI runs + docs artifacts + metrics endpoints | `[SS-06: CI green + metrics/docs artifacts]` |
 
-**Packaging follow-up (Feb 24):** Public-facing GTM assets + this narrative package (`ba9d986` and `docs/product/*`).
+**Packaging follow-up (Feb 24):** Public GTM package (`docs/product/*`, including this narrative).
 
 ---
 
 ## 5) Before/After Workload Metrics (Publish-Safe)
 
-> Label these as **conservative operational estimates** until telemetry exports are linked directly in deck appendix.
+> Conservative estimates until telemetry export is attached. Keep “estimate” label publicly until replaced by measured telemetry.
 
 | Metric | Before | Agent-Built Week | Delta |
 |---|---:|---:|---:|
@@ -64,80 +65,81 @@ Why this week is strong for a public proof story:
 | Cross-functional decision latency | 24–36 hrs | 6–12 hrs | **~2x–4x faster** |
 | Publishable doc cycle (draft → demo-ready) | 2–3 days | 0.5–1.5 days | **~50–70% faster** |
 | Parallel active workstreams | 2–3 | 5–7 | **~2x capacity** |
-| Rework from ambiguous handoffs | High | Medium-Low | **Material reduction** |
+| Rework from ambiguous handoffs | High | Medium-Low | **Meaningful reduction** |
 
-### Business Translation
-- **Time reclaimed:** roughly one founder day per week
-- **Decision velocity:** many cross-functional calls move to same-day
-- **Compounding value:** weekly outputs become reusable sales/onboarding/proof artifacts
+### Business translation
+- **Time reclaimed:** ~1 founder day/week
+- **Decision speed:** more strategic calls happen same-day
+- **Compounding impact:** weekly outputs become reusable proof assets for sales/onboarding
 
 ---
 
-## 6) 8-Minute Public Demo Script (Talk Track)
+## 6) Metric Calculation Notes (For Q&A Credibility)
+
+Use this if asked “how did you calculate that?”
+
+- **Founder coordination hours:** calendar + messaging + manual task-routing time; compare recent baseline weeks vs Feb 17–23
+- **Decision latency:** timestamp from “question raised” to “decision recorded” across sampled work items
+- **Parallel workstreams:** count distinct active initiatives with progress in same 24h window
+- **Doc cycle time:** first draft timestamp to publish-ready handoff timestamp
+
+If telemetry is available later, replace estimate table with measured values and link source snapshot.
+
+---
+
+## 7) 8-Minute Public Demo Script
 
 ### 0:00–0:45 — Hook
-“Instead of showing prompt tricks, I’ll show one real week where agents helped us ship measurable outcomes.”
+“Rather than showing prompts, I’ll show one real week where agents produced measurable business outcomes.”
 
 ### 0:45–2:00 — Baseline pain
 - Founder bottleneck
 - Slow decision loops
-- Coordination overhead with low reuse
+- High coordination overhead
 
 ### 2:00–4:30 — Walk the week
-- Show Feb 17–23 timeline slide
-- Highlight 3 leverage classes:
-  1. **Engineering leverage:** orchestrator + model-routing improvements
-  2. **Quality leverage:** CI/schema/security hardening
+- Show timeline table (Feb 17–23)
+- Highlight three proof classes:
+  1. **Engineering leverage:** orchestrator/model-routing commits
+  2. **Quality leverage:** CI/security/schema hardening
   3. **GTM leverage:** `landing-page-v1.md`, `elevator-pitch-v3.md`, `objection-handling.md`
 
 ### 4:30–6:00 — Quantified impact
-- Present metric table
-- Translate into business terms: reclaimed founder day + faster decisions
+- Present before/after metrics table
+- Emphasize reclaimed founder day + accelerated decisions
 
 ### 6:00–7:15 — Control and trust
-- Human remains final approver
-- Agents run under scoped tasks + review loops
-- Quality gates preserved (tests/CI/review)
+- Human retains final approval authority
+- Agents operate in scoped tasks with review loops
+- Existing quality gates remain intact (tests/CI/review)
 
 ### 7:15–8:00 — Close + CTA
-“If one week can reclaim a founder day and roughly double parallel execution capacity, run your own Agent-Built Week pilot and compare your baseline.”
+“If one week can reclaim a founder day and double parallel execution capacity, run your own Agent-Built Week pilot and compare against your baseline.”
 
 ---
 
-## 7) Slide + Screenshot Production Checklist
+## 8) Screenshot / Slide Production Checklist
 
-- [ ] **SS-01** Model routing commits + diff
+- [ ] **SS-01** Model routing commits + config diff
 - [ ] **SS-02** Orchestrator/reflection timeline
 - [ ] **SS-03** Reflection reliability fix evidence
 - [ ] **SS-04** Docs structure before/after
-- [ ] **SS-05** Worker completion persistence flow
-- [ ] **SS-06** CI/security/schema + metrics evidence
+- [ ] **SS-05** Completion persistence flow
+- [ ] **SS-06** CI/security/schema validation wins
 - [ ] **SS-07** Product narrative assets in `docs/product/`
-- [ ] Final summary slide with before/after metric table
+- [ ] Final summary slide with before/after metrics + one-line result
 
 ---
 
-## 8) Publishing Guardrails
+## 9) Publishing Guardrails
 
-- Every claim should map to visible artifacts (commit IDs, docs, CI runs, logs)
-- Keep estimate labels until telemetry-backed values are attached
-- Avoid “AI magic” framing; use concrete “what changed” language
-- Reuse this format monthly to build a cumulative public proof series
-
----
-
-## 9) Metrics Method (for appendix or Q&A)
-
-Use this short method when asked “how did you calculate this?”
-1. **Time reclaimed:** Compare calendar + task management time in similar prior weeks vs Feb 17–23
-2. **Decision latency:** Measure issue/task open-to-decision timestamps for representative samples
-3. **Throughput:** Count concurrent active initiatives/workstreams per day
-4. **Rework:** Tag reopened or clarified tasks caused by ambiguous handoffs
-
-> Keep this method in speaker notes until a formal telemetry dashboard is published.
+- Anchor every claim to inspectable artifacts (commit IDs, docs, CI, logs)
+- Keep estimate labels until telemetry-backed values are inserted
+- Avoid “AI magic” language; focus on workflow and outcomes
+- Reuse this format monthly to build a cumulative proof series
 
 ---
 
-## 10) 30-Second Social Cut
+## 10) 30-Second Social Version
 
-“In one week (Feb 17–23), we used agents to run real product + engineering work, reclaimed ~8 founder hours, cut decision latency from next-day to same-day, and shipped reusable GTM assets. That’s an Agent-Built Week: outcomes you can inspect, not AI theater.”
+“In one week (Feb 17–23), agents helped us ship real product + engineering work, reclaim ~8 founder hours, cut decision latency from next-day to same-day, and produce reusable GTM assets. Agent-Built Week is outcomes you can inspect—not AI theater.”
