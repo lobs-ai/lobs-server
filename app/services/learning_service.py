@@ -37,22 +37,13 @@ LESSONS_DIR = Path(os.environ.get("LEARNING_LESSONS_DIR", "data/learning_lessons
 # Plan Creation
 # ══════════════════════════════════════════════════════════════════════
 
-OUTLINE_PROMPT = """You are designing a {total_days}-day learning plan on: {topic}
-
+OUTLINE_PROMPT = """Design a {total_days}-day learning plan on: {topic}
 Goal: {goal}
 
-Create a structured day-by-day outline. Each day should build on the previous, 
-starting from fundamentals and progressing to advanced concepts. The plan should 
-help someone get meaningfully better at this topic over {total_days} days.
+Return ONLY a compact JSON array. Keep titles short (under 50 chars). No summaries needed.
+[{{"day":1,"title":"..."}},{{"day":2,"title":"..."}}]
 
-Return ONLY a JSON array of objects:
-[
-  {{"day": 1, "title": "Introduction to ...", "summary": "Brief 1-2 sentence overview of what this lesson covers"}},
-  {{"day": 2, "title": "...", "summary": "..."}},
-  ...
-]
-
-Return ONLY the raw JSON array. No markdown, no code fences, no prose before or after.
+Rules: raw JSON only, no markdown, no code fences, no explanation.
 """
 
 
@@ -279,72 +270,74 @@ async def create_plan_from_request(db: AsyncSession, worker_manager=None, contex
 # LLM Helper
 # ══════════════════════════════════════════════════════════════════════
 
-async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
-    """Generate text by calling Anthropic API directly.
+async def _llm_generate(prompt: str, model: str = "haiku") -> str | None:
+    """Generate text via Gateway session spawn + JSONL transcript read.
 
-    Much simpler and more reliable than spawning a Gateway session.
+    Spawns a sub-agent, waits for completion, reads the JSONL transcript
+    file directly to get the full untruncated response.
     """
-    try:
-        import anthropic
-    except ImportError:
-        logger.error("[LEARNING] pip install anthropic")
+    if not GATEWAY_URL or not GATEWAY_TOKEN:
         return None
 
-    # Read API key from OpenClaw auth profiles
-    api_key = _get_anthropic_key()
-    if not api_key:
-        logger.error("[LEARNING] No Anthropic API key found")
-        return None
-
-    # Map model aliases to full names
-    MODEL_MAP = {
-        "haiku": "claude-haiku-4-5-20250514",
-        "sonnet": "claude-sonnet-4-5-20250514",
-        "opus": "claude-opus-4-6-20250527",
-    }
-    model_id = MODEL_MAP.get(model, model)
-
     try:
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=model_id,
-            max_tokens=8192,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        parent_key = f"{GATEWAY_SESSION_KEY}-learning-{uuid.uuid4().hex[:6]}"
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={
+                    "tool": "sessions_spawn",
+                    "sessionKey": parent_key,
+                    "args": {
+                        "task": prompt,
+                        "model": model,
+                        "runTimeoutSeconds": 120,
+                        "timeoutSeconds": 30,
+                        "cleanup": "keep",
+                    },
+                },
+                timeout=aiohttp.ClientTimeout(total=60),
+            )
+            data = await resp.json()
 
-        # Extract text from response
-        text_parts = []
-        for block in response.content:
-            if block.type == "text":
-                text_parts.append(block.text)
-        result = "\n".join(text_parts).strip()
+        if not data.get("ok"):
+            logger.warning("[LEARNING] Spawn failed: %s", data)
+            return None
 
-        if result:
-            logger.info("[LEARNING] LLM generated %d chars (model=%s)", len(result), model_id)
-            return result
+        child_key = data.get("result", {}).get("details", {}).get("childSessionKey", "")
+        if not child_key:
+            return None
+
+        # Extract the session UUID from the key format: agent:<agent>:subagent:<uuid>
+        # and find the JSONL transcript file
+        parts = child_key.split(":")
+        if len(parts) >= 4:
+            agent_id = parts[1]
+            session_uuid = parts[3]
+            transcript_path = os.path.expanduser(
+                f"~/.openclaw/agents/{agent_id}/sessions/{session_uuid}.jsonl"
+            )
+        else:
+            transcript_path = None
+
+        # Poll — wait for assistant response in the transcript file
+        import asyncio
+        for attempt in range(20):
+            await asyncio.sleep(2)
+
+            # Check transcript file directly (no truncation!)
+            if transcript_path and os.path.exists(transcript_path):
+                content = _extract_from_transcript(transcript_path)
+                if content and len(content) > 20:
+                    logger.info("[LEARNING] LLM generated %d chars from transcript", len(content))
+                    return content
+
+        logger.warning("[LEARNING] No LLM response after polling (transcript=%s)", transcript_path)
         return None
 
     except Exception as e:
-        logger.error("[LEARNING] Anthropic API call failed: %s", e, exc_info=True)
+        logger.error("[LEARNING] LLM generation failed: %s", e, exc_info=True)
         return None
-
-
-def _get_anthropic_key() -> str | None:
-    """Read Anthropic API key from OpenClaw auth profiles."""
-    import glob
-    paths = glob.glob(os.path.expanduser("~/.openclaw/agents/*/agent/auth-profiles.json"))
-    for path in paths:
-        try:
-            with open(path) as f:
-                data = json.load(f)
-            profiles = data.get("profiles", {})
-            for key, val in profiles.items():
-                if "anthropic" in key and val.get("token", "").startswith("sk-ant"):
-                    return val["token"]
-        except Exception:
-            continue
-    # Also check env
-    return os.environ.get("ANTHROPIC_API_KEY")
 
 
 def _extract_from_transcript(transcript_path: str) -> str | None:
