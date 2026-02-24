@@ -97,19 +97,25 @@ def get_orchestrator(request: Request) -> OrchestratorEngine:
 
 @router.post("/reflection/trigger")
 async def trigger_reflection_cycle(
-    request: Request,
+    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Manually trigger a strategic reflection cycle.
-    
-    Signals the engine to run reflections on its next tick (avoids DB lock
-    contention by letting the engine's own session handle the work).
-    """
-    engine: OrchestratorEngine | None = getattr(request.app.state, "orchestrator", None)
-    if not engine:
-        raise HTTPException(status_code=503, detail="Orchestrator not running")
+    """Manually trigger a strategic reflection cycle via the workflow engine."""
+    from app.orchestrator.workflow_executor import WorkflowExecutor
+    from app.models import WorkflowDefinition
+    from sqlalchemy import select as sa_select
 
-    engine._force_reflection = True
-    return {"ok": True, "message": "Reflection cycle will run on next engine tick (within ~10s)"}
+    wf_result = await db.execute(
+        sa_select(WorkflowDefinition).where(
+            WorkflowDefinition.name == "reflection-cycle",
+            WorkflowDefinition.is_active == True,
+        )
+    )
+    wf = wf_result.scalar_one_or_none()
+    if not wf:
+        raise HTTPException(status_code=404, detail="reflection-cycle workflow not found or inactive")
+    executor = WorkflowExecutor(db)
+    run = await executor.start_run(wf, trigger_type="api")
+    return {"ok": True, "message": "Reflection cycle workflow started", "run_id": run.id}
 
 
 @router.get("/intelligence/summary")

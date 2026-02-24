@@ -1,1 +1,1 @@
-Updated ARCHITECTURE.md (agent learning system section) with accurate implementation state, corrected API prefix, and component status table. Added CHANGELOG entry for Hook 1 going live and MVP design completion.
+Wrote docs/handoffs/learning-loop-mvp-implementation-guide.md — consolidated programmer guide for remaining MVP work. Also updated learning-loop-mvp-handoff.json (fixed stale PromptEnhancer stub note) and LEARNING_SYSTEM_QUICKSTART.md (fixed wrong /api/learning paths → /api/agent-learning).

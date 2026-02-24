@@ -29,29 +29,15 @@ from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.scheduler import EventScheduler
 from app.orchestrator.routine_runner import RoutineRunner
 from app.orchestrator.inbox_processor import InboxProcessor
-from app.orchestrator.reflection_cycle import ReflectionCycleManager
-from app.orchestrator.memory_maintenance import run_memory_maintenance
-from app.orchestrator.sweep_arbitrator import SweepArbitrator
-# LEGACY: replaced by workflow-based agent-assignment
-# from app.orchestrator.auto_assigner import TaskAutoAssigner
-from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
-# Legacy control loop removed — all recurring work now via workflow scheduler
 from app.orchestrator.provider_health import ProviderHealthRegistry
 from app.orchestrator.config import POLL_INTERVAL, GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
-from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat, AgentReflection, AgentInitiative
+from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat, AgentReflection
 from app.services.github_sync import GitHubSyncService
 from app.services.openclaw_models import fetch_openclaw_model_catalog
 from sqlalchemy import select
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
-    SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS,
-    SETTINGS_KEY_DIAGNOSTIC_INTERVAL_SECONDS,
-    SETTINGS_KEY_GITHUB_SYNC_INTERVAL_SECONDS,
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
-    SETTINGS_KEY_REFLECTION_LAST_RUN_AT,
-    SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC,
-    SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET,
-    SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET,
 )
 
 logger = logging.getLogger(__name__)

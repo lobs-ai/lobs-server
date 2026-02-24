@@ -1,136 +1,179 @@
 # Learning System Quick Start
 
+**Last Updated:** 2026-02-24  
+**Status:** MVP in progress — tracking + API endpoints not yet implemented  
+**Spec:** [docs/learning-loop-mvp-design.md](learning-loop-mvp-design.md)
+
+---
+
 ## Overview
 
-The agent learning system tracks task outcomes and provides metrics for measuring agent performance improvement over time. This is Phase 1.4 (Metrics & Validation) of the learning system.
+The agent learning system tracks task outcomes and uses them to improve agent prompts over time. It has two layers:
 
-## Prerequisites
+1. **Outcome Ledger** — logs every agent run with task intent, prompt version, and outcome (success/failure/user-corrected)
+2. **Prompt Enhancement** — injects relevant lessons from past failures into future prompts before task execution
 
-- Database migration run: `python migrations/create_learning_tables.py`
-- Tables created: `task_outcomes`, `outcome_learnings`
+The `PromptEnhancer` is fully implemented and live. The `OutcomeTracker` and API endpoints are the remaining MVP work.
 
-## Usage
+---
 
-### 1. Validate System Health
+## Current State
+
+### Live Today
+- `PromptEnhancer` — active in `app/orchestrator/prompt_enhancer.py`
+- Worker Hook 1 (pre-spawn enhancement) — live in `worker.py:~241`
+- A/B control group (20%) — live in `worker.py:~234`
+- DB tables: `task_outcomes`, `outcome_learnings`
+
+### Not Yet Built
+- `OutcomeTracker` — nothing writes outcomes on completion yet
+- `/api/agent-learning/*` endpoints
+- Daily batch job
+
+See [learning-loop-mvp-status.md](handoffs/learning-loop-mvp-status.md) for precise implementation status.
+
+---
+
+## API Reference (once built)
+
+> **Note:** All learning endpoints use the prefix `/api/agent-learning`, not `/api/learning`.  
+> `/api/learning` belongs to personal learning plans — a different system.
+
+### Submit or update an outcome
 
 ```bash
-python app/cli/validate_learning.py
+curl -X POST "http://localhost:8000/api/agent-learning/outcomes" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task_id": "uuid",
+    "outcome": "failure",
+    "human_feedback": "Missing tests and no error handling",
+    "reason_tags": ["missing_tests", "missing_error_handling"]
+  }'
 ```
 
-This runs 6 health checks:
-1. Outcome tracking coverage
-2. Learning creation
-3. Learning application rate
-4. A/B test balance
-5. Learning confidence health
-6. Success rates (control vs treatment)
+Outcome values: `success`, `failure`, `user-corrected`.
 
-### 2. View Metrics via API
+### Get learning summary
 
-**Get performance stats:**
 ```bash
-curl "http://localhost:8000/api/learning/stats?agent=programmer&since_days=14" \
+curl "http://localhost:8000/api/agent-learning/summary?since_days=30&agent_type=programmer" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-**Response includes:**
-- Control group size and success rate
-- Treatment group size and success rate
-- Improvement percentage
-- Statistical significance (Chi-squared p-value)
-- Learning counts and confidence
-- Application rate
+Response includes: success rate, A/B lift (treatment vs. control), top failure patterns, active learnings, and pending suggestions awaiting approval.
 
-**Check system health:**
+### Approve or reject a pending lesson
+
 ```bash
-curl "http://localhost:8000/api/learning/health?agent=programmer" \
-  -H "Authorization: Bearer YOUR_TOKEN"
+curl -X PATCH "http://localhost:8000/api/agent-learning/learnings/{id}" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"action": "approve"}'
 ```
 
-**Response includes:**
-- Status: "healthy" or "degraded"
-- Issues detected
-- Recent outcome and learning counts
-- Low-confidence learning warnings
+Actions: `approve` (sets active + confidence=0.5), `reject`, `edit` (with `lesson_text`).
 
-### 3. Monitor Daily
-
-Run validation daily to track system health:
-```bash
-# Add to crontab or scheduled job
-0 9 * * * cd /path/to/lobs-server && python app/cli/validate_learning.py >> logs/learning-validation.log
-```
+---
 
 ## What to Watch For
 
 ### Healthy System
 - ✅ Recent outcomes being created (24h)
-- ✅ Learnings being extracted (7d)
-- ✅ Learnings being applied to tasks
+- ✅ Learnings extracted and active
 - ✅ A/B split ~20% control group
-- ✅ Average confidence ≥0.5
-- ✅ Improvement >10% over baseline
+- ✅ Confidence ≥0.5 on active learnings
+- ✅ Positive A/B lift (treatment group outperforms control)
 
 ### Warning Signs
-- ⚠️ No recent outcomes → Check task execution
-- ⚠️ No learnings created → Run extraction (Phase 1.2)
-- ⚠️ No learnings applied → Check PromptEnhancer (Phase 1.3)
-- ⚠️ A/B split <15% or >25% → Adjust sampling rate
-- ⚠️ Many low-confidence learnings → Review quality
-- ⚠️ Negative improvement → System may be degrading performance
+- ⚠️ No recent outcomes → `OutcomeTracker` may not be wired up
+- ⚠️ No active learnings → Batch job hasn't run or all suggestions are pending approval
+- ⚠️ A/B split far from 20% → Check `LEARNING_CONTROL_GROUP_PCT` env var
+- ⚠️ Negative lift → Active learnings may be hurting; audit and deactivate
+- ⚠️ Many low-confidence learnings → Review quality; batch will auto-deactivate if confidence < 0.3 and failure_count ≥ 3
+
+---
 
 ## Database Schema
 
 ### task_outcomes
-Records every task completion with success/failure and context.
 
-Key fields:
-- `success`: Task succeeded (code merged, review passed, etc.)
-- `agent_type`: programmer, researcher, writer, etc.
-- `learning_disabled`: True for control group (no learnings applied)
-- `applied_learnings`: Array of learning IDs used for this task
-- `human_feedback`: Manual feedback from code review
+Records every agent task completion.
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | Primary key |
+| `task_id` | UUID | FK to tasks |
+| `agent_type` | str | programmer, researcher, writer, etc. |
+| `success` | bool | True if task completed without rejection |
+| `learning_disabled` | bool | True = A/B control group (no learnings injected) |
+| `applied_learnings` | JSON | IDs of OutcomeLearning rows that were injected |
+| `human_feedback` | text | Manual feedback from review |
+| `context_hash` | str | SHA-256 prefix grouping similar tasks |
+| `created_at` | timestamp | |
 
 ### outcome_learnings
-Extracted patterns and lessons from outcomes.
 
-Key fields:
-- `pattern_name`: Unique identifier (e.g., "missing_tests")
-- `lesson_text`: What the agent should remember
-- `confidence`: 0.0-1.0 based on success/failure ratio
-- `success_count` / `failure_count`: Tracking effectiveness
-- `is_active`: Whether this learning is currently being applied
+Extracted lessons from failure patterns.
 
-## Next Steps
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | UUID | Primary key |
+| `agent_type` | str | Which agent this applies to |
+| `pattern_name` | str | e.g. `missing_tests`, `missing_error_handling` |
+| `lesson_text` | text | What gets injected into the prompt |
+| `confidence` | float | 0.0–1.0 based on success/failure ratio |
+| `success_count` | int | Times applied and task succeeded |
+| `failure_count` | int | Times applied and task failed |
+| `is_active` | bool | If false, not injected |
 
-1. **Collect Data**: Execute tasks to generate outcomes
-2. **Extract Patterns**: Run Phase 1.2 (LessonExtractor) to create learnings
-3. **Apply Learnings**: Run Phase 1.3 (PromptEnhancer) to inject into prompts
-4. **Measure Impact**: Use this Phase 1.4 metrics system to validate improvement
+---
+
+## Environment Variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `LEARNING_ENABLED` | `true` | Master switch |
+| `LEARNING_INJECTION_ENABLED` | `true` | Prompt injection only |
+| `LEARNING_CONTROL_GROUP_PCT` | `0.2` | A/B control group fraction |
+| `MAX_LEARNINGS_PER_PROMPT` | `3` | Max lessons per prompt |
+| `MIN_CONFIDENCE_THRESHOLD` | `0.3` | Minimum confidence to inject |
+| `LEARNING_BATCH_ENABLED` | `true` | Daily batch |
+
+---
+
+## A/B Lift
+
+The system computes lift as:
+
+```
+lift = (treatment_success_rate - control_success_rate) / control_success_rate
+```
+
+Positive lift confirms the system is working. The `GET /api/agent-learning/summary` response includes both success rates and the computed lift.
+
+The control group (20% of runs) receives no learning injection. This is controlled by `LEARNING_CONTROL_GROUP_PCT` and is live today in `worker.py`.
+
+---
 
 ## Troubleshooting
 
-**Tables don't exist:**
-```bash
-python migrations/create_learning_tables.py
-```
+**No outcomes after tasks run:**
+- `OutcomeTracker.track_completion()` is not yet wired into `worker.py` — see [implementation guide](handoffs/learning-loop-mvp-implementation-guide.md)
 
-**No data in stats:**
-- System needs real task execution first
-- Check `task_outcomes` table has rows
-- Ensure tasks are completing (not just starting)
+**No learnings showing in summary:**
+- The daily batch job hasn't run yet (scheduled 2am ET)
+- Or all suggestions are pending human approval (check `pending_suggestions` in the summary response)
 
-**Significance shows "unavailable":**
-- Install scipy: `pip install scipy>=1.11.0`
-- Or accept "unavailable" for small samples
+**Summary endpoint returns 404:**
+- Router not registered — ensure `app/main.py` includes the `agent_learning` router at prefix `/api/agent-learning`
 
-**Health shows "degraded":**
-- Review the `issues` array in response
-- Address each issue based on warning message
-- Re-run validation after fixes
+---
 
 ## Reference
 
-- [Full Design Doc](./agent-learning-system.md)
-- [Phase 1.1 Handoff](./handoffs/learning-phase-1.1-database-tracking.md)
-- [Phase 1.4 Handoff](./handoffs/learning-phase-1.4-metrics-validation.md)
+- [Learning Loop MVP Design](learning-loop-mvp-design.md) — full specification
+- [Implementation Guide](handoffs/learning-loop-mvp-implementation-guide.md) — step-by-step build instructions
+- [Current Status](handoffs/learning-loop-mvp-status.md) — what's built vs. missing
+- [Handoff JSON](handoffs/learning-loop-mvp-handoff.json) — acceptance criteria
