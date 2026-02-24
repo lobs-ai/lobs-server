@@ -414,6 +414,54 @@ async def get_deadlines(
     ]
 
 
+@router.post("/deadlines/{entry_id}/escalate-now")
+async def escalate_deadline_now(
+    entry_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Escalate a deadline into an actionable task immediately."""
+    result = await db.execute(
+        select(TrackerEntryModel).where(
+            TrackerEntryModel.id == entry_id,
+            TrackerEntryModel.type == "deadline",
+        )
+    )
+    deadline = result.scalar_one_or_none()
+    if not deadline:
+        raise HTTPException(status_code=404, detail="Deadline not found")
+
+    if deadline.escalation_task_id:
+        existing_task = await db.execute(select(TaskModel).where(TaskModel.id == deadline.escalation_task_id))
+        if existing_task.scalar_one_or_none() is not None:
+            return {"status": "already_escalated", "task_id": deadline.escalation_task_id}
+
+    due_label = deadline.due_date.isoformat() if deadline.due_date else "unknown"
+    task_id = str(uuid.uuid4())
+    task = TaskModel(
+        id=task_id,
+        title=f"🚨 Deadline now: {deadline.raw_text[:90]}",
+        status="inbox",
+        owner="lobs",
+        notes=(
+            "Created via /tracker/deadlines/{id}/escalate-now\n"
+            f"Due: {due_label}\n"
+            f"Category: {deadline.category or 'uncategorized'}\n"
+            f"Commitment: {deadline.commitment_type or 'unspecified'}\n"
+            f"Next action: {deadline.next_action or 'Start the most valuable chunk now.'}"
+        ),
+        pinned=True,
+        agent="project-manager",
+        model_tier="small",
+    )
+    db.add(task)
+
+    deadline.escalation_task_id = task_id
+    deadline.last_escalated_at = datetime.now(timezone.utc)
+
+    await db.flush()
+    return {"status": "escalated", "task_id": task_id}
+
+
 # Work Tracker Analysis (AI-generated insights)
 @router.get("/analysis/latest")
 async def get_latest_analysis(
