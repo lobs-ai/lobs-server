@@ -1,0 +1,45 @@
+{
+  "name": "echo-test",
+  "version": "1.0.0",
+  "description": "Simple echo plugin for testing plugin system",
+  "agent_types": ["programmer", "researcher", "writer", "architect", "project-manager"],
+  "author": "lobs-team",
+  "executable": "execute.py",
+  "runtime": "python3",
+  "timeout_seconds": 5,
+  "permissions": {
+    "network": [],
+    "filesystem_read": [],
+    "filesystem_write": [],
+    "environment_vars": []
+  },
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "message": {
+        "type": "string",
+        "description": "Message to echo back"
+      }
+    },
+    "required": ["message"]
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "echoed": {
+        "type": "string",
+        "description": "The echoed message"
+      },
+      "length": {
+        "type": "integer",
+        "description": "Length of the message"
+      }
+    }
+  },
+  "examples": [
+    {
+      "input": {"message": "Hello, plugins!"},
+      "output": {"echoed": "Hello, plugins!", "length": 15}
+    }
+  ]
+}
