@@ -1,0 +1,59 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "agent-learning-system",
+    "title": "Implement Learning Loop MVP: Outcome Ledger + Prompt Variant Attribution",
+    "date": "2026-02-24",
+    "context": "Design is complete and approved at docs/learning-loop-mvp-design.md. Previous consolidated handoff (learning-mvp-consolidated.json) was based on an older 4-phase design. This handoff replaces it with a cleaner 8-step MVP scope.\n\nWhat already exists:\n- TaskOutcome model at app/models.py:846\n- OutcomeLearning model at app/models.py:866\n- task_outcomes and outcome_learnings tables (created)\n- PromptEnhancer stub at app/orchestrator/prompt_enhancer.py\n- Personal learning router at app/routers/learning.py (DO NOT touch — different system)\n\nWhat's missing and must be built (in this order):\n1. app/orchestrator/outcome_tracker.py — OutcomeTracker service\n2. Hook outcome tracking into worker.py after task completion\n3. app/routers/agent_learning.py — POST /api/agent-learning/outcomes + GET /api/agent-learning/summary\n4. Register new router in app/main.py (prefix /api/agent-learning)\n5. Hook prompt enhancement into worker.py before task spawn\n6. app/orchestrator/learning_batch.py — Daily batch job\n7. Engine timer integration in app/orchestrator/engine.py (2am ET, same pattern as memory_maintenance)\n8. PATCH /api/agent-learning/learnings/{id} approval endpoint\n\nStop after step 4 if time-boxed. Steps 1-4 give a working ledger + read surface.",
+    "spec": "docs/learning-loop-mvp-design.md",
+    "acceptance": [
+      "app/orchestrator/outcome_tracker.py exists with OutcomeTracker.track_completion() and OutcomeTracker.record_feedback() — both fail-safe (no exceptions propagate to worker)",
+      "worker.py calls OutcomeTracker.track_completion() in _handle_worker_completion() after task status update",
+      "app/routers/agent_learning.py exists with POST /api/agent-learning/outcomes and GET /api/agent-learning/summary",
+      "New router mounted in app/main.py at prefix /api/agent-learning (separate from /api/learning which is personal plans)",
+      "POST /api/agent-learning/outcomes accepts {task_id, outcome, reason_tags, feedback} and upserts a TaskOutcome row",
+      "GET /api/agent-learning/summary returns {total_outcomes, success_rate, by_agent, learning_impact, top_failure_patterns} with since_days/agent_type/task_category query params",
+      "LEARNING_ENABLED env flag disables all learning code (master switch)",
+      "worker.py calls PromptEnhancer.enhance_prompt() before spawn; 20% of runs get learning_disabled=True (control group)",
+      "app/orchestrator/learning_batch.py exists — queries last 14 days of failures, groups by agent_type + pattern_name, writes OutcomeLearning rows with is_active=False for patterns with >=3 failures",
+      "Batch job integrated into engine.py timer at 2am ET; last run date persisted to OrchestratorSetting",
+      "PATCH /api/agent-learning/learnings/{id} accepts {action: approve|reject|edit, lesson_text?} — approve sets is_active=True and confidence=0.5",
+      "tests/test_agent_learning.py covers: track_completion writes row, track_completion never raises, feedback updates outcome, POST /outcomes upserts, GET /summary returns valid stats, GET /summary.learning_impact has both A/B groups, batch creates suggested learnings, batch skips already-covered patterns"
+    ],
+    "key_implementation_details": {
+      "context_hash": "SHA256(agent_type + ':' + task_category + ':' + title_first_8_words_lowercase). Groups similar tasks for A/B comparison.",
+      "success_detection": "success=True if task.work_state=='completed' AND review_state not in ('rejected','failed'). Failure if work_state in ('failed','cancelled') OR review_state in ('rejected','failed') OR error_message is set.",
+      "ab_split": "random.random() < float(os.getenv('LEARNING_CONTROL_GROUP_PCT', '0.2')) → learning_disabled=True, skip PromptEnhancer. Store learning_disabled flag in TaskOutcome so learning_impact in summary can compare groups.",
+      "api_prefix": "New router uses prefix /api/agent-learning (NOT /api/learning — that prefix belongs to personal learning plans)",
+      "batch_timer": "Same pattern as _memory_maintenance_hour in engine.py. Add _learning_batch_hour_et=2 and _last_learning_batch_date_et. Persist last run to OrchestratorSetting key 'last_learning_batch_date_et'.",
+      "reason_tags": "Standard tags: missing_tests, missing_error_handling, unclear_names, missing_docs, missing_validation, wrong_approach, incomplete, scope_creep, hallucinated_api"
+    },
+    "files_to_create": [
+      "app/orchestrator/outcome_tracker.py",
+      "app/routers/agent_learning.py",
+      "app/orchestrator/learning_batch.py",
+      "tests/test_agent_learning.py"
+    ],
+    "files_to_modify": [
+      "app/orchestrator/worker.py — add 2 integration points (pre-spawn + post-completion)",
+      "app/orchestrator/engine.py — add batch job timer",
+      "app/main.py — register agent_learning router"
+    ],
+    "do_not_touch": [
+      "app/routers/learning.py — personal learning plans, different system",
+      "app/models.py — TaskOutcome and OutcomeLearning already correct, no changes needed"
+    ],
+    "environment_variables": {
+      "LEARNING_ENABLED": "true",
+      "LEARNING_INJECTION_ENABLED": "true",
+      "LEARNING_CONTROL_GROUP_PCT": "0.2",
+      "MAX_LEARNINGS_PER_PROMPT": "3",
+      "MIN_CONFIDENCE_THRESHOLD": "0.3",
+      "LEARNING_BATCH_ENABLED": "true"
+    },
+    "estimated_complexity": "medium",
+    "estimated_days": 2,
+    "depends_on": [],
+    "notes": "The existing prompt_enhancer.py already has an enhance_prompt() stub. Review it before writing from scratch — may only need minor completion. The batch job should post a chat message on completion (see BriefService or ChatService patterns in the codebase for how to post to chat)."
+  }
+]

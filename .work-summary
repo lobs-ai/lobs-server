@@ -1,1 +1,1 @@
-Wrote docs/learning-loop-mvp-design.md: event schema, /api/learning/outcomes + /api/learning/summary API spec, daily batch job design for the Learning Loop MVP
+Wrote docs/learning-loop-mvp-design.md (event schema, API spec, batch job) + docs/handoffs/learning-loop-mvp-handoff.json (programmer handoff replacing old consolidated handoff)
