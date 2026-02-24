@@ -446,3 +446,48 @@ async def test_get_deadlines_all(client: AsyncClient):
     ids = [d["id"] for d in data]
     assert "future-dl" in ids
     assert "past-dl" in ids
+
+
+@pytest.mark.asyncio
+async def test_deadline_escalate_now_creates_task(client: AsyncClient):
+    due_date = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+    await client.post("/api/tracker/entries", json={
+        "id": "dl-escalate",
+        "type": "deadline",
+        "raw_text": "Interview prep packet",
+        "due_date": due_date,
+        "commitment_type": "interview",
+        "next_action": "Draft 3 STAR stories now"
+    })
+
+    response = await client.post("/api/tracker/deadlines/dl-escalate/escalate-now")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "escalated"
+    assert data["task_id"]
+
+    task_response = await client.get(f"/api/tasks/{data['task_id']}")
+    assert task_response.status_code == 200
+    assert "Deadline now" in task_response.json()["title"]
+
+
+@pytest.mark.asyncio
+async def test_deadline_fields_show_in_deadline_list(client: AsyncClient):
+    due_date = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+    await client.post("/api/tracker/entries", json={
+        "id": "dl-fields",
+        "type": "deadline",
+        "raw_text": "Scrim strategy deck",
+        "due_date": due_date,
+        "commitment_type": "scrim",
+        "priority_score": 88,
+        "next_action": "Outline win conditions"
+    })
+
+    response = await client.get("/api/tracker/deadlines?upcoming=true")
+    assert response.status_code == 200
+    items = response.json()
+    item = next(i for i in items if i["id"] == "dl-fields")
+    assert item["commitment_type"] == "scrim"
+    assert item["priority_score"] == 88
+    assert item["next_action"] == "Outline win conditions"
