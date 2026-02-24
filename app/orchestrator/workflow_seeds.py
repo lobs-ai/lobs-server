@@ -32,7 +32,8 @@ async def seed_default_workflows(db: AsyncSession) -> int:
             existing.edges = defn.get("edges", [])
             existing.trigger = defn.get("trigger")
             existing.metadata_ = defn.get("metadata")
-            existing.is_active = defn.get("is_active", True)
+            # Don't overwrite is_active — operator may have toggled it intentionally
+            # Only set is_active on first creation (see else branch below)
             existing.version = (existing.version or 1) + 1
             wf = existing
             logger.info("[WORKFLOW_SEED] Updated workflow: %s (v%d)", defn["name"], wf.version)
@@ -749,7 +750,7 @@ DEFAULT_WORKFLOWS = [
         "name": "reflection-cycle",
         "description": "Full strategic reflection pipeline: list agents → build context → spawn reflections → wait → sweep → notify. Replaces the hardcoded engine reflection logic.",
         "trigger": {"type": "schedule", "cron": "0 */6 * * *", "timezone": "America/New_York"},
-        "is_active": False,
+        "is_active": True,
         "nodes": [
             {
                 "id": "list_agents",
@@ -836,7 +837,7 @@ DEFAULT_WORKFLOWS = [
         "name": "diagnostic-scan",
         "description": "Detect stalls, failures, idle agents, performance drops, repo drift. Spawn targeted diagnostics.",
         "trigger": {"type": "schedule", "cron": "*/30 * * * *", "timezone": "UTC"},
-        "is_active": False,
+        "is_active": True,
         "nodes": [
             {
                 "id": "run_diagnostics",
@@ -873,7 +874,7 @@ DEFAULT_WORKFLOWS = [
         "name": "daily-compression",
         "description": "Compress agent reflections into versioned identity snapshots with validation gate.",
         "trigger": {"type": "schedule", "cron": "0 4 * * *", "timezone": "America/New_York"},
-        "is_active": False,
+        "is_active": True,
         "nodes": [
             {
                 "id": "compress",
@@ -919,7 +920,7 @@ DEFAULT_WORKFLOWS = [
         "name": "scheduled-events",
         "description": "Fire due calendar scheduled events and create tasks from them.",
         "trigger": {"type": "schedule", "cron": "* * * * *", "timezone": "UTC"},
-        "is_active": False,
+        "is_active": True,
         "nodes": [
             {
                 "id": "fire_events",
@@ -937,7 +938,7 @@ DEFAULT_WORKFLOWS = [
         "name": "github-sync",
         "description": "Sync GitHub issues and PRs for all tracked projects.",
         "trigger": {"type": "schedule", "cron": "*/15 * * * *", "timezone": "UTC"},
-        "is_active": False,
+        "is_active": True,
         "nodes": [
             {
                 "id": "sync",
@@ -955,7 +956,7 @@ DEFAULT_WORKFLOWS = [
         "name": "memory-sync",
         "description": "Sync agent memory files from disk to database.",
         "trigger": {"type": "schedule", "cron": "0 * * * *", "timezone": "UTC"},
-        "is_active": False,
+        "is_active": True,
         "nodes": [
             {
                 "id": "sync",
