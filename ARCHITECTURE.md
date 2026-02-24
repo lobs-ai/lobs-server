@@ -8,8 +8,8 @@ High-level overview of the backend system design, data flow, and key components.
 - **Daily Ops Brief** — 8am auto-posted summary of calendar, email, GitHub blockers, and top agent tasks (design: [docs/daily-ops-brief-design.md](docs/daily-ops-brief-design.md)); `BriefService` + `/api/brief/today` + direct engine timer pattern (same as memory maintenance — `_brief_hour_et=8` ET, `_last_brief_date_et` persisted to `OrchestratorSetting`). Handoffs: [docs/handoffs/daily-ops-brief-handoffs.json](docs/handoffs/daily-ops-brief-handoffs.json)
 - **Inbox Remediation Tracking** — Closes approved→queued→cancelled silent decay loop: `Task.source_inbox_item_id` (FK to inbox item at spawn), `Task.cancel_reason` (required on rejection), `GET /api/inbox/stuck-remediations` triage list, and `StuckRemediationsAdapter` in BriefService (design: [docs/inbox-remediation-tracking-design.md](docs/inbox-remediation-tracking-design.md))
 
-**Recent Architectural Changes (Feb 21-23):**
-- **Agent learning system** — Closed-loop feedback from task outcomes to prompt improvement (✅ design complete, validated, ready for implementation - see [docs/agent-learning-READY.md](docs/agent-learning-READY.md); Phase 1.3 retry plan in [docs/handoffs/learning-phase-1.3-rescue-architecture.md](docs/handoffs/learning-phase-1.3-rescue-architecture.md))
+**Recent Architectural Changes (Feb 21-24):**
+- **Agent learning system (MVP in progress)** — Hook 1 (prompt enhancement via `PromptEnhancer`) is live in `worker.py` with 80/20 A/B split. Hook 2 (outcome tracking), `/api/agent-learning` endpoints, and daily batch job are still to build. MVP spec: [docs/learning-loop-mvp-design.md](docs/learning-loop-mvp-design.md); current state: [docs/handoffs/learning-loop-mvp-status.md](docs/handoffs/learning-loop-mvp-status.md)
 - **5-tier model routing** — Upgraded to micro/small/medium/standard/strong tier system with Ollama auto-discovery
 - **Reflection system improvements** — Domain-specific prompts, isolated sessions, manual trigger endpoint
 - **Token usage tracking** — Extract and track token usage from session transcripts

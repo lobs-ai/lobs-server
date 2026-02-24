@@ -1,1 +1,1 @@
-Design doc and programmer handoffs for Learning Loop MVP verified and corrected: fixed /api/learning → /api/agent-learning prefix, updated component status (PromptEnhancer fully implemented, Hook 1 live). Report at ~/lobs-control/state/reports/pending/learning-loop-mvp-documentation-2026-02-24.md
+Updated ARCHITECTURE.md (agent learning system section) with accurate implementation state, corrected API prefix, and component status table. Added CHANGELOG entry for Hook 1 going live and MVP design completion.

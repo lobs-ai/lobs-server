@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Added (2026-02-24)
+- **Agent Learning — Hook 1 live** — `PromptEnhancer` (`app/orchestrator/prompt_enhancer.py`) is fully implemented and active in `worker.py`. Queries active `OutcomeLearning` rows, selects top 3 by confidence, injects a "Lessons from Past Tasks" section before every worker prompt. 80/20 A/B control group runs in parallel for baseline measurement.
+- **Agent Learning — Outcome Ledger design** — MVP design (`docs/learning-loop-mvp-design.md`) and programmer-ready status doc (`docs/handoffs/learning-loop-mvp-status.md`) define exact interface for Hook 2 (`OutcomeTracker.track_completion`), the `/api/agent-learning` endpoints, and the daily 2am batch job. Remaining implementation assigned to programmer.
+
 ### Added (2026-02-21 to 2026-02-23)
 - **5-Tier Model Hierarchy** — Expanded from 3 tiers (cheap/standard/strong) to 5 tiers (micro/small/medium/standard/strong) for better cost control and local model support
 - **Ollama Auto-Discovery** — System automatically detects and injects Ollama models into micro/small/medium tiers based on parameter count

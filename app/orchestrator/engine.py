@@ -35,7 +35,7 @@ from app.orchestrator.sweep_arbitrator import SweepArbitrator
 # LEGACY: replaced by workflow-based agent-assignment
 # from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
-from app.orchestrator.control_loop import LobsControlLoopService
+# Legacy control loop removed — all recurring work now via workflow scheduler
 from app.orchestrator.provider_health import ProviderHealthRegistry
 from app.orchestrator.config import POLL_INTERVAL, GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
 from app.models import Project as ProjectModel, Task as TaskModel, OrchestratorSetting, InboxItem, ControlLoopHeartbeat, AgentReflection, AgentInitiative
@@ -497,150 +497,17 @@ class OrchestratorEngine:
                 except Exception as e:
                     logger.error("[ENGINE] Capability sync failed: %s", e, exc_info=True)
 
-            # 4. Lobs-as-PM control loop phases (event handling + reflection + daily compression)
-            if not self._paused:
-                # API-triggered reflection: reset timer so the control loop runs it
-                if self._force_reflection:
-                    self._last_reflection_check = 0.0
-                    self._force_reflection = False
-                    logger.info("[ENGINE] Force-reflection triggered via API")
+            # 4. Reflection, compression, diagnostics, sweeps, GitHub sync, memory sync
+            #    ALL now handled by workflow scheduler (cron-triggered workflows).
+            #    No legacy tick-based paths remain.
 
-                try:
-                    async def _run_reflection() -> dict[str, Any]:
-                        reflection_result = await reflection_manager.run_strategic_reflection_cycle()
-                        self._last_reflection_check = current_time
-
-                        # Persist reflection anchor across restarts.
-                        last_run_iso = datetime.now(timezone.utc).isoformat()
-                        anchor = await db.get(OrchestratorSetting, SETTINGS_KEY_REFLECTION_LAST_RUN_AT)
-                        if anchor is None:
-                            anchor = OrchestratorSetting(key=SETTINGS_KEY_REFLECTION_LAST_RUN_AT, value=last_run_iso)
-                            db.add(anchor)
-                        else:
-                            anchor.value = last_run_iso
-                        return reflection_result
-
-                    async def _run_compression() -> dict[str, Any]:
-                        daily_result = await reflection_manager.run_daily_compression()
-
-                        # Persist "ran today" marker in ET so restarts don't lose the daily state.
-                        now_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
-                        today_key = now_et.date().isoformat()
-                        marker = await db.get(OrchestratorSetting, SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET)
-                        if marker is None:
-                            marker = OrchestratorSetting(key=SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET, value=today_key)
-                            db.add(marker)
-                        else:
-                            marker.value = today_key
-
-                        return daily_result
-
-                    async def _route_task_created(payload: dict[str, Any]) -> bool:
-                        """Emit a workflow event for unassigned new tasks."""
-                        task_id = payload.get("task_id")
-                        if not task_id:
-                            return False
-                        db_task = await db.get(TaskModel, task_id)
-                        if db_task is None or db_task.agent:
-                            return False
-                        # Emit assignment event for the workflow engine
-                        wf_exec = WorkflowExecutor(db, worker_manager=worker_manager)
-                        await wf_exec.emit_event(
-                            "task.needs_assignment",
-                            {
-                                "task_id": db_task.id,
-                                "title": db_task.title,
-                                "notes": (db_task.notes or "")[:500],
-                                "project_id": db_task.project_id,
-                            },
-                            source="control_loop",
-                        )
-                        return True
-
-                    control_loop = LobsControlLoopService(
-                        db,
-                        reflection_interval_seconds=self._reflection_interval,
-                        reflection_last_run_at=self._last_reflection_check,
-                        compression_hour_et=self._daily_compression_hour_et,
-                        last_compression_date_et=self._last_daily_compression_date_et,
-                        run_reflection=_run_reflection,
-                        run_daily_compression=_run_compression,
-                        route_task_created=_route_task_created,
-                    )
-                    loop_result = await control_loop.run_once()
-                    self._last_reflection_check = control_loop.reflection_last_run_at
-                    self._last_daily_compression_date_et = control_loop.last_compression_date_et
-
-                    # Daily memory maintenance — runs once per day at same hour as compression.
-                    now_et = datetime.now(timezone.utc).astimezone(ZoneInfo("America/New_York"))
-                    today_key_et = now_et.date().isoformat()
-                    if (
-                        self._last_memory_maintenance_date_et != today_key_et
-                        and now_et.hour >= self._daily_compression_hour_et
-                    ):
-                        try:
-                            maint_result = await run_memory_maintenance()
-                            self._last_memory_maintenance_date_et = today_key_et
-                            summary = maint_result.get("summary", {})
-                            logger.info(
-                                "[ENGINE] Memory maintenance: consolidated=%s pruned=%s sessions=%s",
-                                summary.get("files_consolidated", 0),
-                                summary.get("files_pruned", 0),
-                                summary.get("sessions_removed", 0),
-                            )
-                            # Persist marker
-                            maint_marker_key = "memory_maintenance_last_date_et"
-                            maint_marker = await db.get(OrchestratorSetting, maint_marker_key)
-                            if maint_marker is None:
-                                maint_marker = OrchestratorSetting(key=maint_marker_key, value=today_key_et)
-                                db.add(maint_marker)
-                            else:
-                                maint_marker.value = today_key_et
-                        except Exception as e:
-                            logger.error("[ENGINE] Memory maintenance failed: %s", e, exc_info=True)
-
-                    # Important: commit here so heartbeat + any control-plane settings (reflection anchor,
-                    # daily compression marker) actually persist.
-                    await db.commit()
-
-                    if loop_result.events_processed > 0 or loop_result.reflection_triggered or loop_result.compression_triggered:
-                        activity = True
-                except Exception as e:
-                    logger.error("[ENGINE] Lobs control loop failed: %s", e, exc_info=True)
-                    await db.rollback()
-
-            # 5. Lobs sweep/arbitration — triggered after reflection batch completes
-            #    (no longer on a fixed timer; the worker manager signals readiness)
-            if worker_manager.sweep_requested:
-                worker_manager.sweep_requested = False
-                try:
-                    sweep_result = await sweep_arbitrator.run_once()
-                    if sweep_result.get("lobs_review", 0) > 0 or sweep_result.get("approved", 0) > 0:
-                        activity = True
-                    logger.info("[ENGINE] Post-reflection initiative sweep: %s", sweep_result)
-                except Exception as e:
-                    logger.error("[ENGINE] Initiative sweep failed: %s", e, exc_info=True)
-                    await db.rollback()
-
-            # 6. Reactive diagnostics (every 10 minutes)
-            if not self._paused and self._openclaw_available and current_time - self._last_diagnostic_check >= self._diagnostic_interval:
-                try:
-                    diagnostic_result = await diagnostic_engine.run_once()
-                    self._last_diagnostic_check = current_time
-                    if diagnostic_result.get("spawned", 0) > 0:
-                        activity = True
-                    logger.debug("[ENGINE] Diagnostics: %s", diagnostic_result)
-                except Exception as e:
-                    logger.error("[ENGINE] Diagnostic triggers failed: %s", e, exc_info=True)
-                    await db.rollback()
-
-            # 4. Check active workers
+            # 5. Check active workers
             initial_active = len(worker_manager.active_workers)
             await worker_manager.check_workers()
             if len(worker_manager.active_workers) != initial_active:
                 activity = True
 
-            # 4a. Advance active workflow runs
+            # 6. Advance active workflow runs
             try:
                 workflow_executor = WorkflowExecutor(db, worker_manager=worker_manager)
                 active_runs = await workflow_executor.get_active_runs()
@@ -659,7 +526,7 @@ class OrchestratorEngine:
             except Exception as e:
                 logger.error("[ENGINE] Workflow executor error: %s", e, exc_info=True)
 
-            # 5. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
+            # 7. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
             try:
                 monitor_result = await monitor_enhanced.run_full_check()
                 if monitor_result.get("issues_found", 0) > 0:
@@ -673,14 +540,14 @@ class OrchestratorEngine:
             except Exception as e:
                 logger.error(f"[ENGINE] Enhanced monitor check failed: {e}", exc_info=True)
 
-            # 6. Skip work assignment if paused or OpenClaw unavailable
+            # 8. Skip work assignment if paused or OpenClaw unavailable
             if self._paused:
                 return activity
             
             if not self._openclaw_available:
                 return activity
 
-            # 7. Scan for eligible tasks
+            # 9. Scan for eligible tasks
             eligible_tasks = await scanner.get_eligible_tasks()
             
             if not eligible_tasks:
@@ -695,7 +562,7 @@ class OrchestratorEngine:
                     f"{len(eligible_tasks)} task(s) queued."
                 )
 
-            # 8. Process eligible tasks — ALL tasks go through workflow engine
+            # 10. Process eligible tasks — ALL tasks go through workflow engine
             workflow_executor = WorkflowExecutor(db, worker_manager=worker_manager)
             for task_dict in eligible_tasks:
                 activity = True
@@ -931,14 +798,10 @@ class OrchestratorEngine:
                 "agents": agent_statuses,
                 "poll_interval": POLL_INTERVAL,
                 "control_loop": {
-                    "reflection_interval_seconds": self._reflection_interval,
-                    "daily_compression_hour_et": self._daily_compression_hour_et,
-                    "last_reflection_check": datetime.fromtimestamp(self._last_reflection_check, tz=timezone.utc).isoformat() if self._last_reflection_check else None,
-                    "last_daily_compression_date_et": self._last_daily_compression_date_et,
-                    "last_memory_maintenance_date_et": self._last_memory_maintenance_date_et,
+                    "mode": "workflow",
+                    "note": "All recurring work (reflections, compression, diagnostics, syncs) driven by workflow scheduler",
                     "last_heartbeat": heartbeat.last_heartbeat_at.isoformat() if heartbeat else None,
                     "heartbeat_phase": heartbeat.phase if heartbeat else None,
-                    "heartbeat_metadata": heartbeat.heartbeat_metadata if heartbeat else None,
                 },
             }
 
