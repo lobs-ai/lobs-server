@@ -280,109 +280,71 @@ async def create_plan_from_request(db: AsyncSession, worker_manager=None, contex
 # ══════════════════════════════════════════════════════════════════════
 
 async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
-    """Generate text via Gateway sessions_spawn (one-shot)."""
-    if not GATEWAY_URL or not GATEWAY_TOKEN:
+    """Generate text by calling Anthropic API directly.
+
+    Much simpler and more reliable than spawning a Gateway session.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        logger.error("[LEARNING] pip install anthropic")
         return None
 
+    # Read API key from OpenClaw auth profiles
+    api_key = _get_anthropic_key()
+    if not api_key:
+        logger.error("[LEARNING] No Anthropic API key found")
+        return None
+
+    # Map model aliases to full names
+    MODEL_MAP = {
+        "haiku": "claude-haiku-4-5-20250514",
+        "sonnet": "claude-sonnet-4-5-20250514",
+        "opus": "claude-opus-4-6-20250527",
+    }
+    model_id = MODEL_MAP.get(model, model)
+
     try:
-        parent_key = f"{GATEWAY_SESSION_KEY}-learning-{uuid.uuid4().hex[:6]}"
-        async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                f"{GATEWAY_URL}/tools/invoke",
-                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                json={
-                    "tool": "sessions_spawn",
-                    "sessionKey": parent_key,
-                    "args": {
-                        "task": prompt,
-                        "model": model,
-                        "runTimeoutSeconds": 120,
-                        "timeoutSeconds": 30,
-                        "cleanup": "keep",
-                    },
-                },
-                timeout=aiohttp.ClientTimeout(total=60),
-            )
-            data = await resp.json()
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model_id,
+            max_tokens=8192,
+            messages=[{"role": "user", "content": prompt}],
+        )
 
-        if not data.get("ok"):
-            logger.warning("[LEARNING] Spawn failed: %s", data)
-            return None
+        # Extract text from response
+        text_parts = []
+        for block in response.content:
+            if block.type == "text":
+                text_parts.append(block.text)
+        result = "\n".join(text_parts).strip()
 
-        child_key = data.get("result", {}).get("details", {}).get("childSessionKey")
-        if not child_key:
-            return None
-
-        # Poll for response — try both history API and transcript file
-        import asyncio
-        for attempt in range(20):
-            await asyncio.sleep(3)
-
-            # Try sessions_history first (with high limit to avoid truncation)
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_history",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-hist-{uuid.uuid4().hex[:6]}",
-                        "args": {"sessionKey": child_key, "limit": 3, "includeTools": False},
-                    },
-                    timeout=aiohttp.ClientTimeout(total=15),
-                )
-                hist_data = await resp.json()
-
-            if hist_data.get("ok"):
-                details = hist_data.get("result", {}).get("details", hist_data.get("result", {}))
-                messages = details.get("messages", [])
-                was_truncated = details.get("contentTruncated", False)
-
-                # If not truncated, try extracting from messages
-                if not was_truncated:
-                    for msg in reversed(messages):
-                        if msg.get("role") == "assistant":
-                            content = msg.get("content", "")
-                            if isinstance(content, list):
-                                content = "\n".join(
-                                    b.get("text", "") for b in content
-                                    if isinstance(b, dict) and b.get("type") == "text"
-                                )
-                            if isinstance(content, str) and len(content.strip()) > 20:
-                                return content.strip()
-
-                # If truncated or no content, try reading transcript file
-                # Find transcript path from sessions_list
-                if was_truncated or not messages:
-                    async with aiohttp.ClientSession() as session2:
-                        resp2 = await session2.post(
-                            f"{GATEWAY_URL}/tools/invoke",
-                            headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                            json={
-                                "tool": "sessions_list",
-                                "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-list-{uuid.uuid4().hex[:6]}",
-                                "args": {"limit": 50, "messageLimit": 0},
-                            },
-                            timeout=aiohttp.ClientTimeout(total=10),
-                        )
-                        list_data = await resp2.json()
-
-                    if list_data.get("ok"):
-                        sessions_list = list_data.get("result", {}).get("details", {}).get("sessions", [])
-                        for s in sessions_list:
-                            if s.get("key") == child_key:
-                                tp = s.get("transcriptPath")
-                                if tp and os.path.exists(tp):
-                                    content = _extract_from_transcript(tp)
-                                    if content and len(content) > 20:
-                                        return content
-                                break
-
-        logger.warning("[LEARNING] No LLM response after polling")
+        if result:
+            logger.info("[LEARNING] LLM generated %d chars (model=%s)", len(result), model_id)
+            return result
         return None
 
     except Exception as e:
-        logger.error("[LEARNING] LLM generation failed: %s", e, exc_info=True)
+        logger.error("[LEARNING] Anthropic API call failed: %s", e, exc_info=True)
         return None
+
+
+def _get_anthropic_key() -> str | None:
+    """Read Anthropic API key from OpenClaw auth profiles."""
+    import glob
+    paths = glob.glob(os.path.expanduser("~/.openclaw/agents/*/agent/auth-profiles.json"))
+    for path in paths:
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            profiles = data.get("profiles", {})
+            for key, val in profiles.items():
+                if "anthropic" in key and val.get("token", "").startswith("sk-ant"):
+                    return val["token"]
+        except Exception:
+            continue
+    # Also check env
+    return os.environ.get("ANTHROPIC_API_KEY")
 
 
 def _extract_from_transcript(transcript_path: str) -> str | None:
