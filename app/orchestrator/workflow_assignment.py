@@ -54,21 +54,21 @@ async def scan_unassigned(db: AsyncSession, worker_manager: Any, context: dict, 
     )
     tasks = result.scalars().all()
 
+    # Pre-fetch all pending assignment events to avoid N+1 queries
+    existing = await db.execute(
+        select(WorkflowEvent).where(
+            WorkflowEvent.event_type == "task.needs_assignment",
+            WorkflowEvent.processed == False,
+        )
+    )
+    pending_task_ids = {
+        (e.payload or {}).get("task_id")
+        for e in existing.scalars().all()
+    }
+
     emitted = 0
     for task in tasks:
-        # Check if we already have a pending event for this task
-        existing = await db.execute(
-            select(WorkflowEvent).where(
-                WorkflowEvent.event_type == "task.needs_assignment",
-                WorkflowEvent.processed == False,
-            )
-        )
-        existing_events = existing.scalars().all()
-        already_pending = any(
-            (e.payload or {}).get("task_id") == task.id
-            for e in existing_events
-        )
-        if already_pending:
+        if task.id in pending_task_ids:
             continue
 
         db.add(WorkflowEvent(
@@ -111,44 +111,57 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
         project_id=task.project_id or "unknown",
     )
 
-    # Call LLM via Gateway sessions_spawn (one-shot)
+    # Call LLM via Gateway: spawn session, poll history for response
+    import asyncio as _asyncio
     try:
-        async with aiohttp.ClientSession() as session:
-            parent_key = f"{GATEWAY_SESSION_KEY}-assign-{uuid.uuid4().hex[:6]}"
-            resp = await session.post(
-                f"{GATEWAY_URL}/tools/invoke",
-                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                json={
-                    "tool": "sessions_spawn",
-                    "sessionKey": parent_key,
-                    "args": {
-                        "task": prompt,
-                        "mode": "run",
-                        "model": "haiku",  # Cheap + fast for routing decisions
-                        "runTimeoutSeconds": 60,
-                        "cleanup": "delete",
-                    },
-                },
-                timeout=aiohttp.ClientTimeout(total=90),
+        label = f"assign-{task.id[:8].lower()}"
+        parent_key = f"{GATEWAY_SESSION_KEY}-assign-{uuid.uuid4().hex[:6]}"
+
+        # 1. Spawn a short-lived session
+        spawn_data = await _gateway_invoke(
+            "sessions_spawn",
+            parent_key,
+            {
+                "task": prompt,
+                "agentId": "reviewer",  # lightweight persona for classification
+                "model": "haiku",  # Cheap + fast for routing decisions
+                "runTimeoutSeconds": 60,
+                "timeoutSeconds": 30,
+                "cleanup": "delete",
+                "label": label,
+            },
+        )
+
+        child_key = (spawn_data or {}).get("childSessionKey")
+        if not child_key:
+            logger.warning("[ASSIGNMENT] Spawn missing childSessionKey: %s", spawn_data)
+            return {"assigned": False, "reason": "spawn failed — no child session", "task_title": task.title}
+
+        # 2. Poll history for the LLM response (up to ~16 seconds)
+        output = None
+        for _ in range(8):
+            await _asyncio.sleep(2)
+            hist = await _gateway_invoke(
+                "sessions_history",
+                f"{GATEWAY_SESSION_KEY}-assign-hist-{uuid.uuid4().hex[:6]}",
+                {"sessionKey": child_key, "limit": 10, "includeTools": False},
             )
-            data = await resp.json()
+            output = _extract_output_from_history(hist)
+            if output:
+                break
 
-        if not data.get("ok"):
-            logger.warning("[ASSIGNMENT] LLM spawn failed: %s", data)
-            return {"assigned": False, "reason": f"LLM spawn failed: {data}", "task_title": task.title}
+        if not output:
+            logger.warning("[ASSIGNMENT] No LLM response for task %s after polling", task.id[:8])
+            return {"assigned": False, "reason": "no LLM response after polling", "task_title": task.title}
 
-        # Extract the result
-        result = data.get("result", {})
-        details = result.get("details", result)
-        output = details.get("output", "")
+        logger.info("[ASSIGNMENT] LLM response for task %s: %s", task.id[:8], output[:300])
 
-        # Parse JSON from LLM response
+        # 3. Parse and apply assignment
         agent_type = _parse_agent_response(output)
         if not agent_type:
-            logger.warning("[ASSIGNMENT] Could not parse agent from LLM response: %s", output[:200])
-            return {"assigned": False, "reason": f"unparseable LLM response", "task_title": task.title}
+            logger.warning("[ASSIGNMENT] Could not parse agent from LLM response: %s", output[:500])
+            return {"assigned": False, "reason": "unparseable LLM response", "task_title": task.title, "raw_output": output[:500]}
 
-        # Apply the assignment
         task.agent = agent_type
         task.updated_at = datetime.now(timezone.utc)
         await db.commit()
@@ -159,6 +172,49 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
     except Exception as e:
         logger.error("[ASSIGNMENT] Error assigning agent: %s", e, exc_info=True)
         return {"assigned": False, "reason": str(e), "task_title": task.title}
+
+
+async def _gateway_invoke(tool: str, session_key: str, args: dict) -> dict | None:
+    """Invoke a Gateway tool and return the details dict, or None on failure."""
+    if not GATEWAY_URL or not GATEWAY_TOKEN:
+        return None
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={"tool": tool, "sessionKey": session_key, "args": args},
+                timeout=aiohttp.ClientTimeout(total=60),
+            )
+            data = await resp.json()
+            if not data.get("ok"):
+                return None
+            result = data.get("result", {})
+            return result.get("details", result)
+    except Exception:
+        logger.exception("[ASSIGNMENT] Gateway invoke failed tool=%s", tool)
+        return None
+
+
+def _extract_output_from_history(hist: dict | None) -> str | None:
+    """Extract the last assistant message from sessions_history output."""
+    if not hist:
+        return None
+    messages = hist.get("messages") if isinstance(hist, dict) else None
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+            joined = "\n".join(text_parts).strip()
+            if joined:
+                return joined
+    return None
 
 
 def _parse_agent_response(text: str) -> str | None:

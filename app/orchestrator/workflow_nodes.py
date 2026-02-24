@@ -250,17 +250,19 @@ class NodeHandlers:
                         )
 
             # Also check if session is still in sessions_list
-            resp2 = await aiohttp.ClientSession().post(
-                f"{GATEWAY_URL}/tools/invoke",
-                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                json={
-                    "tool": "sessions_list",
-                    "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-list-{uuid.uuid4().hex[:6]}",
-                    "args": {"limit": 50, "messageLimit": 0},
-                },
-                timeout=aiohttp.ClientTimeout(total=10),
-            )
-            list_data = await resp2.json()
+            async with aiohttp.ClientSession() as session2:
+                resp2 = await session2.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_list",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-list-{uuid.uuid4().hex[:6]}",
+                        "args": {"limit": 50, "messageLimit": 0},
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                list_data = await resp2.json()
+
             if list_data.get("ok"):
                 sessions = list_data.get("result", {}).get("details", {}).get("sessions", [])
                 found = any(s.get("key") == session_key for s in sessions)
@@ -279,8 +281,19 @@ class NodeHandlers:
         session_ref = config.get("session_ref", "")
         message_template = config.get("message_template", "")
 
-        # Resolve session key from context
+        # Resolve session key from context — try flat key first, then dot-path
         session_key = context.get(session_ref)
+        if not session_key and "." in session_ref:
+            # Navigate dot path: "run_code_task.session_key" → context["run_code_task"]["session_key"]
+            parts = session_ref.split(".")
+            val = context
+            for p in parts:
+                if isinstance(val, dict):
+                    val = val.get(p)
+                else:
+                    val = None
+                    break
+            session_key = val
         if not session_key:
             return NodeResult(status="failed", error=f"Session ref '{session_ref}' not found in context")
 

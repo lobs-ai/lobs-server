@@ -39,16 +39,16 @@ async def seed_default_workflows(db: AsyncSession) -> int:
             # Still process subscriptions below
         else:
             wf = WorkflowDefinition(
-            id=str(uuid.uuid4()),
-            name=defn["name"],
-            description=defn["description"],
-            version=1,
-            nodes=defn["nodes"],
-            edges=defn.get("edges", []),
-            trigger=defn.get("trigger"),
-            metadata_=defn.get("metadata"),
-            is_active=defn.get("is_active", True),
-        )
+                id=str(uuid.uuid4()),
+                name=defn["name"],
+                description=defn["description"],
+                version=1,
+                nodes=defn["nodes"],
+                edges=defn.get("edges", []),
+                trigger=defn.get("trigger"),
+                metadata_=defn.get("metadata"),
+                is_active=defn.get("is_active", True),
+            )
         if not existing:
             db.add(wf)
             created += 1
@@ -75,8 +75,7 @@ async def seed_default_workflows(db: AsyncSession) -> int:
                     ))
                     logger.info("[WORKFLOW_SEED] Created subscription: %s → %s", defn["name"], event_pattern)
 
-    if created:
-        await db.commit()
+    await db.commit()
     return created
 
 
@@ -121,21 +120,11 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1 || true",
+                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1",
                     "timeout_seconds": 300,
                 },
-                "on_success": "check_tests",
-                "on_failure": {"retry": 1, "fallback": "fix_tests", "escalate_after": 3, "abort_on": ["timeout"]},
-            },
-            {
-                "id": "check_tests",
-                "type": "branch",
-                "config": {
-                    "conditions": [
-                        {"match": "run_tests.returncode == 0", "goto": "run_lint"},
-                    ],
-                    "default": "fix_tests",
-                },
+                "on_success": "run_lint",
+                "on_failure": {"retry": 0, "fallback": "fix_tests", "escalate_after": 3, "abort_on": ["timeout"]},
             },
             {
                 "id": "fix_tests",
@@ -151,21 +140,11 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests_retry",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1 || true",
+                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1",
                     "timeout_seconds": 300,
                 },
-                "on_success": "check_tests_retry",
-                "on_failure": {"retry": 0, "abort_on": ["timeout"]},
-            },
-            {
-                "id": "check_tests_retry",
-                "type": "branch",
-                "config": {
-                    "conditions": [
-                        {"match": "run_tests_retry.returncode == 0", "goto": "run_lint"},
-                    ],
-                    "default": "escalate_test_failure",
-                },
+                "on_success": "run_lint",
+                "on_failure": {"fallback": "escalate_test_failure", "abort_on": ["timeout"]},
             },
             {
                 "id": "escalate_test_failure",
@@ -180,21 +159,11 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_lint",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && ruff check . 2>&1 || true",
+                    "command": "cd {project.repo_path} && ruff check . 2>&1",
                     "timeout_seconds": 120,
                 },
-                "on_success": "check_lint",
-                "on_failure": {"retry": 0, "abort_on": ["timeout"]},
-            },
-            {
-                "id": "check_lint",
-                "type": "branch",
-                "config": {
-                    "conditions": [
-                        {"match": "run_lint.returncode == 0", "goto": "commit"},
-                    ],
-                    "default": "fix_lint",
-                },
+                "on_success": "commit",
+                "on_failure": {"fallback": "fix_lint", "escalate_after": 3, "abort_on": ["timeout"]},
             },
             {
                 "id": "fix_lint",

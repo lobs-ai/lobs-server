@@ -32,7 +32,8 @@ from app.orchestrator.inbox_processor import InboxProcessor
 from app.orchestrator.reflection_cycle import ReflectionCycleManager
 from app.orchestrator.memory_maintenance import run_memory_maintenance
 from app.orchestrator.sweep_arbitrator import SweepArbitrator
-from app.orchestrator.auto_assigner import TaskAutoAssigner
+# LEGACY: replaced by workflow-based agent-assignment
+# from app.orchestrator.auto_assigner import TaskAutoAssigner
 from app.orchestrator.diagnostic_triggers import DiagnosticTriggerEngine
 from app.orchestrator.control_loop import LobsControlLoopService
 from app.orchestrator.provider_health import ProviderHealthRegistry
@@ -776,7 +777,9 @@ class OrchestratorEngine:
         return activity
 
     async def _request_lobs_assignment(self, db: Any, task: dict[str, Any]) -> bool:
-        """Create a deduplicated inbox item requesting Lobs to assign an agent."""
+        """LEGACY: Create a deduplicated inbox item requesting Lobs to assign an agent.
+        Replaced by workflow-based agent-assignment. Kept as backup.
+        """
         task_id = task.get("id")
         if not task_id:
             return False
