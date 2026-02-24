@@ -42,7 +42,7 @@ async def integration_status(db: AsyncSession = Depends(get_db)):
 
 @router.post("/calendar/sync", dependencies=[Depends(require_auth)])
 async def sync_calendar(db: AsyncSession = Depends(get_db)):
-    """Manually trigger Google Calendar sync."""
+    """Sync both calendars to internal DB."""
     from app.services.google_calendar import GoogleCalendarService
     svc = GoogleCalendarService(db)
     if not svc.is_configured():
@@ -51,15 +51,46 @@ async def sync_calendar(db: AsyncSession = Depends(get_db)):
     return {"status": "ok", **result}
 
 
-@router.get("/calendar/events", dependencies=[Depends(require_auth)])
-async def calendar_events(days: int = 7, db: AsyncSession = Depends(get_db)):
-    """Get upcoming Google Calendar events."""
+@router.get("/calendar/rafe", dependencies=[Depends(require_auth)])
+async def rafe_schedule(days: int = 7, db: AsyncSession = Depends(get_db)):
+    """Get Rafe's upcoming calendar events (read-only)."""
     from app.services.google_calendar import GoogleCalendarService
     svc = GoogleCalendarService(db)
     if not svc.is_configured():
         return {"status": "error", "error": "Google Calendar not configured", "events": []}
-    events = await svc.fetch_upcoming_events(days=days)
+    events = await svc.get_rafe_schedule(days=days)
     return {"status": "ok", "events": events}
+
+
+@router.get("/calendar/lobs", dependencies=[Depends(require_auth)])
+async def lobs_events(days: int = 7, db: AsyncSession = Depends(get_db)):
+    """Get Lobs's own calendar events."""
+    from app.services.google_calendar import GoogleCalendarService
+    svc = GoogleCalendarService(db)
+    if not svc.is_configured():
+        return {"status": "error", "error": "Google Calendar not configured", "events": []}
+    events = await svc.get_lobs_events(days=days)
+    return {"status": "ok", "events": events}
+
+
+@router.post("/calendar/events", dependencies=[Depends(require_auth)])
+async def create_calendar_event(
+    title: str, start: str, end: str = "", description: str = "",
+    invite_rafe: bool = True, db: AsyncSession = Depends(get_db),
+):
+    """Create an event on Lobs's calendar (optionally invite Rafe)."""
+    from app.services.google_calendar import GoogleCalendarService
+    from dateutil.parser import parse
+    svc = GoogleCalendarService(db)
+    if not svc.is_configured():
+        return {"status": "error", "error": "Google Calendar not configured"}
+    start_dt = parse(start)
+    end_dt = parse(end) if end else None
+    result = await svc.create_event(
+        title=title, start=start_dt, end=end_dt,
+        description=description, invite_rafe=invite_rafe,
+    )
+    return {"status": "ok" if result else "error", "event": result}
 
 
 @router.get("/email/unread", dependencies=[Depends(require_auth)])
