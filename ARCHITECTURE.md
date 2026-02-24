@@ -405,78 +405,73 @@ User sends message → POST /api/chat/sessions/:key/messages
 
 **Purpose:** Closed-loop learning where agents improve from task outcomes and human feedback
 
-**Status:** Design complete, implementation pending (see `docs/agent-learning-system.md`)
+**Status:** Partially live — prompt enhancement active, outcome tracking pending  
+**Design:** [docs/learning-loop-mvp-design.md](docs/learning-loop-mvp-design.md)  
+**Current state:** [docs/handoffs/learning-loop-mvp-status.md](docs/handoffs/learning-loop-mvp-status.md)
 
 **How it works:**
 
 ```
 Task Execution
       ↓
-Task Outcome tracked → TaskOutcome record created
+[Hook 1 ✅ LIVE] PromptEnhancer injects relevant learnings
       ↓
-Human Feedback → Update outcome with review state + feedback
+Worker runs with enhanced prompt
       ↓
-Lesson Extraction → Analyze patterns, create OutcomeLearnings
+[Hook 2 ❌ PENDING] OutcomeTracker records success/failure
       ↓
-Next Task → Query relevant learnings → Inject into prompt
+Human Feedback → POST /api/agent-learning/outcomes
       ↓
-Improved Performance → Measure success rate
+Daily Batch Job → Ranks failure patterns, queues suggestions
+      ↓
+Human Approves → PATCH /api/agent-learning/learnings/{id}
+      ↓
+Learning becomes active → injected on next matching task
 ```
 
 **Key components:**
 
-#### OutcomeTracker (`app/orchestrator/outcome_tracker.py`)
-- Creates `TaskOutcome` records after task completion
-- Captures success/failure, duration, retry count
-- Updates with human feedback (review state, feedback text, category)
-- Infers task category and complexity
-- Computes context hash for similarity matching
+#### PromptEnhancer (`app/orchestrator/prompt_enhancer.py`) ✅ Live
+- Queries active `OutcomeLearning` rows matching agent type + task category + complexity
+- Selects top N learnings by confidence (configurable via `MAX_LEARNINGS_PER_PROMPT`)
+- Prepends a "Lessons from Past Tasks" section to the prompt
+- 20% A/B control group (configurable via `LEARNING_CONTROL_GROUP_PCT`) receives no learnings
+- Fail-safe: any error returns the base prompt unchanged
 
-#### LessonExtractor (`app/orchestrator/lesson_extractor.py`)
-- Analyzes `TaskOutcome` records to detect patterns
-- Rule-based pattern matching (v1):
-  - "missing tests" feedback → "require_tests" learning
-  - "unclear naming" → "descriptive_names" learning
-  - "missing error handling" → "error_handling" learning
-- Creates `OutcomeLearning` records with prompt injection text
-- Updates learning confidence based on new evidence
+#### OutcomeTracker (`app/orchestrator/outcome_tracker.py`) ❌ Not yet built
+- Will write a `TaskOutcome` row after every worker completion
+- Captures: success/failure, agent type, context hash, applied learning IDs, A/B flag
+- Updates confidence on active `OutcomeLearning` rows used in this run
+- Must be fail-safe — errors are logged, never raised
 
-#### PromptEnhancer (`app/orchestrator/prompt_enhancer.py`)
-- Queries relevant learnings before task execution
-- Matches on task category, complexity, keywords
-- Selects top N learnings (sorted by confidence)
-- Injects into prompt (prefix/inline/structured styles)
-- Tracks which learnings were applied
+#### Agent Learning API (`app/routers/agent_learning.py`) ❌ Not yet built
+- `POST /api/agent-learning/outcomes` — submit or correct an outcome
+- `GET /api/agent-learning/summary` — top failure patterns, A/B lift, active learnings
+- `PATCH /api/agent-learning/learnings/{id}` — approve/reject a suggested learning
+- **Note:** prefix is `/api/agent-learning`, not `/api/learning` (that belongs to personal learning plans)
 
-#### StrategyManager (`app/orchestrator/strategy_manager.py`)
-- A/B testing framework for prompt strategies
-- Tracks performance per strategy variant
-- Auto-adjusts weights based on success rate
-- Converges to best-performing approach
+#### Learning Batch Job (`app/orchestrator/learning_batch.py`) ❌ Not yet built
+- Runs daily at 2am ET via engine timer
+- Aggregates failure patterns from last 14 days
+- Creates inactive `OutcomeLearning` candidates for patterns with ≥3 failures
+- Posts summary to ops brief; queues inbox suggestions for human approval
+- Auto-deactivates learnings where `confidence < 0.3` AND `failure_count >= 3`
 
 **Database tables:**
-- `task_outcomes` — Structured outcome records (success/failure, feedback, metrics)
-- `outcome_learnings` — Extracted lessons with prompt injection text
-- `prompt_strategies` — A/B testing variants and performance tracking
+- `task_outcomes` — Every agent run: success flag, reason tags, A/B group, applied learnings
+- `outcome_learnings` — Extracted lessons with confidence scores and injection text
 
-**Metrics tracked:**
-- Review acceptance rate (baseline vs current)
-- Learning confidence distribution
-- Application rate (% of tasks receiving learnings)
-- Strategy performance comparison
+**Configuration:**
 
-**Integration points:**
-- `worker.py` — Calls OutcomeTracker after task completion
-- `prompter.py` — Calls PromptEnhancer before task execution
-- `/api/tasks/{id}/feedback` — Endpoint for human review feedback
-- `/api/learning/stats` — Learning system metrics
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `LEARNING_ENABLED` | `true` | Master on/off switch |
+| `LEARNING_INJECTION_ENABLED` | `true` | Disable prompt injection only |
+| `LEARNING_CONTROL_GROUP_PCT` | `0.20` | Fraction of tasks with no injection |
+| `MAX_LEARNINGS_PER_PROMPT` | `3` | Max lessons injected per prompt |
+| `MIN_CONFIDENCE_THRESHOLD` | `0.3` | Inject only learnings above this score |
 
-**Rollout plan:**
-1. **Milestone 1:** Outcome tracking + memory injection for programmer (demonstrating measurable improvement)
-2. **Milestone 2:** Strategy A/B testing framework
-3. **Milestone 3:** Expand to researcher agent, advanced pattern detection
-
-**See:** `docs/agent-learning-system.md` for complete design
+**See:** [docs/learning-loop-mvp-design.md](docs/learning-loop-mvp-design.md) for full spec
 
 ---
 
@@ -745,78 +740,66 @@ Orchestrator → OpenClaw Gateway /tools/invoke
 
 ---
 
-## Agent Learning System (In Development)
+## Agent Learning System (MVP In Progress)
 
-**Status:** Design complete, implementation pending  
-**Design Doc:** [docs/agent-learning-system.md](docs/agent-learning-system.md)  
-**Handoffs:** [HANDOFFS.md](HANDOFFS.md)  
+**Status:** Hook 1 live; Hook 2 + API + batch job still to build  
+**MVP Design:** [docs/learning-loop-mvp-design.md](docs/learning-loop-mvp-design.md)  
+**Current state:** [docs/handoffs/learning-loop-mvp-status.md](docs/handoffs/learning-loop-mvp-status.md)
 
 ### Overview
 
-Closed-loop learning system where agents track task outcomes (success/failure, human feedback) and automatically improve their approaches over time.
+Closed-loop system where agents learn from task outcomes: each run is logged, failure patterns are ranked, and lessons are injected into future prompts. The 80/20 A/B split measures whether the learning actually helps.
+
+### Implementation State (as of 2026-02-24)
+
+| Component | File | Status |
+|-----------|------|--------|
+| `TaskOutcome` model | `app/models.py:846` | ✅ Done |
+| `OutcomeLearning` model | `app/models.py:866` | ✅ Done |
+| Database tables | migrations | ✅ Migrated |
+| `PromptEnhancer` | `app/orchestrator/prompt_enhancer.py` | ✅ Fully implemented and live |
+| Worker A/B split (20% control) | `app/orchestrator/worker.py:~234` | ✅ Live |
+| Worker Hook 1 (pre-spawn injection) | `app/orchestrator/worker.py:~241` | ✅ Live |
+| `OutcomeTracker` | `app/orchestrator/outcome_tracker.py` | ❌ Not built |
+| Worker Hook 2 (post-completion tracking) | `app/orchestrator/worker.py` | ❌ Not built |
+| Agent learning API | `app/routers/agent_learning.py` | ❌ Not built |
+| Daily batch job | `app/orchestrator/learning_batch.py` | ❌ Not built |
+| Engine timer (2am ET) | `app/orchestrator/engine.py` | ❌ Not built |
 
 ### Architecture
 
 ```
-Task Execution → Outcome Tracking → Lesson Extraction → Prompt Enhancement
-      ↑                                                          ↓
-      └──────────────────────────────────────────────────────────┘
-                    (feedback loop)
+Task Execution
+      ↓
+[✅ LIVE] PromptEnhancer injects active OutcomeLearnings into prompt
+      ↓
+Worker runs
+      ↓
+[❌ PENDING] OutcomeTracker.track_completion() writes TaskOutcome row
+      ↓
+Human or system submits feedback → POST /api/agent-learning/outcomes
+      ↓
+Daily batch at 2am ET → aggregates patterns, queues inbox suggestions
+      ↓
+Human approves → PATCH /api/agent-learning/learnings/{id} → is_active=True
+      ↓
+Next matching task receives the learning
 ```
 
-### Key Components
+### API Endpoints (pending)
 
-**1. Outcome Tracker** (`app/orchestrator/outcome_tracker.py`)
-- Captures structured task outcomes after completion
-- Records human feedback from code reviews, quality ratings
-- Classifies tasks by category (feature/bug/test/docs)
-- Stores outcomes in `task_outcomes` table
+- `POST /api/agent-learning/outcomes` — submit or correct an outcome
+- `GET /api/agent-learning/summary` — failure patterns, A/B lift, active learnings
+- `PATCH /api/agent-learning/learnings/{id}` — approve or reject a pending learning
 
-**2. Lesson Extractor** (`app/orchestrator/lesson_extractor.py`)
-- Analyzes outcome patterns using rule-based matching
-- Extracts actionable lessons from feedback (e.g., "missing tests" → "require tests")
-- Creates `outcome_learnings` records with prompt injections
-- Updates learning confidence based on reinforcement
-
-**3. Prompt Enhancer** (`app/orchestrator/prompt_enhancer.py`)
-- Queries relevant learnings before task execution
-- Selects top N learnings by confidence and relevance
-- Injects learnings into task prompts (prefix/inline/structured styles)
-- Tracks which learnings were applied to which tasks
-
-**4. Strategy Manager** (`app/orchestrator/strategy_manager.py`)
-- A/B testing framework for different prompt strategies
-- Weighted random strategy selection per task
-- Performance tracking and automatic weight adjustment
-- Converges to best-performing strategy over time
-
-### Data Model
-
-**New Tables:**
-- `task_outcomes` — Structured outcome records (success/failure, feedback, metrics)
-- `outcome_learnings` — Extracted lessons with prompt injections and confidence scores
-- `prompt_strategies` — A/B testing variants with performance tracking
-
-### Rollout Plan
-
-**Milestone 1:** Outcome tracking + memory injection for programmer (2-3 weeks)
-- Goal: >10% improvement in code review acceptance rate
-- Ship: Database schema, outcome tracking, rule-based extraction, prompt injection
-
-**Milestone 2:** Strategy A/B testing framework (+1 week)
-- Goal: Identify best prompt enhancement strategy
-- Ship: Strategy manager, weighted selection, performance comparison
-
-**Milestone 3:** Expand to researcher agent (+1-2 weeks)
-- Goal: Generalize learning system beyond programmer
-- Ship: Researcher patterns, cross-agent learnings
+**Important:** The API prefix is `/api/agent-learning`, not `/api/learning`. The `/api/learning` prefix belongs to personal learning plans (`app/routers/learning.py`), a separate system.
 
 ### Design Principles
 
-- **Simplicity first** — Rule-based pattern matching, not ML
-- **Incremental rollout** — One agent, one metric, one feedback loop
-- **Explicit > implicit** — Visible, auditable, debuggable learnings
-- **Reversible decisions** — Learnings can be deactivated, prompts can revert
+- **Simplicity first** — Rule-based pattern extraction, not ML
+- **Fail-safe everywhere** — Any learning error logs and continues; no worker crashes
+- **Human in the loop** — Learnings require human approval before activation
+- **Measurable** — A/B control group provides a baseline for lift calculation
 
 ### Success Metrics
 
