@@ -143,6 +143,15 @@ Why this week is the strongest demo window:
 - [ ] **SS-07** Product narrative asset folder (`docs/product/`)
 - [ ] Final summary slide with before/after metrics
 
+**Suggested export names:**
+- `agent-built-week-SS-01-routing.png`
+- `agent-built-week-SS-02-orchestrator.png`
+- `agent-built-week-SS-03-reliability.png`
+- `agent-built-week-SS-04-docs-before-after.png`
+- `agent-built-week-SS-05-completion-flow.png`
+- `agent-built-week-SS-06-ci-schema-metrics.png`
+- `agent-built-week-SS-07-product-assets.png`
+
 ---
 
 ## 8) Publishing guardrails
