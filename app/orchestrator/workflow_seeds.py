@@ -89,190 +89,87 @@ DEFAULT_WORKFLOWS = [
         "trigger": {"type": "task_match", "agent_types": ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]},
         "is_active": True,
         "nodes": [
+            # Route to the correct agent-specific spawn node.
+            # Each spawn_agent node delegates to WorkerManager which handles:
+            # - Model selection (ModelChooser with fallback chain + provider health)
+            # - Prompt building (Prompter with learning enhancement)
+            # - Worker tracking (active_workers, project_locks)
+            # - On completion: task status, agent tracker, circuit breaker,
+            #   git auto-commit, failure escalation, provider health recording
             {
                 "id": "route_by_agent",
                 "type": "branch",
                 "config": {
                     "conditions": [
-                        {"match": "task.agent == programmer", "goto": "run_code_task"},
-                        {"match": "task.agent == researcher", "goto": "run_research_task"},
-                        {"match": "task.agent == writer", "goto": "run_writer_task"},
-                        {"match": "task.agent == architect", "goto": "run_architect_task"},
-                        {"match": "task.agent == reviewer", "goto": "run_reviewer_task"},
-                        {"match": "task.agent == inbox-responder", "goto": "run_inbox_task"},
+                        {"match": "task.agent == programmer", "goto": "spawn_programmer"},
+                        {"match": "task.agent == researcher", "goto": "spawn_researcher"},
+                        {"match": "task.agent == writer", "goto": "spawn_writer"},
+                        {"match": "task.agent == architect", "goto": "spawn_architect"},
+                        {"match": "task.agent == reviewer", "goto": "spawn_reviewer"},
+                        {"match": "task.agent == inbox-responder", "goto": "spawn_inbox"},
                     ],
-                    "default": "run_generic_task",
+                    "default": "spawn_generic",
                 },
             },
-            # ── Programmer path ──────────────────────────────────────
+            # ── Agent spawn nodes ────────────────────────────────────
+            # Each delegates to WorkerManager.spawn_worker() which builds
+            # the full prompt, selects the model, and handles completion.
             {
-                "id": "run_code_task",
+                "id": "spawn_programmer",
                 "type": "spawn_agent",
-                "config": {
-                    "agent_type": "programmer",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "timeout_seconds": 900,
-                },
-                "on_success": "run_tests",
+                "config": {"agent_type": "programmer"},
+                "on_success": "done",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "spawn_researcher",
+                "type": "spawn_agent",
+                "config": {"agent_type": "researcher"},
+                "on_success": "done",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "spawn_writer",
+                "type": "spawn_agent",
+                "config": {"agent_type": "writer"},
+                "on_success": "done",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "spawn_architect",
+                "type": "spawn_agent",
+                "config": {"agent_type": "architect", "model_tier": "strong"},
+                "on_success": "done",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "spawn_reviewer",
+                "type": "spawn_agent",
+                "config": {"agent_type": "reviewer"},
+                "on_success": "done",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "spawn_inbox",
+                "type": "spawn_agent",
+                "config": {"agent_type": "inbox-responder", "model_tier": "medium"},
+                "on_success": "done",
                 "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
             },
             {
-                "id": "run_tests",
-                "type": "tool_call",
-                "config": {
-                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1",
-                    "timeout_seconds": 300,
-                },
-                "on_success": "run_lint",
-                "on_failure": {"retry": 0, "fallback": "fix_tests", "escalate_after": 3, "abort_on": ["timeout"]},
-            },
-            {
-                "id": "fix_tests",
-                "type": "send_to_session",
-                "config": {
-                    "session_ref": "run_code_task.session_key",
-                    "message_template": "Tests failed. Fix these errors:\n\nSTDOUT:\n{run_tests.stdout}\n\nSTDERR:\n{run_tests.stderr}",
-                },
-                "on_success": "run_tests_retry",
-                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
-            },
-            {
-                "id": "run_tests_retry",
-                "type": "tool_call",
-                "config": {
-                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1",
-                    "timeout_seconds": 300,
-                },
-                "on_success": "run_lint",
-                "on_failure": {"fallback": "escalate_test_failure", "abort_on": ["timeout"]},
-            },
-            {
-                "id": "escalate_test_failure",
-                "type": "gate",
-                "config": {
-                    "prompt": "Tests failed after fix attempt for task: {task.title}. Manual review needed.",
-                    "timeout_hours": 24,
-                },
-                "on_success": "cleanup",
-            },
-            {
-                "id": "run_lint",
-                "type": "tool_call",
-                "config": {
-                    "command": "cd {project.repo_path} && ruff check . 2>&1",
-                    "timeout_seconds": 120,
-                },
-                "on_success": "commit",
-                "on_failure": {"fallback": "fix_lint", "escalate_after": 3, "abort_on": ["timeout"]},
-            },
-            {
-                "id": "fix_lint",
-                "type": "send_to_session",
-                "config": {
-                    "session_ref": "run_code_task.session_key",
-                    "message_template": "Lint errors found. Fix them:\n\n{run_lint.stdout}",
-                },
-                "on_success": "run_lint",
-                "on_failure": {"retry": 0},
-            },
-            {
-                "id": "commit",
-                "type": "tool_call",
-                "config": {
-                    "command": "cd {project.repo_path} && git add -A && git diff --cached --quiet || git commit -m 'agent(programmer): {task.title}' --author 'lobs-programmer <thelobsbot@gmail.com>'",
-                    "timeout_seconds": 30,
-                },
-                "on_success": "notify_complete",
-                "on_failure": {"retry": 1},
-            },
-            # ── Researcher path ──────────────────────────────────────
-            {
-                "id": "run_research_task",
+                "id": "spawn_generic",
                 "type": "spawn_agent",
-                "config": {
-                    "agent_type": "researcher",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "timeout_seconds": 900,
-                },
-                "on_success": "notify_complete",
+                "config": {"agent_type": "programmer"},
+                "on_success": "done",
                 "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
             },
-            # ── Writer path ──────────────────────────────────────────
+            # ── Terminal ─────────────────────────────────────────────
+            # WorkerManager already handled task completion, git commit,
+            # escalation, etc. We just close the workflow run.
             {
-                "id": "run_writer_task",
-                "type": "spawn_agent",
-                "config": {
-                    "agent_type": "writer",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "timeout_seconds": 900,
-                },
-                "on_success": "notify_complete",
-                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
-            },
-            # ── Architect path ───────────────────────────────────────
-            {
-                "id": "run_architect_task",
-                "type": "spawn_agent",
-                "config": {
-                    "agent_type": "architect",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "model_tier": "strong",
-                    "timeout_seconds": 1200,
-                },
-                "on_success": "notify_complete",
-                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
-            },
-            # ── Reviewer path ────────────────────────────────────────
-            {
-                "id": "run_reviewer_task",
-                "type": "spawn_agent",
-                "config": {
-                    "agent_type": "reviewer",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "timeout_seconds": 600,
-                },
-                "on_success": "notify_complete",
-                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
-            },
-            # ── Inbox responder path ─────────────────────────────────
-            {
-                "id": "run_inbox_task",
-                "type": "spawn_agent",
-                "config": {
-                    "agent_type": "inbox-responder",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "model_tier": "medium",
-                    "timeout_seconds": 300,
-                },
-                "on_success": "notify_complete",
-                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
-            },
-            # ── Generic fallback ─────────────────────────────────────
-            {
-                "id": "run_generic_task",
-                "type": "spawn_agent",
-                "config": {
-                    "agent_type": "programmer",
-                    "prompt_template": "{task.title}\n\n{task.notes}",
-                    "timeout_seconds": 900,
-                },
-                "on_success": "notify_complete",
-                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
-            },
-            # ── Shared terminal nodes ────────────────────────────────
-            {
-                "id": "notify_complete",
-                "type": "notify",
-                "config": {
-                    "channel": "internal",
-                    "message_template": "Task completed: {task.title} (agent: {task.agent})",
-                },
-                "on_success": "cleanup",
-            },
-            {
-                "id": "cleanup",
+                "id": "done",
                 "type": "cleanup",
-                "config": {"delete_session": True},
+                "config": {"delete_session": False},
             },
         ],
         "edges": [],

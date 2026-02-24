@@ -130,74 +130,73 @@ class NodeHandlers:
     # ── Node Type Handlers ───────────────────────────────────────────
 
     async def _exec_spawn_agent(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Spawn an OpenClaw agent session.
+        """Spawn an agent via the WorkerManager, which handles:
+        - Model selection (ModelChooser with fallback chain)
+        - Prompt building (Prompter with learning enhancement)
+        - Worker tracking (active_workers, project_locks)
+        - Completion handling (task status, agent tracker, circuit breaker,
+          git auto-commit, escalation, provider health)
 
         Config:
             agent_type: str — agent template id (programmer, researcher, writer, etc.)
-            prompt_template: str — Jinja-lite template rendered from run context
+            prompt_template: str — optional override template (if empty, WorkerManager builds prompt)
             model_tier: str — optional tier name (micro/small/medium/standard/strong)
-                         or explicit model id (e.g. "sonnet", "anthropic/claude-sonnet-4-5")
             model: str — explicit model override (takes priority over model_tier)
             timeout_seconds: int — max session runtime (default 900)
         """
         agent_type = config.get("agent_type", "programmer")
-        prompt_template = config.get("prompt_template", "")
         model_tier = config.get("model_tier")
-        prompt = _render_template(prompt_template, context)
 
-        if not prompt.strip():
-            return NodeResult(status="failed", error="Empty prompt after template rendering")
+        task_ctx = context.get("task", {})
+        if not isinstance(task_ctx, dict):
+            return NodeResult(status="failed", error="No task in workflow context")
 
-        # Model selection: explicit model > model_tier > task model_tier > default
-        label = f"wf-{run.id[:8]}"
-        model: str | None = config.get("model")
-        if not model and model_tier:
-            model = await self._resolve_model_tier(model_tier, agent_type, context)
-        if not model:
-            # Check if the task itself has a model_tier
-            task_ctx = context.get("task", {})
-            task_tier = task_ctx.get("model_tier") if isinstance(task_ctx, dict) else None
-            if task_tier:
-                model = await self._resolve_model_tier(task_tier, agent_type, context)
-        if not model:
-            model = "sonnet"  # Default
+        task_id = task_ctx.get("id")
+        project_id = task_ctx.get("project_id")
+        if not task_id or not project_id:
+            return NodeResult(status="failed", error="Task missing id or project_id")
+
+        # Apply model_tier to the task dict so ModelChooser picks it up
+        task_for_spawn = dict(task_ctx)
+        if model_tier:
+            task_for_spawn["model_tier"] = model_tier
+        elif config.get("model"):
+            # Explicit model — store so worker can use it
+            task_for_spawn["model_tier"] = config["model"]
+
+        if not self.worker_manager:
+            return NodeResult(status="failed", error="No worker_manager available — cannot spawn agent")
 
         try:
-            async with aiohttp.ClientSession() as session:
-                parent_key = f"{GATEWAY_SESSION_KEY}-wf-spawn-{uuid.uuid4().hex[:6]}"
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_spawn",
-                        "sessionKey": parent_key,
-                        "args": {
-                            "task": prompt,
-                            "agentId": agent_type,
-                            "model": model,
-                            "runTimeoutSeconds": config.get("timeout_seconds", 900),
-                            "cleanup": "keep",
-                            "label": label,
-                        },
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30),
+            spawned = await self.worker_manager.spawn_worker(
+                task=task_for_spawn,
+                project_id=project_id,
+                agent_type=agent_type,
+            )
+
+            if not spawned:
+                # Queued due to capacity/locks — not a hard failure
+                return NodeResult(
+                    status="running",
+                    output={"queued": True, "reason": "capacity or project lock"},
                 )
-                data = await resp.json()
 
-            if not data.get("ok"):
-                return NodeResult(status="failed", error=f"Spawn failed: {data}", error_type="spawn_error")
-
-            result = data.get("result", {})
-            details = result.get("details", result)
-            if details.get("status") != "accepted":
-                return NodeResult(status="failed", error=f"Spawn not accepted: {details}", error_type="spawn_error")
-
-            child_key = details["childSessionKey"]
-            run_id = details["runId"]
+            # Find the worker info that was just created
+            child_key = None
+            run_id = None
+            for wid, winfo in self.worker_manager.active_workers.items():
+                if winfo.task_id == task_id:
+                    child_key = winfo.child_session_key
+                    run_id = winfo.run_id
+                    break
 
             return NodeResult(
                 status="running",
-                output={"runId": run_id, "childSessionKey": child_key},
+                output={
+                    "runId": run_id or "",
+                    "childSessionKey": child_key or "",
+                    "spawned_via": "worker_manager",
+                },
                 session_key=child_key,
             )
 
@@ -205,76 +204,66 @@ class NodeHandlers:
             return NodeResult(status="failed", error=str(e), error_type="spawn_error")
 
     async def _check_spawn_agent(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Check if a spawned agent session has completed."""
+        """Check if a spawned agent has completed.
+
+        Since we now spawn via worker_manager, it handles all completion
+        processing (task status, git commit, escalation, etc.) automatically.
+        We just need to check if the worker is still active.
+        """
         node_id = node_def["id"]
         ns = (run.node_states or {}).get(node_id, {})
         output = ns.get("output", {})
-        session_key = output.get("childSessionKey")
 
-        if not session_key:
-            return NodeResult(status="failed", error="No session key to check")
+        # If queued (capacity/lock), just wait
+        if output.get("queued"):
+            return None  # Still waiting
 
-        try:
-            # Check via sessions_history
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_history",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-check-{uuid.uuid4().hex[:6]}",
-                        "args": {"sessionKey": session_key, "limit": 3, "includeTools": False},
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-                data = await resp.json()
+        task_id = (run.context or {}).get("task", {}).get("id")
+        if not task_id:
+            return NodeResult(status="failed", error="No task_id in run context")
 
-            if not data.get("ok"):
-                # Session might be gone (completed and cleaned up)
-                return NodeResult(status="completed", output={"session_result": "session not found"})
+        if not self.worker_manager:
+            return NodeResult(status="failed", error="No worker_manager — can't check status")
 
-            result = data.get("result", {})
-            details = result.get("details", result)
-            messages = details.get("messages", [])
+        # Check if the worker is still active
+        worker_active = any(
+            w.task_id == task_id
+            for w in self.worker_manager.active_workers.values()
+        )
 
-            # Check for assistant responses
-            for msg in reversed(messages):
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = "\n".join(b.get("text", "") for b in content if b.get("type") == "text")
-                    if content:
-                        return NodeResult(
-                            status="completed",
-                            output={"session_result": content[:8000], "session_key": session_key},
-                        )
+        if worker_active:
+            return None  # Still running — worker_manager handles everything
 
-            # Also check if session is still in sessions_list
-            async with aiohttp.ClientSession() as session2:
-                resp2 = await session2.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_list",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-list-{uuid.uuid4().hex[:6]}",
-                        "args": {"limit": 50, "messageLimit": 0},
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-                list_data = await resp2.json()
+        # Worker is no longer active — it completed (success or failure).
+        # worker_manager._handle_worker_completion already handled:
+        # - Task status update (completed/failed)
+        # - Agent tracker update
+        # - Circuit breaker recording
+        # - Git auto-commit and push
+        # - Failure escalation
+        # - Provider health recording
 
-            if list_data.get("ok"):
-                sessions = list_data.get("result", {}).get("details", {}).get("sessions", [])
-                found = any(s.get("key") == session_key for s in sessions)
-                if not found:
-                    # Session gone — treat as completed
-                    return NodeResult(status="completed", output={"session_result": "(session ended)"})
-
-            return None  # Still running
-
-        except Exception as e:
-            logger.debug("[NODE] Check spawn_agent error: %s", e)
-            return None
+        # Check the task's final state to determine our result
+        from app.models import Task
+        db_task = await self.db.get(Task, task_id)
+        if db_task and db_task.work_state == "completed":
+            return NodeResult(
+                status="completed",
+                output={"task_status": "completed", "task_id": task_id},
+            )
+        elif db_task and db_task.work_state == "blocked":
+            return NodeResult(
+                status="failed",
+                output={"task_status": "blocked", "task_id": task_id},
+                error="Task blocked after worker failure",
+            )
+        else:
+            # Task reverted to not_started or other state — worker failed
+            return NodeResult(
+                status="failed",
+                output={"task_status": db_task.work_state if db_task else "unknown", "task_id": task_id},
+                error=f"Worker completed but task state is {db_task.work_state if db_task else 'unknown'}",
+            )
 
     async def _exec_send_to_session(self, config: dict, context: dict, run: Any) -> NodeResult:
         """Send a message to an existing session (for fix loops)."""
