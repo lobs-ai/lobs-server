@@ -432,6 +432,8 @@ python -m pytest tests/test_agent_learning.py -v
 | [learning-loop-mvp-design.md](../learning-loop-mvp-design.md) | Full spec with all design decisions |
 | [learning-loop-mvp-status.md](learning-loop-mvp-status.md) | Detailed code snippets for each piece |
 | [learning-loop-mvp-handoff.json](learning-loop-mvp-handoff.json) | Acceptance criteria in JSON |
+| [learning-loop-mvp-test-spec.md](learning-loop-mvp-test-spec.md) | Detailed test setup + assertions for all 12 tests |
+| [LEARNING-DOCS-MAP.md](LEARNING-DOCS-MAP.md) | Which docs are current vs stale (read if confused) |
 | [PHASE_1.3_RESCUE_FINDINGS.md](../PHASE_1.3_RESCUE_FINDINGS.md) | Why previous attempts failed (avoid repeating) |
 
 ---

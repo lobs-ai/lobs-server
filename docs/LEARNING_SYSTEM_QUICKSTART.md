@@ -177,3 +177,5 @@ The control group (20% of runs) receives no learning injection. This is controll
 - [Implementation Guide](handoffs/learning-loop-mvp-implementation-guide.md) — step-by-step build instructions
 - [Current Status](handoffs/learning-loop-mvp-status.md) — what's built vs. missing
 - [Handoff JSON](handoffs/learning-loop-mvp-handoff.json) — acceptance criteria
+- [Test Specification](handoffs/learning-loop-mvp-test-spec.md) — detailed test setup + assertions
+- [Docs Map](handoffs/LEARNING-DOCS-MAP.md) — which docs are current vs stale
