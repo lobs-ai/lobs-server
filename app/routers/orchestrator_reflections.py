@@ -503,108 +503,199 @@ async def list_reflections(
     status: str | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """List reflection cycles with their associated initiatives.
+    """List reflection cycles grouped by batch (window_start).
     
-    Returns reflections ordered by created_at desc, with pagination support.
-    Each reflection includes parsed result data and linked initiatives with their
-    current decision status and feedback.
+    Returns batch-level reflections with aggregated data from all agents in that batch.
+    Mission Control expects this format for the Intelligence dashboard.
     """
+    from sqlalchemy import func as sql_func
+    from collections import defaultdict
     
-    # Build query
-    query = select(AgentReflection).order_by(AgentReflection.created_at.desc())
+    # Fetch all reflections
+    query = select(AgentReflection).order_by(AgentReflection.window_start.desc(), AgentReflection.created_at.desc())
     
-    # Apply filters
     if agent_type:
         query = query.where(AgentReflection.agent_type == agent_type)
     if status:
         query = query.where(AgentReflection.status == status)
     
-    # Apply pagination
-    query = query.limit(max(1, min(1000, int(limit)))).offset(max(0, int(offset)))
-    
     result = await db.execute(query)
-    reflections = result.scalars().all()
+    all_reflections = result.scalars().all()
     
-    # Fetch linked initiatives for all reflections in one query
-    reflection_ids = [r.id for r in reflections]
-    initiatives_result = await db.execute(
-        select(AgentInitiative).where(
-            AgentInitiative.source_reflection_id.in_(reflection_ids)
-        )
-    )
-    initiatives_by_reflection = {}
-    for initiative in initiatives_result.scalars().all():
-        if initiative.source_reflection_id not in initiatives_by_reflection:
-            initiatives_by_reflection[initiative.source_reflection_id] = []
-        initiatives_by_reflection[initiative.source_reflection_id].append(initiative)
+    # Group by window_start (batch ID)
+    batches = defaultdict(list)
+    for refl in all_reflections:
+        batch_key = refl.window_start.isoformat() if refl.window_start else "unknown"
+        batches[batch_key].append(refl)
     
-    # Build response
+    # Sort batch keys by window_start descending
+    sorted_batches = sorted(batches.items(), key=lambda x: x[0], reverse=True)
+    
+    # Apply pagination on batches
+    paginated_batches = sorted_batches[offset:offset + limit]
+    
+    # Build batch-level response
     items = []
-    for reflection in reflections:
-        # Extract parsed result data from JSON fields
-        inefficiencies = reflection.inefficiencies if isinstance(reflection.inefficiencies, list) else []
-        missed_opportunities = reflection.missed_opportunities if isinstance(reflection.missed_opportunities, list) else []
-        system_risks = reflection.system_risks if isinstance(reflection.system_risks, list) else []
-        identity_adjustments = reflection.identity_adjustments if isinstance(reflection.identity_adjustments, list) else []
+    for batch_key, batch_reflections in paginated_batches:
+        # Use first reflection for base fields
+        first_refl = batch_reflections[0]
         
-        # Extract proposed_initiatives from result JSON if present
-        proposed_initiatives = []
-        if isinstance(reflection.result, dict):
-            proposed_initiatives = reflection.result.get("proposed_initiatives", [])
+        # Aggregate agents
+        agents = [r.agent_type for r in batch_reflections if r.agent_type]
         
-        # Get linked initiatives
-        linked_initiatives = []
-        for initiative in initiatives_by_reflection.get(reflection.id, []):
-            linked_initiatives.append({
-                "id": initiative.id,
-                "title": initiative.title,
-                "description": initiative.description,
-                "category": initiative.category,
-                "risk_tier": initiative.risk_tier,
-                "status": initiative.status,
-                "decision_summary": initiative.decision_summary,
-                "learning_feedback": initiative.learning_feedback,
-                "task_id": initiative.task_id,
-                "selected_agent": initiative.selected_agent,
-                "selected_project_id": initiative.selected_project_id,
-                "created_at": initiative.created_at.isoformat() if initiative.created_at else None,
-            })
+        # Merge arrays from all reflections in the batch
+        all_inefficiencies = []
+        all_missed_opportunities = []
+        all_system_risks = []
+        all_identity_adjustments = []
+        all_proposed_initiatives = []
+        
+        for refl in batch_reflections:
+            if isinstance(refl.inefficiencies, list):
+                all_inefficiencies.extend(refl.inefficiencies)
+            if isinstance(refl.missed_opportunities, list):
+                all_missed_opportunities.extend(refl.missed_opportunities)
+            if isinstance(refl.system_risks, list):
+                all_system_risks.extend(refl.system_risks)
+            if isinstance(refl.identity_adjustments, list):
+                all_identity_adjustments.extend(refl.identity_adjustments)
+            if isinstance(refl.result, dict):
+                all_proposed_initiatives.extend(refl.result.get("proposed_initiatives", []))
+        
+        # Check if all reflections in batch are completed
+        all_completed = all(r.status == "completed" for r in batch_reflections)
+        batch_status = "completed" if all_completed else "pending"
+        
+        # Latest completion time
+        completed_times = [r.completed_at for r in batch_reflections if r.completed_at]
+        latest_completed = max(completed_times) if completed_times else None
         
         items.append({
-            "id": reflection.id,
-            "agent_type": reflection.agent_type,
-            "reflection_type": reflection.reflection_type,
-            "status": reflection.status,
-            "window_start": reflection.window_start.isoformat() if reflection.window_start else None,
-            "window_end": reflection.window_end.isoformat() if reflection.window_end else None,
-            "created_at": reflection.created_at.isoformat() if reflection.created_at else None,
-            "completed_at": reflection.completed_at.isoformat() if reflection.completed_at else None,
-            "inefficiencies": inefficiencies,
-            "missed_opportunities": missed_opportunities,
-            "system_risks": system_risks,
-            "identity_adjustments": identity_adjustments,
-            "proposed_initiatives": proposed_initiatives,
-            "linked_initiatives": linked_initiatives,
+            "id": first_refl.id,
+            "batch_id": batch_key,
+            "agents": agents,
+            "status": batch_status,
+            "started_at": first_refl.window_start.isoformat() if first_refl.window_start else None,
+            "completed_at": latest_completed.isoformat() if latest_completed else None,
+            "inefficiencies": all_inefficiencies,
+            "missed_opportunities": all_missed_opportunities,
+            "system_risks": all_system_risks,
+            "identity_adjustments": all_identity_adjustments,
+            "proposed_initiatives": all_proposed_initiatives,
+            "error_message": None,
         })
-    
-    # Get total count for pagination
-    count_query = select(AgentReflection)
-    if agent_type:
-        count_query = count_query.where(AgentReflection.agent_type == agent_type)
-    if status:
-        count_query = count_query.where(AgentReflection.status == status)
-    
-    from sqlalchemy import func as sql_func
-    total_result = await db.execute(
-        select(sql_func.count()).select_from(count_query.subquery())
-    )
-    total = total_result.scalar_one()
     
     return {
         "reflections": items,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
+        "total": len(batches),
+    }
+
+
+@router.get("/intelligence/sweeps")
+async def list_sweeps(
+    limit: int = 50,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """List system sweeps with decision counts."""
+    
+    query = select(SystemSweep).order_by(SystemSweep.created_at.desc()).limit(max(1, min(1000, int(limit))))
+    result = await db.execute(query)
+    sweeps = result.scalars().all()
+    
+    items = []
+    for sweep in sweeps:
+        # Extract counts from summary JSON
+        summary = sweep.summary if isinstance(sweep.summary, dict) else {}
+        
+        # Handle different summary formats
+        # For initiative_sweep: "proposed", "approved", "rejected", "deferred"
+        # For other sweeps: may have different fields
+        total_proposed = summary.get("total_proposed") or summary.get("proposed", 0)
+        approved_count = summary.get("approved", 0)
+        rejected_count = summary.get("rejected", 0)
+        deferred_count = summary.get("deferred", 0)
+        
+        items.append({
+            "id": sweep.id,
+            "sweep_type": sweep.sweep_type,
+            "status": sweep.status,
+            "summary": summary,
+            "total_proposed": total_proposed,
+            "approved_count": approved_count,
+            "rejected_count": rejected_count,
+            "deferred_count": deferred_count,
+            "created_at": sweep.created_at.isoformat() if sweep.created_at else None,
+            "completed_at": sweep.completed_at.isoformat() if sweep.completed_at else None,
+        })
+    
+    return {"sweeps": items}
+
+
+@router.get("/intelligence/sweeps/{sweep_id}")
+async def get_sweep_detail(
+    sweep_id: str,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Get sweep details with associated decisions."""
+    from app.models import InitiativeDecisionRecord
+    
+    sweep = await db.get(SystemSweep, sweep_id)
+    if sweep is None:
+        raise HTTPException(status_code=404, detail="Sweep not found")
+    
+    # Fetch initiative decisions made during this sweep
+    decisions_result = await db.execute(
+        select(InitiativeDecisionRecord)
+        .where(InitiativeDecisionRecord.sweep_id == sweep_id)
+        .order_by(InitiativeDecisionRecord.created_at.asc())
+    )
+    decisions = decisions_result.scalars().all()
+    
+    # Fetch the full initiatives for context
+    initiative_ids = [d.initiative_id for d in decisions]
+    if initiative_ids:
+        initiatives_result = await db.execute(
+            select(AgentInitiative).where(AgentInitiative.id.in_(initiative_ids))
+        )
+        initiatives_by_id = {i.id: i for i in initiatives_result.scalars().all()}
+    else:
+        initiatives_by_id = {}
+    
+    # Build decisions list with initiative context
+    decision_items = []
+    for decision in decisions:
+        initiative = initiatives_by_id.get(decision.initiative_id)
+        decision_items.append({
+            "id": decision.id,
+            "initiative_id": decision.initiative_id,
+            "initiative_title": initiative.title if initiative else None,
+            "decision": decision.decision,
+            "decided_by": decision.decided_by,
+            "decision_summary": decision.decision_summary,
+            "task_id": decision.task_id,
+            "created_at": decision.created_at.isoformat() if decision.created_at else None,
+        })
+    
+    # Extract summary
+    summary = sweep.summary if isinstance(sweep.summary, dict) else {}
+    
+    # Handle different summary formats
+    total_proposed = summary.get("total_proposed") or summary.get("proposed", 0)
+    
+    return {
+        "sweep": {
+            "id": sweep.id,
+            "sweep_type": sweep.sweep_type,
+            "status": sweep.status,
+            "summary": summary,
+            "total_proposed": total_proposed,
+            "approved_count": summary.get("approved", 0),
+            "rejected_count": summary.get("rejected", 0),
+            "deferred_count": summary.get("deferred", 0),
+            "created_at": sweep.created_at.isoformat() if sweep.created_at else None,
+            "completed_at": sweep.completed_at.isoformat() if sweep.completed_at else None,
+        },
+        "decisions": decision_items,
     }
 
 
