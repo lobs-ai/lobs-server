@@ -458,6 +458,10 @@ class ScheduledEvent(Base):
     next_fire_at = Column(DateTime)  # computed from recurrence
     fire_count = Column(Integer, default=0)
     
+    # External sync
+    external_id = Column(String)  # e.g. Google Calendar event ID
+    external_source = Column(String)  # e.g. "google_calendar", "outlook"
+    
     # Metadata
     created_at = Column(DateTime, default=func.now(), nullable=False)
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)

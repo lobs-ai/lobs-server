@@ -694,4 +694,20 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Agent assignment
     "assignment.assign_agent": _pcall_assign_agent,
     "assignment.scan_unassigned": _pcall_scan_unassigned,
+    # Calendar
+    "calendar.sync_google": lambda db, wm, ctx, **kw: _pcall_integration("sync_google_calendar", db, wm, ctx, **kw),
+    "calendar.check_upcoming": lambda db, wm, ctx, **kw: _pcall_integration("check_upcoming_events", db, wm, ctx, **kw),
+    # Email
+    "email.check_inbox": lambda db, wm, ctx, **kw: _pcall_integration("check_email_inbox", db, wm, ctx, **kw),
+    "email.send": lambda db, wm, ctx, **kw: _pcall_integration("send_email", db, wm, ctx, **kw),
+    # Work Tracker
+    "tracker.check_deadlines": lambda db, wm, ctx, **kw: _pcall_integration("check_deadlines", db, wm, ctx, **kw),
+    "tracker.daily_summary": lambda db, wm, ctx, **kw: _pcall_integration("daily_work_summary", db, wm, ctx, **kw),
 }
+
+
+async def _pcall_integration(func_name: str, db, worker_manager, context, **kw):
+    """Generic dispatcher for integration callables."""
+    import app.orchestrator.workflow_integrations as integrations
+    fn = getattr(integrations, func_name)
+    return await fn(db, worker_manager, context, **kw)

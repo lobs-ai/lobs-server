@@ -395,6 +395,170 @@ DEFAULT_WORKFLOWS = [
         "edges": [],
         "metadata": {"author": "lobs", "category": "research"},
     },
+    # ══════════════════════════════════════════════════════════════════
+    # CALENDAR SYNC — Google Calendar → internal calendar
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "calendar-sync",
+        "description": "Sync Google Calendar events to internal calendar and check upcoming events for alerts.",
+        "trigger": {"type": "schedule", "cron": "*/15 * * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "sync",
+                "type": "python_call",
+                "config": {"callable": "calendar.sync_google"},
+                "on_success": "check_upcoming",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_upcoming",
+                "type": "python_call",
+                "config": {"callable": "calendar.check_upcoming"},
+                "on_success": "check_alerts",
+                "on_failure": {"retry": 0},
+            },
+            {
+                "id": "check_alerts",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "check_upcoming.alerts > 0", "goto": "notify_alerts"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify_alerts",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "📅 {check_upcoming.alerts} upcoming calendar alerts in next 24h",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "integration", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # EMAIL CHECK — Monitor inbox for important emails
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "email-check",
+        "description": "Check email inbox for unread messages and create inbox items for important ones.",
+        "trigger": {"type": "schedule", "cron": "*/30 * * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "check",
+                "type": "python_call",
+                "config": {"callable": "email.check_inbox"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "check.actioned > 0", "goto": "notify"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "📧 {check.actioned} new emails added to inbox",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "integration", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # WORK TRACKER — Deadline monitoring + daily summaries
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "tracker-deadlines",
+        "description": "Check approaching deadlines every 30 minutes and send reminders.",
+        "trigger": {"type": "schedule", "cron": "*/30 * * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "check",
+                "type": "python_call",
+                "config": {"callable": "tracker.check_deadlines"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "check.notified > 0", "goto": "notify"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "⏰ {check.notified} deadline reminders sent",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "tracker", "system": True},
+    },
+    {
+        "name": "tracker-daily-summary",
+        "description": "Generate daily work summary from tracker entries at 7am ET.",
+        "trigger": {"type": "schedule", "cron": "0 7 * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "summary",
+                "type": "python_call",
+                "config": {"callable": "tracker.daily_summary"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "summary.summary_created == true", "goto": "notify"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "📊 Daily summary: {summary.total_minutes}min across {summary.sessions} sessions, {summary.deadlines_today} deadlines today",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "tracker", "system": True},
+    },
     # ── System Workflows (recurring/event-driven) ────────────────────
     {
         "name": "reflection-cycle",
