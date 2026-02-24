@@ -32,16 +32,18 @@
 }
 ```
 
-## Handoff 3: 8am Engine Trigger via RoutineRunner
+## Handoff 3: 8am Engine Trigger — Direct Timer Pattern
+
+> **NOTE:** Use the direct engine timer pattern (same as memory maintenance), NOT RoutineRunner. See design doc §3 for the tradeoff decision.
 
 ```json
 {
   "to": "programmer",
   "initiative": "daily-ops-brief",
-  "title": "Wire daily brief into RoutineRunner as brief:daily_ops hook",
-  "context": "Register a RoutineRegistry entry for hook_key='brief:daily_ops' with cron schedule '0 8 * * *' (8am ET). Implement the hook function that calls BriefService.generate() + formats + posts to chat (same path as send_to_chat=true). Register the hook in the engine's RoutineRunner initialization. If no RoutineRegistry row exists, create it on startup (or via migration seed). See docs/daily-ops-brief-design.md Task 3 and app/orchestrator/routine_runner.py for the existing hook pattern.",
-  "acceptance": "1) Brief fires once per day at 8am ET via RoutineRunner. 2) Does not re-fire on server restart same day. 3) Brief appears in chat session. 4) RoutineAuditEvent logged.",
-  "files": ["docs/daily-ops-brief-design.md", "app/orchestrator/routine_runner.py"]
+  "title": "Wire 8am daily brief trigger into orchestrator engine (direct timer pattern)",
+  "context": "Add the daily ops brief auto-trigger to app/orchestrator/engine.py and app/orchestrator/runtime_settings.py. Follow the EXACT same pattern as memory maintenance (_last_memory_maintenance_date_et) and daily compression (_daily_compression_hour_et). See the full specification in docs/handoffs/daily-ops-brief-handoffs.json (Task 3) and docs/daily-ops-brief-design.md section 5 Task 3. Key points: add SETTINGS_KEY_DAILY_BRIEF_HOUR_ET='orchestrator.daily_brief.hour_et' and SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET to runtime_settings.py; add _brief_hour_et=8 and _last_brief_date_et to engine __init__; add check in control loop after memory maintenance block; add _run_daily_brief() private method that is fully exception-safe.",
+  "acceptance": "1) Brief fires once per day at 8am ET. 2) _last_brief_date_et persisted to OrchestratorSetting — survives restart without re-firing. 3) Engine crash-safe — exceptions caught and logged with [BRIEF] prefix. 4) _brief_hour_et appears in orchestrator status endpoint output. 5) No RoutineRunner dependency added.",
+  "files": ["docs/daily-ops-brief-design.md", "docs/handoffs/daily-ops-brief-handoffs.json", "app/orchestrator/engine.py", "app/orchestrator/runtime_settings.py"]
 }
 ```
 

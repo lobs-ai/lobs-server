@@ -777,9 +777,12 @@ class OrchestratorEngine:
                         )
                         continue
                 except Exception as e:
-                    logger.warning("[ENGINE] Workflow match failed for %s: %s", task_id[:8], e)
+                    # Transient error — skip this tick, don't block the task
+                    logger.warning("[ENGINE] Workflow match failed for %s (transient, will retry): %s", task_id[:8], e)
+                    continue
 
-                # No matching workflow: block task instead of falling back to legacy spawn.
+                # No matching workflow — only block if this is genuinely unroutable
+                # (agent type not in any active workflow trigger)
                 logger.error(
                     "[ENGINE] Task %s (agent=%s) has no matching workflow; blocking task (legacy spawn disabled)",
                     task_id[:8], agent_type,

@@ -5,7 +5,7 @@ High-level overview of the backend system design, data flow, and key components.
 **Last Updated:** 2026-02-24
 
 **Recent Architectural Changes (Feb 24):**
-- **Daily Ops Brief** — 8am auto-posted summary of calendar, email, GitHub blockers, and top agent tasks (design: [docs/daily-ops-brief-design.md](docs/daily-ops-brief-design.md)); `BriefService` + `/api/brief/today` + RoutineRunner hook `daily_ops_brief` (cron `0 13 * * *` = 8am ET)
+- **Daily Ops Brief** — 8am auto-posted summary of calendar, email, GitHub blockers, and top agent tasks (design: [docs/daily-ops-brief-design.md](docs/daily-ops-brief-design.md)); `BriefService` + `/api/brief/today` + direct engine timer pattern (same as memory maintenance — `_brief_hour_et=8` ET, `_last_brief_date_et` persisted to `OrchestratorSetting`). Handoffs: [docs/handoffs/daily-ops-brief-handoffs.json](docs/handoffs/daily-ops-brief-handoffs.json)
 - **Inbox Remediation Tracking** — Closes approved→queued→cancelled silent decay loop: `Task.source_inbox_item_id` (FK to inbox item at spawn), `Task.cancel_reason` (required on rejection), `GET /api/inbox/stuck-remediations` triage list, and `StuckRemediationsAdapter` in BriefService (design: [docs/inbox-remediation-tracking-design.md](docs/inbox-remediation-tracking-design.md))
 
 **Recent Architectural Changes (Feb 21-23):**
