@@ -632,6 +632,10 @@ class OrchestratorEngine:
                 events_started = await workflow_executor.process_events(limit=10)
                 if events_started > 0:
                     activity = True
+                # Process schedule-triggered workflows (cron)
+                schedules_started = await workflow_executor.process_schedules()
+                if schedules_started > 0:
+                    activity = True
             except Exception as e:
                 logger.error("[ENGINE] Workflow executor error: %s", e, exc_info=True)
 

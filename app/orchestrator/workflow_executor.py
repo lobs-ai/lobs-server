@@ -215,6 +215,92 @@ class WorkflowExecutor:
             await self.db.commit()
         return started
 
+    async def process_schedules(self) -> int:
+        """Check schedule-triggered workflows and start runs when due.
+
+        Uses a simple last-run tracking approach: for each schedule-triggered
+        workflow, check if enough time has elapsed since its last run started.
+        Cron expressions are evaluated against the current time.
+        """
+        try:
+            from croniter import croniter
+        except ImportError:
+            logger.debug("[WORKFLOW] croniter not installed — schedule triggers disabled")
+            return 0
+
+        result = await self.db.execute(
+            select(WorkflowDefinition).where(
+                WorkflowDefinition.is_active == True,
+            )
+        )
+        workflows = result.scalars().all()
+        started = 0
+
+        now = datetime.now(timezone.utc)
+
+        for wf in workflows:
+            trigger = wf.trigger
+            if not trigger or trigger.get("type") != "schedule":
+                continue
+
+            cron_expr = trigger.get("cron")
+            if not cron_expr:
+                continue
+
+            tz_name = trigger.get("timezone", "UTC")
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(tz_name)
+            except Exception:
+                tz = timezone.utc
+
+            now_local = now.astimezone(tz)
+
+            # Check if there's already an active run for this workflow
+            active_q = await self.db.execute(
+                select(WorkflowRun).where(
+                    WorkflowRun.workflow_id == wf.id,
+                    WorkflowRun.status.in_(["pending", "running"]),
+                ).limit(1)
+            )
+            if active_q.scalar_one_or_none():
+                continue  # Already running
+
+            # Find last completed/failed run
+            last_run_q = await self.db.execute(
+                select(WorkflowRun).where(
+                    WorkflowRun.workflow_id == wf.id,
+                ).order_by(WorkflowRun.created_at.desc()).limit(1)
+            )
+            last_run = last_run_q.scalar_one_or_none()
+
+            # Use croniter to check if we're due
+            try:
+                cron = croniter(cron_expr, now_local)
+                prev_fire = cron.get_prev(datetime)
+
+                if last_run and last_run.created_at:
+                    last_created = last_run.created_at
+                    if last_created.tzinfo is None:
+                        last_created = last_created.replace(tzinfo=timezone.utc)
+                    # Only fire if prev_fire is after last run
+                    if prev_fire <= last_created:
+                        continue
+
+                # Due — start a run
+                await self.start_run(
+                    wf,
+                    trigger_type="schedule",
+                    trigger_payload={"cron": cron_expr, "fired_at": now.isoformat()},
+                )
+                started += 1
+                logger.info("[WORKFLOW] Schedule fired for '%s' (cron=%s)", wf.name, cron_expr)
+
+            except Exception as e:
+                logger.warning("[WORKFLOW] Cron evaluation failed for '%s': %s", wf.name, e)
+
+        return started
+
     async def emit_event(self, event_type: str, payload: dict[str, Any], source: str = "internal") -> str:
         """Emit a workflow event to the event bus."""
         event = WorkflowEvent(
