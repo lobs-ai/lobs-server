@@ -1,61 +1,61 @@
-# Agent-Built Week — Public Demo Narrative Package
+# Agent-Built Week — Public Demo Narrative
 
 **Last updated:** 2026-02-24  
 **Audience:** Prospects, pilot customers, partners, technical evaluators  
-**Primary proof claim:** A single 7-day operating window produced measurable business leverage (time reclaimed + faster decisions), with artifact-level evidence.
+**Core claim:** In one inspectable 7-day window, agent-assisted execution reclaimed founder time, accelerated decisions, and increased parallel output.
 
 ---
 
-## 1) Publish-ready narrative
+## 1) Executive narrative (publish-ready)
 
-From **Feb 17–23, 2026**, Lobs ran a real “Agent-Built Week” across engineering, reliability, and go-to-market work.
+From **Feb 17–23, 2026**, Lobs ran an “Agent-Built Week” across backend engineering, reliability improvements, and go-to-market packaging.
 
-This is not a prompt reel. It is an inspectable operating week with concrete outputs: merged code changes, reliability hardening, documentation upgrades, and public-facing product narrative assets.
+This is not an AI highlight reel. It is an operating-week proof package with artifact-level evidence (commits, docs, CI, and implementation traces).
 
-**Topline outcomes (estimated, conservative):**
+### Topline outcomes (conservative, estimated)
 - **~7–9 founder hours reclaimed** in one week
-- **Decision latency reduced** from next-day to same-day on core operating choices
+- **Decision latency improved** from mostly next-day to mostly same-day
 - **Parallel execution increased** from ~2–3 to ~5–7 active workstreams
 
 ---
 
-## 2) Why this 7-day window
+## 2) Demo scope and why this week
 
-**Window selected:** **Mon Feb 17 → Sun Feb 23, 2026**
+**Selected window:** **Mon Feb 17 → Sun Feb 23, 2026**
 
-Why this week is the strongest demo window:
-- Cross-functional output (backend platform + reliability + GTM)
-- Multi-role contribution (`programmer`, `researcher`, `writer`, `reviewer`, `architect`)
-- Every major claim can be tied to inspectable artifacts (commit IDs, docs paths, CI evidence)
+Why this week is a strong public proof window:
+1. Clear cross-functional output (platform + reliability + GTM)
+2. Multi-agent role coverage (`programmer`, `researcher`, `writer`, `reviewer`, `architect`)
+3. Inspectable evidence for each claim
 
 ---
 
-## 3) Before vs after operating model
+## 3) Before/after operating model
 
 ### Before (founder-led baseline)
-- Founder is coordination bottleneck
-- High context-switching cost across repo/chat/docs
-- Decision cycles often roll to “tomorrow”
+- Founder acts as scheduling + context bottleneck
+- Frequent context switching across repo/chat/docs
+- Many key decisions slip to the next day
 
 ### After (Agent-Built Week workflow)
-- Scoped tasks execute in parallel with explicit handoffs
-- Founder remains approver/editor, not micro-executor
-- Outputs are reusable assets (code/docs/scripts), not one-off chat outputs
+- Scoped tasks run in parallel with explicit handoffs
+- Founder remains approver/editor instead of micro-executor
+- Outputs become reusable assets (code/docs/scripts), not transient chat output
 
 ---
 
-## 4) 7-day timeline: task → outcome → proof anchor
+## 4) 7-day timeline: tasks → outcomes → evidence
 
 > Replace screenshot placeholders before external publishing.
 
-| Day | Task cluster shipped | Business outcome | Evidence anchor | Timeline screenshot placeholder |
+| Day | Task cluster | Business outcome | Evidence anchor | Screenshot placeholder |
 |---|---|---|---|---|
-| **Mon (Feb 17)** | Tier-based model routing configurability (`5179d39`, `e332a95`, `5531a94`) | Better reliability/cost-fit by workload | Commit log + routing config diffs | `[SS-01: commit graph + routing diff]` |
-| **Tue (Feb 18)** | Orchestrator loop + reflection flow improvements (`5bf4c0a`, `f66ac91`, `e087e4d`, `401f8c6`, `9c25237`) | Faster execution-feedback loop | Orchestrator module diffs + architecture references | `[SS-02: orchestrator timeline + module view]` |
-| **Wed (Feb 19)** | Reflection reliability fix (`778388b`) | Less failure/retry drag | Commit + run/log evidence | `[SS-03: reliability fix proof]` |
-| **Thu (Feb 20)** | Documentation restructuring (`6edf48a`) | Faster onboarding + less coordination friction | Docs tree before/after | `[SS-04: docs structure comparison]` |
+| **Mon (Feb 17)** | Tier-based model routing configurability (`5179d39`, `e332a95`, `5531a94`) | Better reliability and cost-fit by workload type | Commit history + routing config diffs | `[SS-01: commit graph + routing diff]` |
+| **Tue (Feb 18)** | Orchestrator loop + reflection flow improvements (`5bf4c0a`, `f66ac91`, `e087e4d`, `401f8c6`, `9c25237`) | Faster execution/feedback loop | Orchestrator module diffs + architecture references | `[SS-02: orchestrator timeline + module view]` |
+| **Wed (Feb 19)** | Reflection reliability fix (`778388b`) | Lower failure/retry drag | Commit + run/log evidence | `[SS-03: reliability fix proof]` |
+| **Thu (Feb 20)** | Documentation restructuring (`6edf48a`) | Faster onboarding and lower coordination overhead | Docs tree before/after | `[SS-04: docs structure comparison]` |
 | **Fri–Sat (Feb 21–22)** | Batch commit + worker completion persistence (`325554a`, `300682a`) | More predictable delegated-task closure | Completion-state flow + code diffs | `[SS-05: completion persistence flow]` |
-| **Sun (Feb 23)** | CI/schema/docs/metrics advances (`224af0b`, `e5c606e`, `9364e12`, `37292e9`, `b32a3c5`) | Higher shipping confidence + better visibility | CI status + schema/docs/metrics artifacts | `[SS-06: CI green + artifact panel]` |
+| **Sun (Feb 23)** | CI/schema/docs/metrics advances (`224af0b`, `e5c606e`, `9364e12`, `37292e9`, `b32a3c5`) | Higher shipping confidence and visibility | CI status + schema/docs/metrics artifacts | `[SS-06: CI green + artifact panel]` |
 
 **Packaging continuation (Feb 24):**
 - `docs/product/landing-page-v1.md`
@@ -65,9 +65,9 @@ Why this week is the strongest demo window:
 
 ---
 
-## 5) Before/after workload metrics
+## 5) Quantified workload impact (before vs after)
 
-> **Label publicly as estimated** until telemetry export is attached. Bands below are intentionally conservative.
+> Keep “estimated” labels public until telemetry export is attached.
 
 ### 5.1 Founder workload (hours/week)
 
@@ -79,7 +79,7 @@ Why this week is the strongest demo window:
 | Final review + approval | 2.0–2.5 | 2.0–2.5 | ~flat |
 | **Total founder load** | **14.0–17.0** | **6.5–8.5** | **~7–9 hrs reclaimed** |
 
-### 5.2 Throughput and decision velocity
+### 5.2 Throughput + decision velocity
 
 | Metric | Before | Agent-Built Week | Delta |
 |---|---:|---:|---:|
@@ -90,51 +90,51 @@ Why this week is the strongest demo window:
 
 ### 5.3 Decisions accelerated in this window
 
-| Decision type | Typical before | This week | Acceleration |
+| Decision type | Typical before | During this week | Acceleration |
 |---|---:|---:|---:|
 | Model-routing policy adjustment | Next-day | Same-day | **~24h faster** |
 | Reflection fix/no-fix decision | 1–2 days | Same-day | **~24–48h faster** |
 | GTM narrative sign-off | 2–3 days | <24h | **~1–2 days faster** |
 
 **Business translation:**
-- Reclaims roughly **one founder day/week**
-- Pulls key ops decisions into **same-day cadence**
-- Produces durable assets that compound across sales, onboarding, and hiring
+- Reclaims approximately **one founder day per week**
+- Pulls key operating decisions into a **same-day loop**
+- Produces durable assets that compound across sales, onboarding, and recruiting
 
 ---
 
 ## 6) 8-minute live demo script (stage-ready)
 
 ### Slide 1 (0:00–0:45) — Hook
-“Today is not an AI prompt demo. It’s one inspectable operating week showing what got shipped and what changed for the business.”
+“Today is not an AI prompt demo. It is one inspectable operating week showing exactly what shipped and what changed for the business.”
 
 ### Slide 2 (0:45–2:00) — Baseline pain
 - Founder as throughput bottleneck
-- Slow decision loop from fragmented context
-- Coordination overhead stealing leverage time
+- Slow decisions due to fragmented context
+- Coordination overhead consuming leverage time
 
-### Slide 3–4 (2:00–4:30) — Walk the timeline
-- Show **SS-01 → SS-06** in date order
+### Slides 3–4 (2:00–4:30) — Walk the week
+- Show **SS-01 → SS-06** in chronological order
 - Narrate each day as: **task cluster → business outcome → artifact proof**
-- Emphasize cross-functional breadth (engineering + reliability + GTM)
+- Highlight cross-functional breadth (engineering + reliability + GTM)
 
 ### Slide 5 (4:30–6:00) — Quantified impact
-- Show workload table and decision-speed table
-- Land one sentence: “This week reclaimed about one founder day and roughly doubled parallel execution.”
+- Present workload and decision-speed tables
+- Landing line: “This week reclaimed about one founder day and roughly doubled parallel execution.”
 
-### Slide 6 (6:00–7:15) — Trust & control model
-- Human remains in approval loop
-- Agents are scoped by task with explicit handoffs
-- Existing quality gates stay intact (review, tests, CI, docs)
+### Slide 6 (6:00–7:15) — Control + trust model
+- Human stays in approval loop
+- Agents are scoped to explicit tasks
+- Existing quality gates remain (review, tests, CI, docs)
 
 ### Slide 7 (7:15–8:00) — Close + CTA
-“If your team wants proof, run your own Agent-Built Week. We’ll baseline your current throughput and compare against a 7-day window with artifact-level evidence.”
+“If you want proof, run your own Agent-Built Week. Baseline your current throughput, then compare against a 7-day artifact-backed window.”
 
 ---
 
-## 7) Screenshot checklist (must-have before publishing)
+## 7) Screenshot production checklist
 
-- [ ] **SS-01** Model routing commit history + diff
+- [ ] **SS-01** Model routing commit history + config diff
 - [ ] **SS-02** Orchestrator/reflection timeline + module view
 - [ ] **SS-03** Reflection reliability evidence (run/log)
 - [ ] **SS-04** Docs structure before/after
@@ -143,43 +143,34 @@ Why this week is the strongest demo window:
 - [ ] **SS-07** Product narrative asset folder (`docs/product/`)
 - [ ] Final summary slide with before/after metrics
 
-**Suggested export names:**
-- `agent-built-week-SS-01-routing.png`
-- `agent-built-week-SS-02-orchestrator.png`
-- `agent-built-week-SS-03-reliability.png`
-- `agent-built-week-SS-04-docs-before-after.png`
-- `agent-built-week-SS-05-completion-flow.png`
-- `agent-built-week-SS-06-ci-schema-metrics.png`
-- `agent-built-week-SS-07-product-assets.png`
-
 ---
 
 ## 8) Publishing guardrails
 
-- Attach every major claim to an artifact pointer
-- Keep “estimated” labels until telemetry-backed
-- Avoid “AI magic” language; describe workflow mechanics plainly
-- Re-run monthly with same template to build longitudinal proof
+- Anchor each major claim to a specific artifact pointer
+- Mark non-telemetry numbers as **estimated**
+- Avoid “AI magic” framing; explain workflow mechanics plainly
+- Re-run monthly with the same template for longitudinal proof
 
 ---
 
 ## 9) 30-second social proof version
 
-“In one week (Feb 17–23), we used agents for real engineering + GTM execution, reclaimed ~8 founder hours, moved key decisions from next-day to same-day, and shipped reusable assets. Agent-Built Week is inspectable outcomes—not AI theater.”
+“In one week (Feb 17–23), we used agents for real engineering and GTM execution, reclaimed ~8 founder hours, moved key decisions from next-day to same-day, and shipped reusable assets. Agent-Built Week is inspectable outcomes—not AI theater.”
 
 ---
 
-## 10) Narrative package contents (for publishing handoff)
+## 10) Repurposing map (narrative package)
 
-Use this file as the source of truth and export into:
-- **Website proof page:** Sections 1, 4, 5, and 9
-- **Sales one-pager:** Sections 1, 5, and 6 (script adapted to talk track)
-- **Founder demo deck (8 min):** Sections 4, 5, 6, and 7
+Use this file as source-of-truth and repurpose into:
+- **Website proof page:** Sections 1, 4, 5, 9
+- **Sales one-pager:** Sections 1, 5, 6
+- **Founder demo deck (8 min):** Sections 4, 5, 6, 7
 
 ### Copy-ready title options
 - **Agent-Built Week: 7 Days, One Founder Day Reclaimed**
 - **From AI Demos to Operating Proof: Our Agent-Built Week**
 - **What We Actually Shipped in 7 Days with Agents**
 
-### Evidence note (for footer)
-“All claims in this demo map to inspectable repository artifacts and dated documentation. Metrics are marked estimated unless telemetry-backed exports are attached.”
+### Footer evidence note
+“All claims in this demo map to inspectable repository artifacts and dated documentation. Metrics are labeled estimated unless telemetry-backed exports are attached.”
