@@ -10,7 +10,7 @@ from typing import Any, Optional
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Task, WorkerStatus, InboxItem
+from app.models import Task, WorkerStatus, InboxItem, WorkflowRun
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,17 @@ class MonitorEnhanced:
                     if heartbeat_age < self.stuck_timeout:
                         continue
                 
-                # Task is stuck - no worker or stale heartbeat
+                # If a workflow run is still active for this task, don't auto-block it.
+                run_q = await self.db.execute(
+                    select(WorkflowRun).where(
+                        WorkflowRun.task_id == task.id,
+                        WorkflowRun.status.in_(["pending", "running"]),
+                    ).limit(1)
+                )
+                if run_q.scalar_one_or_none() is not None:
+                    continue
+
+                # Task is stuck - no worker and no active workflow run
                 severity = "critical" if age_seconds > self.kill_timeout else \
                           "high" if age_seconds > self.warning_timeout else "medium"
                 

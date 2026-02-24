@@ -146,6 +146,7 @@ class NodeHandlers:
         """
         agent_type = config.get("agent_type", "programmer")
         model_tier = config.get("model_tier")
+        prompt_template = config.get("prompt_template")
 
         task_ctx = context.get("task", {})
         if not isinstance(task_ctx, dict):
@@ -163,6 +164,14 @@ class NodeHandlers:
         elif config.get("model"):
             # Explicit model — store so worker can use it
             task_for_spawn["model_tier"] = config["model"]
+
+        # Optional prompt override for retry/fix nodes.
+        # WorkerManager's prompt builder consumes task title/notes, so we can
+        # shape retries by overriding notes from a rendered template.
+        if isinstance(prompt_template, str) and prompt_template.strip():
+            rendered = _render_template(prompt_template, context).strip()
+            if rendered:
+                task_for_spawn["notes"] = rendered
 
         if not self.worker_manager:
             return NodeResult(status="failed", error="No worker_manager available — cannot spawn agent")
@@ -214,9 +223,47 @@ class NodeHandlers:
         ns = (run.node_states or {}).get(node_id, {})
         output = ns.get("output", {})
 
-        # If queued (capacity/lock), just wait
+        # If queued (capacity/lock), actively retry spawn on each check.
         if output.get("queued"):
-            return None  # Still waiting
+            task_ctx = (run.context or {}).get("task", {})
+            if not isinstance(task_ctx, dict):
+                return NodeResult(status="failed", error="No task in workflow context")
+
+            task_id = task_ctx.get("id")
+            project_id = task_ctx.get("project_id")
+            if not task_id or not project_id:
+                return NodeResult(status="failed", error="Task missing id or project_id")
+
+            if not self.worker_manager:
+                return NodeResult(status="failed", error="No worker_manager available — cannot retry queued spawn")
+
+            # Retry queue pickup
+            spawned = await self.worker_manager.spawn_worker(
+                task=task_ctx,
+                project_id=project_id,
+                agent_type=node_def.get("config", {}).get("agent_type", "programmer"),
+            )
+            if not spawned:
+                return None
+
+            child_key = None
+            run_id = None
+            for _, winfo in self.worker_manager.active_workers.items():
+                if winfo.task_id == task_id:
+                    child_key = winfo.child_session_key
+                    run_id = winfo.run_id
+                    break
+
+            return NodeResult(
+                status="running",
+                output={
+                    "queued": False,
+                    "runId": run_id or "",
+                    "childSessionKey": child_key or "",
+                    "spawned_via": "worker_manager",
+                },
+                session_key=child_key,
+            )
 
         task_id = (run.context or {}).get("task", {}).get("id")
         if not task_id:
@@ -307,15 +354,32 @@ class NodeHandlers:
             if not data.get("ok"):
                 return NodeResult(status="failed", error=f"sessions_send failed: {data}")
 
-            return NodeResult(status="running", output={"message_sent": True, "session_key": session_key})
+            wait_seconds = int(config.get("wait_seconds", 20))
+            return NodeResult(
+                status="running",
+                output={
+                    "message_sent": True,
+                    "session_key": session_key,
+                    "wait_until": (datetime.now(timezone.utc).timestamp() + max(1, wait_seconds)),
+                },
+            )
 
         except Exception as e:
             return NodeResult(status="failed", error=str(e))
 
     async def _check_send_to_session(self, node_def: dict, run: Any) -> Optional[NodeResult]:
-        """Check if the session has responded after a send."""
-        # Reuse spawn_agent checker — same pattern (wait for assistant response)
-        return await self._check_spawn_agent(node_def, run)
+        """Wait a short grace period after sending follow-up instructions."""
+        node_id = node_def["id"]
+        ns = (run.node_states or {}).get(node_id, {})
+        output = ns.get("output", {}) if isinstance(ns, dict) else {}
+        wait_until = output.get("wait_until")
+        if not wait_until:
+            return NodeResult(status="completed", output={"message_sent": True})
+
+        if datetime.now(timezone.utc).timestamp() < float(wait_until):
+            return None
+
+        return NodeResult(status="completed", output={"message_sent": True, "wait_elapsed": True})
 
     async def _exec_tool_call(self, config: dict, context: dict, run: Any) -> NodeResult:
         """Execute a shell command directly (no LLM)."""

@@ -10,6 +10,13 @@ if [ -d "env" ]; then
     source env/bin/activate
 fi
 
+# Load environment overrides
+if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
+fi
+
 # Ensure log directory exists
 mkdir -p logs
 

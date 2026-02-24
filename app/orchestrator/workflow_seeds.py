@@ -118,8 +118,97 @@ DEFAULT_WORKFLOWS = [
                 "id": "spawn_programmer",
                 "type": "spawn_agent",
                 "config": {"agent_type": "programmer"},
-                "on_success": "done",
+                "on_success": "run_tests_1",
                 "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "run_tests_1",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && if [ -d tests ] || ls *test*.py >/dev/null 2>&1; then python -m pytest --tb=short 2>&1; else echo 'No tests detected; skipping pytest'; fi",
+                    "timeout_seconds": 300,
+                },
+                "on_success": "tests_gate_1",
+                "on_failure": {"retry": 0},
+            },
+            {
+                "id": "tests_gate_1",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_tests_1.returncode == 0", "goto": "done"},
+                    ],
+                    "default": "spawn_programmer_fix_1",
+                },
+            },
+            {
+                "id": "spawn_programmer_fix_1",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "programmer",
+                    "prompt_template": "Previous implementation failed project tests. Fix the failures and update code only as needed.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nLatest test output:\n{run_tests_1.stdout}\n{run_tests_1.stderr}",
+                },
+                "on_success": "run_tests_2",
+                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "run_tests_2",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && if [ -d tests ] || ls *test*.py >/dev/null 2>&1; then python -m pytest --tb=short 2>&1; else echo 'No tests detected; skipping pytest'; fi",
+                    "timeout_seconds": 300,
+                },
+                "on_success": "tests_gate_2",
+                "on_failure": {"retry": 0},
+            },
+            {
+                "id": "tests_gate_2",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_tests_2.returncode == 0", "goto": "done"},
+                    ],
+                    "default": "spawn_programmer_fix_2",
+                },
+            },
+            {
+                "id": "spawn_programmer_fix_2",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "programmer",
+                    "prompt_template": "Tests are still failing after one fix attempt. Make a second and final repair pass.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nLatest test output:\n{run_tests_2.stdout}\n{run_tests_2.stderr}",
+                },
+                "on_success": "run_tests_3",
+                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "run_tests_3",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && if [ -d tests ] || ls *test*.py >/dev/null 2>&1; then python -m pytest --tb=short 2>&1; else echo 'No tests detected; skipping pytest'; fi",
+                    "timeout_seconds": 300,
+                },
+                "on_success": "tests_gate_3",
+                "on_failure": {"retry": 0},
+            },
+            {
+                "id": "tests_gate_3",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_tests_3.returncode == 0", "goto": "done"},
+                    ],
+                    "default": "tests_failed_terminal",
+                },
+            },
+            {
+                "id": "tests_failed_terminal",
+                "type": "gate",
+                "config": {
+                    "prompt": "Programmer task failed tests after max retries (2). Manual intervention required.",
+                    "timeout_hours": 24,
+                },
+                "on_success": "done",
             },
             {
                 "id": "spawn_researcher",
@@ -169,7 +258,7 @@ DEFAULT_WORKFLOWS = [
             {
                 "id": "done",
                 "type": "cleanup",
-                "config": {"delete_session": False},
+                "config": {"delete_session": True},
             },
         ],
         "edges": [],

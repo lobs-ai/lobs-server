@@ -761,18 +761,17 @@ class OrchestratorEngine:
                 except Exception as e:
                     logger.warning("[ENGINE] Workflow match failed for %s: %s", task_id[:8], e)
 
-                # Fallback: direct spawn (legacy path — should rarely hit now)
-                logger.warning(
-                    "[ENGINE] Task %s (agent=%s) has no matching workflow; using legacy direct spawn",
+                # No matching workflow: block task instead of falling back to legacy spawn.
+                logger.error(
+                    "[ENGINE] Task %s (agent=%s) has no matching workflow; blocking task (legacy spawn disabled)",
                     task_id[:8], agent_type,
                 )
-                spawned = await worker_manager.spawn_worker(
-                    task=task_dict,
-                    project_id=project_id,
-                    agent_type=agent_type,
-                )
-                if spawned:
-                    logger.info("[ENGINE] Legacy spawn for task %s (project=%s, agent=%s)", task_id[:8], project_id, agent_type)
+                db_task = await db.get(TaskModel, task_id)
+                if db_task:
+                    db_task.work_state = "blocked"
+                    db_task.failure_reason = f"No matching workflow for agent '{agent_type}'"
+                    db_task.updated_at = datetime.now(timezone.utc)
+                    await db.commit()
 
         return activity
 

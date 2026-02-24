@@ -88,6 +88,14 @@ class InitiativeDecisionEngine:
         decision = decision.strip().lower()
         decided_by = (decided_by or "lobs").strip().lower()
 
+        # Normalize common aliases from clients/UI (approved/deferred/rejected).
+        aliases = {
+            "approved": "approve",
+            "deferred": "defer",
+            "rejected": "reject",
+        }
+        decision = aliases.get(decision, decision)
+
         # Validate decision values
         valid_decisions = {"approve", "defer", "reject", "escalate"}
         if decision not in valid_decisions:
