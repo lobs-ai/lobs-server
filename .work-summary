@@ -1,1 +1,1 @@
-Created LEARNING-DOCS-MAP.md and learning-loop-mvp-test-spec.md; updated implementation guide and quickstart with cross-references
+Created Integration Contract v1: integrations/contract_v1.md (spec), entities.py (7 normalized types), base_connector.py (abstract base with all 5 capability groups), email_connector.py + calendar_connector.py (wrapping existing services). Added 85 contract tests in tests/test_integration_contract.py — all passing (1 skip expected).

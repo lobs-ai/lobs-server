@@ -1,29 +1,21 @@
-"""Abstract base class for all Integration Contract v1 connectors.
+"""Base connector for the Integration Contract v1.
 
-Every external integration adapter must subclass BaseConnector and implement
-the five capability groups defined in integrations/contract_v1.md:
+Every external integration must subclass BaseConnector and override the
+capability groups it supports.  Unsupported operations raise
+ConnectorNotImplementedError by default.
 
-    auth       — is_configured(), health_check()
-    fetch      — fetch_messages(), fetch_events(), search()
-    act        — send_message(), create_event(), update_event(),
-                 delete_event(), mark_read()
-    webhook_in — verify_webhook(), parse_webhook()
-    webhook_out— register_webhook(), deregister_webhook()
-
-Capabilities the connector does not support should raise
-ConnectorNotImplementedError (the default in this base class).
+See integrations/contract_v1.md for the full specification.
 """
 
 from __future__ import annotations
 
+import abc
 import time
-from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Union
+from typing import Any
 
 from integrations.entities import (
     ActionResult,
-    ConnectorError,
     ConnectorHealth,
     ConnectorNotImplementedError,
     EventDraft,
@@ -34,166 +26,172 @@ from integrations.entities import (
 )
 
 
-class BaseConnector(ABC):
-    """Contract v1 connector base class.
+class BaseConnector(abc.ABC):
+    """Abstract base class for all lobs-server integration connectors.
 
-    Subclasses must set ``name`` and implement ``is_configured()`` and
-    ``health_check()``.  All other methods may be overridden selectively.
+    Subclasses must:
+      1. Set the ``name`` class attribute to a short, snake_case identifier.
+      2. Implement ``is_configured()`` and ``health_check()`` (auth group).
+      3. Implement any capability group methods they support.
+      4. Raise ``ConnectorNotImplementedError`` (via ``super()`` default) for
+         anything they don't support — never raise plain ``NotImplementedError``.
+
+    Contract tests in ``tests/test_integration_contract.py`` verify that every
+    registered connector satisfies this interface.
     """
 
-    #: Unique lowercase connector name, e.g. "email", "calendar", "github"
+    #: Short, lowercase snake_case identifier, e.g. ``"email"``, ``"calendar"``.
     name: str = ""
 
-    # ------------------------------------------------------------------
-    # 1. auth — authentication & configuration
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────
+    # 1. auth — Authentication & Configuration
+    # ──────────────────────────────────────────────────────────────────────────
 
-    @abstractmethod
+    @abc.abstractmethod
     def is_configured(self) -> bool:
-        """Return True iff all required credentials are present.
+        """Return True if all required credentials/env vars are present.
 
-        Must NOT make network calls.  Used by the integration status
-        endpoint to determine whether to even attempt a health check.
+        Must be synchronous and must NOT make network calls.
         """
 
+    @abc.abstractmethod
     async def health_check(self) -> ConnectorHealth:
         """Make a cheap live call to verify connectivity.
 
-        The default implementation returns a not_configured status if
-        is_configured() is False, or ok with 0 ms otherwise.  Subclasses
-        should override to perform a real probe.
+        If the connector is not configured, return immediately with
+        ``status="not_configured"`` instead of raising.
         """
-        if not self.is_configured():
-            return ConnectorHealth(
-                connector=self.name,
-                status="not_configured",
-                detail=f"{self.name} connector is not configured",
-            )
-        return ConnectorHealth(connector=self.name, status="ok")
 
-    # ------------------------------------------------------------------
-    # 2. fetch — read data
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────
+    # 2. fetch — Read Data
+    # ──────────────────────────────────────────────────────────────────────────
 
     async def fetch_messages(
         self,
         limit: int = 20,
-        filter_unread: bool = False,
+        filter_unread: bool = True,
     ) -> list[NormalizedMessage]:
-        """Return normalized messages from the provider.
+        """Return normalized messages (emails, chat, …).
 
-        Args:
-            limit: Maximum number of messages to return.
-            filter_unread: If True, return only unread messages.
+        Default: raises ConnectorNotImplementedError.
         """
-        raise ConnectorNotImplementedError(
-            self.name, "fetch_messages is not supported by this connector"
-        )
+        raise ConnectorNotImplementedError(self.name, "fetch_messages")
 
     async def fetch_events(
         self,
-        start: datetime,
-        end: datetime,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> list[NormalizedEvent]:
-        """Return calendar events in the given half-open time window [start, end)."""
-        raise ConnectorNotImplementedError(
-            self.name, "fetch_events is not supported by this connector"
-        )
+        """Return calendar events in the given time window.
+
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "fetch_events")
 
     async def search(
         self,
         query: str,
         limit: int = 20,
-    ) -> list[Union[NormalizedMessage, NormalizedEvent]]:
-        """Free-text search over the connector's data."""
-        raise ConnectorNotImplementedError(
-            self.name, "search is not supported by this connector"
-        )
+    ) -> list[NormalizedMessage | NormalizedEvent]:
+        """Free-text search over the connector's data.
 
-    # ------------------------------------------------------------------
-    # 3. act — write / mutate
-    # ------------------------------------------------------------------
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "search")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 3. act — Write / Mutate
+    # ──────────────────────────────────────────────────────────────────────────
 
     async def send_message(self, msg: OutboundMessage) -> ActionResult:
-        """Send a message (email, SMS, chat post, …)."""
-        raise ConnectorNotImplementedError(
-            self.name, "send_message is not supported by this connector"
-        )
+        """Send a message (email, SMS, chat, …).
+
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "send_message")
 
     async def create_event(self, event: EventDraft) -> ActionResult:
-        """Create a calendar event."""
-        raise ConnectorNotImplementedError(
-            self.name, "create_event is not supported by this connector"
-        )
+        """Create a calendar event.
 
-    async def update_event(self, event_id: str, patch: dict) -> ActionResult:
-        """Patch an existing calendar event."""
-        raise ConnectorNotImplementedError(
-            self.name, "update_event is not supported by this connector"
-        )
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "create_event")
+
+    async def update_event(self, event_id: str, patch: dict[str, Any]) -> ActionResult:
+        """Patch an existing event.
+
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "update_event")
 
     async def delete_event(self, event_id: str) -> ActionResult:
-        """Delete or cancel a calendar event."""
-        raise ConnectorNotImplementedError(
-            self.name, "delete_event is not supported by this connector"
-        )
+        """Delete / cancel an event.
+
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "delete_event")
 
     async def mark_read(self, message_id: str) -> ActionResult:
-        """Mark a message as read."""
-        raise ConnectorNotImplementedError(
-            self.name, "mark_read is not supported by this connector"
-        )
+        """Mark a message as read.
 
-    # ------------------------------------------------------------------
-    # 4. webhook_in — receive webhooks
-    # ------------------------------------------------------------------
-
-    def verify_webhook(self, headers: dict, body_bytes: bytes) -> bool:
-        """Verify the HMAC / signature of an incoming webhook.
-
-        Default implementation always returns False (safe: reject unknown).
-        Connectors that support inbound webhooks MUST override this.
+        Default: raises ConnectorNotImplementedError.
         """
-        return False
+        raise ConnectorNotImplementedError(self.name, "mark_read")
 
-    def parse_webhook(self, headers: dict, body_bytes: bytes) -> WebhookEvent:
-        """Parse a provider payload into a normalized WebhookEvent."""
-        raise ConnectorNotImplementedError(
-            self.name, "parse_webhook is not supported by this connector"
-        )
+    # ──────────────────────────────────────────────────────────────────────────
+    # 4. webhook_in — Receive Webhooks
+    # ──────────────────────────────────────────────────────────────────────────
 
-    # ------------------------------------------------------------------
-    # 5. webhook_out — register / deregister webhooks
-    # ------------------------------------------------------------------
+    def verify_webhook(self, headers: dict[str, str], body_bytes: bytes) -> bool:
+        """Verify HMAC / signature of an incoming webhook payload.
+
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "verify_webhook")
+
+    def parse_webhook(self, headers: dict[str, str], body_bytes: bytes) -> WebhookEvent:
+        """Parse a provider payload into a normalized WebhookEvent.
+
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "parse_webhook")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 5. webhook_out — Register / Deregister Webhooks
+    # ──────────────────────────────────────────────────────────────────────────
 
     async def register_webhook(self, callback_url: str) -> str:
         """Register a webhook with the provider.
 
         Returns the provider-assigned webhook ID.
+        Default: raises ConnectorNotImplementedError.
         """
-        raise ConnectorNotImplementedError(
-            self.name, "register_webhook is not supported by this connector"
-        )
+        raise ConnectorNotImplementedError(self.name, "register_webhook")
 
     async def deregister_webhook(self, webhook_id: str) -> bool:
-        """Remove the webhook registration."""
-        raise ConnectorNotImplementedError(
-            self.name, "deregister_webhook is not supported by this connector"
-        )
+        """Remove a webhook registration.
 
-    # ------------------------------------------------------------------
+        Default: raises ConnectorNotImplementedError.
+        """
+        raise ConnectorNotImplementedError(self.name, "deregister_webhook")
+
+    # ──────────────────────────────────────────────────────────────────────────
     # Helpers
-    # ------------------------------------------------------------------
+    # ──────────────────────────────────────────────────────────────────────────
 
-    def _timed_health(self, start: float, detail: str = "") -> ConnectorHealth:
-        """Convenience: build a successful ConnectorHealth with elapsed ms."""
+    def _not_configured_health(self) -> ConnectorHealth:
+        """Return a standard 'not_configured' health response."""
         return ConnectorHealth(
             connector=self.name,
-            status="ok",
-            latency_ms=round((time.monotonic() - start) * 1000, 1),
-            detail=detail,
+            status="not_configured",
+            detail=f"{self.name} connector is not configured (missing credentials).",
         )
 
+    @staticmethod
+    def _ms(start: float) -> float:
+        """Return elapsed milliseconds since ``start`` (from time.monotonic())."""
+        return round((time.monotonic() - start) * 1000, 1)
+
     def __repr__(self) -> str:
-        configured = self.is_configured()
-        return f"<{self.__class__.__name__} name={self.name!r} configured={configured}>"
+        configured = "configured" if self.is_configured() else "not_configured"
+        return f"<{self.__class__.__name__} name={self.name!r} {configured}>"

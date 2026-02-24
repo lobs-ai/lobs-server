@@ -1,26 +1,42 @@
-"""Integration Contract v1 — connector package.
+"""Integration platform — canonical connector contract.
 
-Usage:
-    from integrations.email_connector import EmailConnector
-    from integrations.calendar_connector import CalendarConnector
-    from integrations.entities import NormalizedMessage, ActionResult, ...
+All external integrations extend BaseConnector from base_connector.py
+and exchange data via normalized entities from entities.py.
 
 See integrations/contract_v1.md for the full specification.
 """
 
-from integrations.entities import (  # noqa: F401 — re-export for convenience
+from integrations.base_connector import BaseConnector
+from integrations.entities import (
     ActionResult,
-    ConnectorAuthError,
-    ConnectorError,
     ConnectorHealth,
-    ConnectorNotImplementedError,
     EventDraft,
-    IntegrationError,
     NormalizedContact,
     NormalizedEvent,
     NormalizedMessage,
     NormalizedTask,
     OutboundMessage,
     WebhookEvent,
+    # Errors
+    IntegrationError,
+    ConnectorError,
+    ConnectorAuthError,
+    ConnectorNotImplementedError,
 )
-from integrations.base_connector import BaseConnector  # noqa: F401
+
+__all__ = [
+    "BaseConnector",
+    "ActionResult",
+    "ConnectorHealth",
+    "EventDraft",
+    "NormalizedContact",
+    "NormalizedEvent",
+    "NormalizedMessage",
+    "NormalizedTask",
+    "OutboundMessage",
+    "WebhookEvent",
+    "IntegrationError",
+    "ConnectorError",
+    "ConnectorAuthError",
+    "ConnectorNotImplementedError",
+]
