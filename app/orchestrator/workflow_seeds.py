@@ -11,17 +11,34 @@ logger = logging.getLogger(__name__)
 
 
 async def seed_default_workflows(db: AsyncSession) -> int:
-    """Create default workflows if they don't exist. Returns count created."""
+    """Create or update default workflows. Returns count of new workflows created.
+
+    Existing workflows are updated in-place (nodes, edges, trigger, is_active, description)
+    to keep definitions in sync with code. Version is bumped on update.
+    """
+    from app.models import WorkflowSubscription
+
     created = 0
 
     for defn in DEFAULT_WORKFLOWS:
         result = await db.execute(
             select(WorkflowDefinition).where(WorkflowDefinition.name == defn["name"])
         )
-        if result.scalar_one_or_none():
-            continue
-
-        wf = WorkflowDefinition(
+        existing = result.scalar_one_or_none()
+        if existing:
+            # Update existing workflow definition in-place
+            existing.description = defn["description"]
+            existing.nodes = defn["nodes"]
+            existing.edges = defn.get("edges", [])
+            existing.trigger = defn.get("trigger")
+            existing.metadata_ = defn.get("metadata")
+            existing.is_active = defn.get("is_active", True)
+            existing.version = (existing.version or 1) + 1
+            wf = existing
+            logger.info("[WORKFLOW_SEED] Updated workflow: %s (v%d)", defn["name"], wf.version)
+            # Still process subscriptions below
+        else:
+            wf = WorkflowDefinition(
             id=str(uuid.uuid4()),
             name=defn["name"],
             description=defn["description"],
@@ -32,9 +49,31 @@ async def seed_default_workflows(db: AsyncSession) -> int:
             metadata_=defn.get("metadata"),
             is_active=defn.get("is_active", True),
         )
-        db.add(wf)
-        created += 1
-        logger.info("[WORKFLOW_SEED] Created workflow: %s", defn["name"])
+        if not existing:
+            db.add(wf)
+            created += 1
+            logger.info("[WORKFLOW_SEED] Created workflow: %s", defn["name"])
+
+        # Auto-create subscriptions for event-triggered workflows
+        trigger = defn.get("trigger")
+        if trigger and trigger.get("type") == "event":
+            event_pattern = trigger.get("event_pattern", "")
+            if event_pattern:
+                sub_exists = await db.execute(
+                    select(WorkflowSubscription).where(
+                        WorkflowSubscription.workflow_id == wf.id,
+                        WorkflowSubscription.event_pattern == event_pattern,
+                    )
+                )
+                if not sub_exists.scalar_one_or_none():
+                    db.add(WorkflowSubscription(
+                        id=str(uuid.uuid4()),
+                        workflow_id=wf.id,
+                        event_pattern=event_pattern,
+                        filter_conditions=trigger.get("filter_conditions"),
+                        is_active=True,
+                    ))
+                    logger.info("[WORKFLOW_SEED] Created subscription: %s → %s", defn["name"], event_pattern)
 
     if created:
         await db.commit()
