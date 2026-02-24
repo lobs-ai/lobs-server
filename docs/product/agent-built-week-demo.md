@@ -157,3 +157,20 @@ Why this week is the strongest demo window:
 ## 9) 30-second social proof version
 
 “In one week (Feb 17–23), we used agents for real engineering + GTM execution, reclaimed ~8 founder hours, moved key decisions from next-day to same-day, and shipped reusable assets. Agent-Built Week is inspectable outcomes—not AI theater.”
+
+---
+
+## 10) Narrative package contents (for publishing handoff)
+
+Use this file as the source of truth and export into:
+- **Website proof page:** Sections 1, 4, 5, and 9
+- **Sales one-pager:** Sections 1, 5, and 6 (script adapted to talk track)
+- **Founder demo deck (8 min):** Sections 4, 5, 6, and 7
+
+### Copy-ready title options
+- **Agent-Built Week: 7 Days, One Founder Day Reclaimed**
+- **From AI Demos to Operating Proof: Our Agent-Built Week**
+- **What We Actually Shipped in 7 Days with Agents**
+
+### Evidence note (for footer)
+“All claims in this demo map to inspectable repository artifacts and dated documentation. Metrics are marked estimated unless telemetry-backed exports are attached.”
