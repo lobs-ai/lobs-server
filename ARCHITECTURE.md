@@ -5,7 +5,8 @@ High-level overview of the backend system design, data flow, and key components.
 **Last Updated:** 2026-02-24
 
 **Recent Architectural Changes (Feb 24):**
-- **Daily Ops Brief** — 8am auto-posted summary of calendar, email, GitHub blockers, and top agent tasks (design: [docs/daily-ops-brief-design.md](docs/daily-ops-brief-design.md)); `BriefService` + `/api/brief/today` + `RoutineRunner` hook `brief:daily_ops`
+- **Daily Ops Brief** — 8am auto-posted summary of calendar, email, GitHub blockers, and top agent tasks (design: [docs/daily-ops-brief-design.md](docs/daily-ops-brief-design.md)); `BriefService` + `/api/brief/today` + RoutineRunner hook `daily_ops_brief` (cron `0 13 * * *` = 8am ET)
+- **Inbox Remediation Tracking** — Closes approved→queued→cancelled silent decay loop: `Task.source_inbox_item_id` (FK to inbox item at spawn), `Task.cancel_reason` (required on rejection), `GET /api/inbox/stuck-remediations` triage list, and `StuckRemediationsAdapter` in BriefService (design: [docs/inbox-remediation-tracking-design.md](docs/inbox-remediation-tracking-design.md))
 
 **Recent Architectural Changes (Feb 21-23):**
 - **Agent learning system** — Closed-loop feedback from task outcomes to prompt improvement (✅ design complete, validated, ready for implementation - see [docs/agent-learning-READY.md](docs/agent-learning-READY.md); Phase 1.3 retry plan in [docs/handoffs/learning-phase-1.3-rescue-architecture.md](docs/handoffs/learning-phase-1.3-rescue-architecture.md))

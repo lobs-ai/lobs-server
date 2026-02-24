@@ -18,22 +18,22 @@ Rafe loses time each morning manually checking calendar, email, GitHub, and task
 ### Architecture
 
 ```
-Orchestrator Engine (8am ET hook, same pattern as daily_compression)
+OrchestratorEngine direct timer (once daily at _brief_hour_et=8 ET)
         │
         ▼
 BriefService (app/services/brief_service.py)
         │
         ├── CalendarAdapter → GoogleCalendarService.get_rafe_schedule(days=1)
         │                     + internal ScheduledEvent table fallback
-        ├── EmailAdapter    → EmailService.read_emails(filter=unread, priority)
+        ├── EmailAdapter    → EmailService.get_unread(max_results=20)
         ├── GitHubAdapter   → `gh issue list --label=blocker` via subprocess
-        └── TasksAdapter    → DB query: top 3 tasks by priority_score / status
+        └── TasksAdapter    → DB query: top 5 tasks by sort_order/status (inbox, active)
         │
         ▼
 BriefFormatter → markdown card string
         │
         ├── /api/brief/today (on-demand trigger, returns {markdown, sections, generated_at})
-        └── ChatManager.store_message(role="assistant", session_key=BRIEF_SESSION_KEY)
+        └── store_message(role="assistant", session_key=BRIEF_CHAT_SESSION_KEY)
                 + manager.broadcast_to_session(...)
 ```
 
@@ -104,11 +104,8 @@ Every adapter is wrapped in try/except. If Google Calendar isn't configured, the
 ### Session key for brief delivery
 The brief is posted to a configurable session via env var `BRIEF_CHAT_SESSION_KEY` (default: `"main"`). This follows the existing `session_key` convention used throughout the chat system. The message role is `"assistant"` with metadata `{"source": "daily_brief", "generated_at": "..."}` so the UI can style it distinctively if desired.
 
-### 8am trigger uses existing engine pattern
-The engine already has `_daily_compression_hour_et` (3am) and memory maintenance checks. We add:
-- `_brief_hour_et = 8` (configurable via runtime settings)
-- `_last_brief_date_et: str | None = None` (same marker pattern)
-The check runs in the same `now_et.hour >= X` gate, with a date key `"daily_brief_last_date_et"` persisted to SystemSettings.
+### 8am trigger uses direct engine timer (same pattern as memory maintenance)
+The engine already has a `_last_memory_maintenance_date_et` / `_daily_compression_hour_et` direct timer pattern. We follow this exactly: add `_brief_hour_et` and `_last_brief_date_et` to the engine, check them in the control loop, and persist the marker to `OrchestratorSetting`. This avoids a DB seed step (simpler) and is consistent with the existing pattern. The RoutineRunner approach was considered but rejected as over-engineering for a single daily trigger.
 
 ### On-demand endpoint
 `GET /api/brief/today` lets Rafe (or the UI) trigger the brief anytime. Returns JSON with `markdown` string and structured `sections`. Optional `?send_to_chat=true` param injects it into the chat thread. This is useful for testing and for a "Refresh Brief" button in Mission Control.
@@ -130,7 +127,7 @@ async def fetch(self) -> BriefSection:
 ### EmailAdapter
 ```python
 async def fetch(self) -> BriefSection:
-    # 1. Call EmailService.read_emails(filter="unread", limit=20)
+    # 1. Call EmailService.get_unread(max_results=20)
     # 2. Filter: sender in priority list OR subject contains urgent keywords
     #    Priority keywords: "urgent", "ASAP", "blocker", "critical", "action required"
     # 3. Return top 5 items sorted by recency
@@ -151,9 +148,10 @@ async def fetch(self) -> BriefSection:
 ```python
 async def fetch(self) -> BriefSection:
     # DB query: tasks WHERE status IN ('inbox', 'active') 
-    #           ORDER BY priority_score DESC, created_at ASC 
+    #           ORDER BY sort_order ASC, created_at ASC 
     #           LIMIT 5
-    # Map to BriefItems with priority from task.status/priority_score
+    # Note: priority_score is in the model but NOT the actual DB schema.
+    # Use sort_order + created_at. All task items use priority='normal'.
     # This always works (no external dependency)
 ```
 
@@ -195,29 +193,53 @@ GET /api/brief/today?send_to_chat=false
 - `GET /api/brief/today?send_to_chat=true` stores a ChatMessage with role=assistant
 - Auth required (Bearer token)
 
-### Task 3 — 8am engine trigger (small)
-**File:** `app/orchestrator/engine.py`
+### Task 3 — 8am direct engine timer (small)
+**Files:** `app/orchestrator/engine.py`, `app/orchestrator/runtime_settings.py`
 
-Add to engine's control loop (same pattern as `_daily_compression_hour_et`):
+**Approach: direct timer pattern** — same as memory maintenance (lines 574-602 of engine.py). Simpler than RoutineRunner + DB seed; avoids a migration step entirely.
+
+**Step A — app/orchestrator/runtime_settings.py**
+
+Add two new constants alongside the `SETTINGS_KEY_DAILY_COMPRESSION_*` entries:
 ```python
-self._brief_hour_et = 8  # loaded from runtime settings
-self._last_brief_date_et: str | None = None  # loaded from SystemSettings
-
-# In the control loop:
-if (self._last_brief_date_et != today_key_et
-        and now_et.hour >= self._brief_hour_et):
-    self._last_brief_date_et = today_key_et
-    await self._run_daily_brief(db)
+SETTINGS_KEY_DAILY_BRIEF_HOUR_ET = 'orchestrator.daily_brief.hour_et'
+SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET = 'orchestrator.daily_brief.last_date_et'
+```
+Add to DEFAULT_RUNTIME_SETTINGS:
+```python
+SETTINGS_KEY_DAILY_BRIEF_HOUR_ET: 8,
+SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET: '',
 ```
 
-`_run_daily_brief(db)` calls `BriefService.generate(db)`, formats markdown, and posts to chat (same code path as `send_to_chat=true`).
+**Step B — app/orchestrator/engine.py**
 
-Add `"daily_brief_last_date_et"` to SystemSettings persistence (same as `"memory_maintenance_last_date_et"`).
+In `__init__`: add `self._brief_hour_et = 8` and `self._last_brief_date_et: str | None = None`
+
+In `_refresh_runtime_settings()`: load both new keys following the same pattern as `SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET` and `maint_marker_key`.
+
+In the control loop, add AFTER the memory maintenance block:
+```python
+if (
+    self._last_brief_date_et != today_key_et
+    and now_et.hour >= self._brief_hour_et
+):
+    self._last_brief_date_et = today_key_et
+    await self._run_daily_brief(db, today_key_et)
+```
+
+Add private method `_run_daily_brief(self, db, today_key)`:
+1. Import BriefService/BriefFormatter from `app.services.brief_service`
+2. Call `BriefService(db).generate()` → `DailyBrief`
+3. Format markdown, call `store_message` + `manager.broadcast_to_session`
+4. Persist marker to `OrchestratorSetting(key=SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET, value=today_key)`
+5. Logs `[BRIEF] Daily ops brief posted` on success
+6. All wrapped in try/except — never raises
 
 **Acceptance criteria:**
-- Brief fires once per day at 8am ET, not on restart
-- `_last_brief_date_et` persisted to SystemSettings so restarts don't re-fire
-- Brief appears in chat session after 8am trigger
+- Brief fires once per day at hour >= `_brief_hour_et` (default 8) ET
+- `_last_brief_date_et` persisted to `OrchestratorSetting` — survives server restart without re-firing
+- Engine crash-safe — exceptions in `_run_daily_brief` caught and logged with `[BRIEF]`
+- `_brief_hour_et` and `_last_brief_date_et` appear in orchestrator status endpoint response
 
 ### Task 4 — Tests (small)
 **File:** `tests/test_brief_service.py`
@@ -239,6 +261,7 @@ Write:
 | Async adapters with `asyncio.gather` | Yes | Parallel fetching keeps latency low (~1-2s total) |
 | Hard-code session key "main" | No — use env var | "main" is the obvious default but may vary per deployment |
 | Store brief in dedicated table | No — post as chat message | Reuses existing UI rendering and WebSocket delivery |
+| Engine direct timer vs RoutineRunner | Direct timer (memory maintenance pattern) | Simpler, no DB seed required, consistent with existing memory_maintenance implementation |
 | GitHub label filter ("blocker") | Configurable via env var `GITHUB_BLOCKER_LABEL` (default: "blocker") | Projects use different label conventions |
 
 ---
@@ -267,7 +290,8 @@ Write:
 | `app/services/brief_service.py` | **Create** |
 | `app/routers/brief.py` | **Create** |
 | `app/main.py` | **Modify** — add brief router import |
-| `app/orchestrator/engine.py` | **Modify** — add 8am trigger |
+| `app/orchestrator/engine.py` | **Modify** — add `_brief_hour_et` timer and `_run_daily_brief` method |
+| `app/orchestrator/runtime_settings.py` | **Modify** — add `SETTINGS_KEY_DAILY_BRIEF_*` constants |
 | `tests/test_brief_service.py` | **Create** |
 
 ---

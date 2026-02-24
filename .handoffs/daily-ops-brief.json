@@ -2,8 +2,8 @@
   "to": "programmer",
   "initiative": "daily-ops-brief",
   "title": "Implement Daily Ops Brief — full vertical slice",
-  "context": "Implement an automated 8am daily summary delivered to the assistant chat thread. It aggregates: today's Google Calendar blocks, unread priority emails, GitHub blocker issues, and top 3 agent tasks. Design doc at docs/daily-ops-brief-design.md. All three data services already exist: app/services/google_calendar.py, app/services/email_service.py, app/services/github_sync.py. The RoutineRunner system (app/orchestrator/routine_runner.py + engine.py) already supports named hooks on a cron schedule. The chat persistence+broadcast pattern is already established in app/routers/chat.py.",
-  "acceptance": "1. GET /api/brief/today returns 200 with JSON containing calendar_events, priority_emails, github_blockers, top_tasks, errors fields. 2. POST /api/brief/today/send persists a ChatMessage(role='assistant') to the 'assistant' session and returns the message_id. 3. The 'daily_ops_brief' hook is registered in engine.py's RoutineRunner and fires correctly. 4. A RoutineRegistry row with key='daily_ops_brief' and schedule='0 13 * * *' (8am ET) is seeded into the DB. 5. Each data section degrades gracefully: if Google Calendar is not configured, the calendar section is skipped and the error is listed in data.errors — the other sections still render. 6. Unit tests cover: assemble() with all sources OK, assemble() with each source failing independently, format_markdown() with full data, format_markdown() with empty sections. 7. Integration tests cover: GET /brief/today returns 200, POST /brief/today/send creates ChatMessage in DB, unauthenticated request returns 401.",
+  "context": "Implement an automated 8am daily summary delivered to the assistant chat thread. It aggregates: today's Google Calendar blocks, unread priority emails, GitHub blocker issues, and top 3 agent tasks. Full design: docs/daily-ops-brief-design.md.\n\nExisting services to integrate with:\n- app/services/google_calendar.py → GoogleCalendarService(db).get_rafe_schedule(days=1)\n- app/services/email_service.py   → EmailService(db).get_unread(max_results=20)\n- app/services/github_sync.py     → subprocess(['gh', 'issue', 'list', ...]) pattern\n- Task model (app/models.py)       → direct DB query, no external dep\n\nThe RoutineRunner (app/orchestrator/routine_runner.py + engine.py) supports named hooks on a cron schedule. The chat persistence+broadcast pattern is in app/routers/chat.py.",
+  "acceptance": "1. GET /api/brief/today returns 200 with JSON: {markdown, sections: [{name, icon, items, error, available}], generated_at}. 2. GET /api/brief/today?send_to_chat=true also persists a ChatMessage(role='assistant', metadata={source:'daily_brief'}) to the configured session and broadcasts via WebSocket. 3. The 'daily_ops_brief' hook is registered in engine.py's RoutineRunner hooks dict. 4. A RoutineRegistry row is seeded on startup with name='daily_ops_brief', hook='daily_ops_brief', schedule='0 13 * * *' (13:00 UTC = 8am ET standard), execution_policy='auto', enabled=True. 5. Each data section degrades gracefully: any failed adapter sets section.error and section.available=False — never raises — the other sections still render. 6. Unit tests: assemble() with all sources OK, assemble() with each source failing independently, format_markdown() with full data, format_markdown() with empty/errored sections. 7. Integration tests: GET /brief/today returns 200, send_to_chat=true creates ChatMessage in DB, unauthenticated request returns 401.",
   "files": [
     "docs/daily-ops-brief-design.md",
     "app/services/google_calendar.py",
@@ -13,6 +13,7 @@
     "app/services/chat_manager.py",
     "app/orchestrator/engine.py",
     "app/orchestrator/routine_runner.py",
+    "app/orchestrator/scheduler.py",
     "app/main.py",
     "app/models.py",
     "tests/"
@@ -22,37 +23,37 @@
       "order": 1,
       "title": "Create app/services/brief_service.py",
       "size": "medium",
-      "notes": "Implement BriefData dataclass, assemble() with graceful degradation, format_markdown(), post_to_chat(). For post_to_chat(): replicate the chat.py pattern — write ChatMessage to DB using SQLAlchemy, then call manager.broadcast_to_session(session_key, {...}). Use ensure_session_exists() pattern from chat.py to guarantee the 'assistant' session exists before writing."
+      "notes": "Implement three core things:\n\n1) Dataclasses:\n   @dataclass BriefItem(source, title, detail, priority='normal', url=None, time=None)\n   @dataclass BriefSection(name, icon, items: list[BriefItem], error=None, available=True)\n   @dataclass DailyBrief(generated_at, sections: list[BriefSection], suggested_plan)\n\n2) Four adapters — each is an async method that MUST return BriefSection, never raise:\n   - CalendarAdapter: GoogleCalendarService(db).get_rafe_schedule(days=1); filter events where date == today ET; fallback to ScheduledEvent table if configured returns nothing or throws\n   - EmailAdapter: EmailService(db).get_unread(max_results=20); filter/score by keywords: 'urgent', 'ASAP', 'blocker', 'critical', 'action required'; return top 5 sorted by recency\n   - GitHubAdapter: asyncio subprocess(['gh','issue','list','--state=open','--label', GITHUB_BLOCKER_LABEL,'--json','number,title,url,updatedAt','--limit=10'], timeout=15s); GITHUB_BLOCKER_LABEL env var defaults to 'blocker'; catch FileNotFoundError (gh not installed)\n   - TasksAdapter: DB query — SELECT from Task WHERE status IN ('inbox','active') ORDER BY sort_order ASC, created_at ASC LIMIT 5. NOTE: no priority_score column — use sort_order.\n\n3) BriefService.generate(db) → runs all 4 adapters via asyncio.gather (with asyncio.wait_for per adapter, timeout=10s), returns DailyBrief.\n   BriefFormatter.to_markdown(brief: DailyBrief) → markdown string matching the design doc example\n   BriefFormatter.suggest_plan(brief) → 1-3 sentence heuristic (GitHub blockers > high tasks > meetings)\n\nEvery adapter wraps its logic in try/except Exception — on error: return BriefSection(name=..., icon=..., items=[], error=str(e), available=False)."
     },
     {
       "order": 2,
       "title": "Create app/routers/brief.py",
       "size": "small",
-      "notes": "Two endpoints: GET /brief/today (returns BriefData as JSON) and POST /brief/today/send (generates + posts to chat, returns message_id). Both require auth."
+      "notes": "Two endpoints:\n  GET /brief/today?send_to_chat=false\n  - Requires Bearer auth (Depends(require_auth))\n  - Calls BriefService(db).generate(db), BriefFormatter.to_markdown(brief)\n  - Returns: {markdown: str, sections: [...], generated_at: iso_str}\n  - If send_to_chat=true:\n    * session_key = os.getenv('BRIEF_CHAT_SESSION_KEY', 'main')\n    * Ensure session exists (see ensure_session_exists pattern in chat.py)\n    * Write ChatMessage(role='assistant', content=markdown, metadata={'source':'daily_brief','generated_at':iso_str}) to DB\n    * Broadcast via manager.broadcast_to_session(session_key, {type:'message', data:{...}})\n    * Return includes message_id\n\nAuth: use Depends(require_auth) from app.auth."
     },
     {
       "order": 3,
       "title": "Register router in app/main.py",
       "size": "trivial",
-      "notes": "Import brief.router and add app.include_router(brief.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])"
+      "notes": "Import and include brief router — follow same pattern as all other routers. Prefix /api/brief."
     },
     {
       "order": 4,
-      "title": "Register hook in app/orchestrator/engine.py",
+      "title": "Register 'daily_ops_brief' hook in engine.py RoutineRunner",
       "size": "small",
-      "notes": "In the RoutineRunner instantiation (around line 357), add 'daily_ops_brief': _make_daily_brief_hook(db) to the hooks dict. Implement _make_daily_brief_hook as a closure that returns an async function calling BriefService."
+      "notes": "In engine.py, around line 357 where RoutineRunner is instantiated with a hooks dict:\n  Add: 'daily_ops_brief': _make_daily_brief_hook(db)\n\nImplement _make_daily_brief_hook as a module-level function that returns an async hook function:\n  async def _hook(routine: RoutineRegistry):\n    from app.services.brief_service import BriefService, BriefFormatter\n    import os\n    brief = await BriefService(db).generate(db)\n    markdown = BriefFormatter.to_markdown(brief)\n    session_key = os.getenv('BRIEF_CHAT_SESSION_KEY', 'main')\n    # post to chat using same pattern as brief.py send_to_chat=true path\n    return {'status': 'ok', 'sections': len(brief.sections)}\n  Wrap entire body in try/except — log [BRIEF] prefix — never raise."
     },
     {
       "order": 5,
-      "title": "Seed RoutineRegistry for daily brief",
+      "title": "Seed RoutineRegistry row for daily brief",
       "size": "small",
-      "notes": "Add a migration script (follow existing pattern in migrations/) or use a startup seed that inserts: key='daily_ops_brief', label='Daily Ops Brief', schedule='0 13 * * *', execution_policy='auto', enabled=True. Use INSERT OR IGNORE so it's idempotent. Check app/models.py for RoutineRegistry field names."
+      "notes": "On engine startup (or via a migration script), INSERT OR IGNORE a RoutineRegistry row with:\n  - id: uuid4 (str)\n  - name: 'daily_ops_brief'  ← this is the unique identifier (not 'key')\n  - description: 'Daily Ops Brief — 8am summary of calendar, email, GitHub blockers, and top tasks'\n  - hook: 'daily_ops_brief'  ← maps to RoutineRunner hooks dict key\n  - schedule: '0 13 * * *'   ← 13:00 UTC = 8:00am ET standard time. NOTE: compute_next_fire_time() does NOT use schedule_timezone — cron is always interpreted as UTC by the scheduler\n  - schedule_timezone: 'UTC' (not 'America/New_York' — the timezone field exists in the model but is not consumed by compute_next_fire_time() in app/orchestrator/scheduler.py)\n  - execution_policy: 'auto'\n  - enabled: True\n  - policy_tier: 'standard'\n  Use INSERT OR IGNORE or SELECT then INSERT to be idempotent.\n  Can be done as a migration in migrations/ OR as a startup seed in engine._run_startup_seeds() if that exists, OR directly in engine startup."
     },
     {
       "order": 6,
       "title": "Write tests",
       "size": "medium",
-      "notes": "tests/test_brief_service.py (unit tests with mocked services) and tests/test_brief_router.py (integration tests). See testing strategy in docs/daily-ops-brief-design.md."
+      "notes": "tests/test_brief_service.py:\n  1. Unit: BriefFormatter.to_markdown() with fully populated DailyBrief (all 4 sections, items present) — assert all expected emoji headers appear\n  2. Unit: BriefFormatter.to_markdown() with all sections errored (available=False, error='service unavailable') — assert brief still renders without raising\n  3. Unit: TasksAdapter.fetch() with mock AsyncSession returning 3 Task rows — assert 3 BriefItems, section.error is None\n  4. Integration: GET /api/brief/today with TestClient, mock BriefService.generate to return a fixed DailyBrief — assert 200, response has 'markdown' key\n  5. Integration: GET /api/brief/today without auth token — assert 401\n\nFollow conftest.py patterns already in tests/."
     }
   ]
 }
