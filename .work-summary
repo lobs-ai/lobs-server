@@ -1,2 +1,1 @@
-Designed the 'Handle This' intake pipeline and wrote implementation handoffs for server endpoint + Mission Control chat flow.
-See docs/design/handle-this-intake-pipeline.md and docs/handoffs/handle-this-intake-handoffs.json.
+Defined a Research-to-Build Handoff Contract template + 8-point completeness gate, and retrofitted the next 3 approved researcher initiatives into implementation-ready packets in research-findings.md.

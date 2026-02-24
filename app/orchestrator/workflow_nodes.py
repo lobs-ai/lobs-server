@@ -102,10 +102,44 @@ class NodeHandlers:
         except Exception as e:
             logger.debug("[NODE] Session delete failed: %s", e)
 
+    async def _resolve_model_tier(self, tier: str, agent_type: str, context: dict) -> str | None:
+        """Resolve a model tier name to an actual model using ModelChooser.
+
+        If the tier is already a model id (contains '/' or is an alias like 'sonnet'),
+        return it as-is. Otherwise use the full ModelChooser pipeline.
+        """
+        # If it looks like an explicit model or alias, pass through
+        KNOWN_TIERS = {"micro", "small", "medium", "standard", "strong"}
+        if tier not in KNOWN_TIERS:
+            return tier  # Treat as explicit model/alias
+
+        try:
+            from app.orchestrator.model_chooser import ModelChooser
+            chooser = ModelChooser(self.db, provider_health=None)
+            task_ctx = context.get("task", {})
+            if not isinstance(task_ctx, dict):
+                task_ctx = {}
+            # Inject model_tier into the task dict for decide_models
+            task_for_chooser = {**task_ctx, "model_tier": tier}
+            choice = await chooser.choose(agent_type=agent_type, task=task_for_chooser)
+            return choice.model
+        except Exception as e:
+            logger.warning("[NODE] Model tier resolution failed for tier=%s: %s", tier, e)
+            return None
+
     # ── Node Type Handlers ───────────────────────────────────────────
 
     async def _exec_spawn_agent(self, config: dict, context: dict, run: Any) -> NodeResult:
-        """Spawn an OpenClaw agent session."""
+        """Spawn an OpenClaw agent session.
+
+        Config:
+            agent_type: str — agent template id (programmer, researcher, writer, etc.)
+            prompt_template: str — Jinja-lite template rendered from run context
+            model_tier: str — optional tier name (micro/small/medium/standard/strong)
+                         or explicit model id (e.g. "sonnet", "anthropic/claude-sonnet-4-5")
+            model: str — explicit model override (takes priority over model_tier)
+            timeout_seconds: int — max session runtime (default 900)
+        """
         agent_type = config.get("agent_type", "programmer")
         prompt_template = config.get("prompt_template", "")
         model_tier = config.get("model_tier")
@@ -114,9 +148,19 @@ class NodeHandlers:
         if not prompt.strip():
             return NodeResult(status="failed", error="Empty prompt after template rendering")
 
-        # Use Gateway API to spawn
+        # Model selection: explicit model > model_tier > task model_tier > default
         label = f"wf-{run.id[:8]}"
-        model = model_tier or "sonnet"  # Default
+        model: str | None = config.get("model")
+        if not model and model_tier:
+            model = await self._resolve_model_tier(model_tier, agent_type, context)
+        if not model:
+            # Check if the task itself has a model_tier
+            task_ctx = context.get("task", {})
+            task_tier = task_ctx.get("model_tier") if isinstance(task_ctx, dict) else None
+            if task_tier:
+                model = await self._resolve_model_tier(task_tier, agent_type, context)
+        if not model:
+            model = "sonnet"  # Default
 
         try:
             async with aiohttp.ClientSession() as session:
@@ -619,6 +663,16 @@ async def _pcall_run_compression(db, worker_manager, context, **kw):
     return await run_daily_compression(db, worker_manager, context, **kw)
 
 
+async def _pcall_assign_agent(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_assignment import assign_agent
+    return await assign_agent(db, worker_manager, context, **kw)
+
+
+async def _pcall_scan_unassigned(db, worker_manager, context, **kw):
+    from app.orchestrator.workflow_assignment import scan_unassigned
+    return await scan_unassigned(db, worker_manager, context, **kw)
+
+
 _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Legacy monolithic callables
     "reflection_cycle.run_strategic": _pcall_run_strategic_reflections,
@@ -635,4 +689,7 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     "reflection.check_complete": _pcall_check_reflections,
     "reflection.run_sweep": _pcall_run_initiative_sweep,
     "reflection.run_compression": _pcall_run_compression,
+    # Agent assignment
+    "assignment.assign_agent": _pcall_assign_agent,
+    "assignment.scan_unassigned": _pcall_scan_unassigned,
 }

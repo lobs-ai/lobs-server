@@ -458,24 +458,9 @@ class OrchestratorEngine:
                     logger.error(f"[ENGINE] Inbox processing failed: {e}", exc_info=True)
                     await db.rollback()
 
-            # 3. Auto-assign agents for unassigned active tasks (best-effort)
-            if not self._paused and current_time - self._last_auto_assign_check >= self._auto_assign_interval:
-                try:
-                    assigner = TaskAutoAssigner(db)
-                    assign_result = await assigner.run_once(limit=20)
-                    self._last_auto_assign_check = current_time
-                    if assign_result.assigned > 0:
-                        activity = True
-                        logger.info(
-                            "[ENGINE] Auto-assign: scanned=%s assigned=%s skipped=%s failed=%s",
-                            assign_result.scanned,
-                            assign_result.assigned,
-                            assign_result.skipped,
-                            assign_result.failed,
-                        )
-                except Exception as e:
-                    logger.error("[ENGINE] Auto-assign failed: %s", e, exc_info=True)
-                    await db.rollback()
+            # 3. Auto-assign agents — now handled by workflow engine
+            #    (scan-unassigned workflow + agent-assignment workflow)
+            #    Legacy auto-assigner removed.
 
             # 4. Capability registry sync (hourly)
             if current_time - self._last_capability_sync >= self._capability_sync_interval:
@@ -531,19 +516,26 @@ class OrchestratorEngine:
                         return daily_result
 
                     async def _route_task_created(payload: dict[str, Any]) -> bool:
+                        """Emit a workflow event for unassigned new tasks."""
                         task_id = payload.get("task_id")
                         if not task_id:
                             return False
                         db_task = await db.get(TaskModel, task_id)
                         if db_task is None or db_task.agent:
                             return False
-                        return await self._request_lobs_assignment(db, {
-                            "id": db_task.id,
-                            "project_id": db_task.project_id,
-                            "title": db_task.title,
-                            "notes": db_task.notes,
-                            "agent": db_task.agent,
-                        })
+                        # Emit assignment event for the workflow engine
+                        wf_exec = WorkflowExecutor(db, worker_manager=worker_manager)
+                        await wf_exec.emit_event(
+                            "task.needs_assignment",
+                            {
+                                "task_id": db_task.id,
+                                "title": db_task.title,
+                                "notes": (db_task.notes or "")[:500],
+                                "project_id": db_task.project_id,
+                            },
+                            source="control_loop",
+                        )
+                        return True
 
                     control_loop = LobsControlLoopService(
                         db,
@@ -679,45 +671,43 @@ class OrchestratorEngine:
                     f"{len(eligible_tasks)} task(s) queued."
                 )
 
-            # 8. Process eligible tasks
+            # 8. Process eligible tasks — ALL tasks go through workflow engine
             workflow_executor = WorkflowExecutor(db, worker_manager=worker_manager)
             for task_dict in eligible_tasks:
                 activity = True
                 
                 task_id = task_dict.get("id")
                 project_id = task_dict.get("project_id")
-                task_title = task_dict.get("title", task_id[:8] if task_id else "unknown")
 
                 if not task_id or not project_id:
                     logger.warning("[ENGINE] Task missing ID or project_id, skipping")
                     continue
 
-                # Strict assignment policy: never guess agent routing in engine.
                 agent_type = task_dict.get("agent")
+
+                # Tasks without an agent: emit assignment event for the
+                # workflow-based LLM assigner (replaces old inbox-item approach)
                 if not agent_type:
-                    created = await self._request_lobs_assignment(db, task_dict)
-                    if created:
-                        activity = True
-                    logger.info(
-                        "[ENGINE] Task %s has no assigned agent; queued Lobs assignment request",
-                        task_id[:8],
-                    )
+                    try:
+                        await workflow_executor.emit_event(
+                            "task.needs_assignment",
+                            {
+                                "task_id": task_id,
+                                "title": task_dict.get("title", ""),
+                                "notes": (task_dict.get("notes") or "")[:500],
+                                "project_id": project_id,
+                            },
+                            source="engine",
+                        )
+                        logger.info(
+                            "[ENGINE] Task %s has no agent; emitted assignment event",
+                            task_id[:8],
+                        )
+                    except Exception as e:
+                        logger.warning("[ENGINE] Failed to emit assignment event for %s: %s", task_id[:8], e)
                     continue
 
-                # Check if a workflow matches this task
-                try:
-                    matched_workflow = await workflow_executor.match_workflow(task_dict)
-                    if matched_workflow:
-                        await workflow_executor.start_run(matched_workflow, task=task_dict, trigger_type="task")
-                        logger.info(
-                            "[ENGINE] Task %s matched workflow '%s', started run",
-                            task_id[:8], matched_workflow.name,
-                        )
-                        continue
-                except Exception as e:
-                    logger.warning("[ENGINE] Workflow match failed for %s: %s", task_id[:8], e)
-
-                # GitHub claim handshake before spawning work
+                # GitHub claim handshake before workflow start
                 if task_dict.get("external_source") == "github":
                     project = await db.get(ProjectModel, project_id)
                     db_task = await db.get(TaskModel, task_id)
@@ -744,36 +734,40 @@ class OrchestratorEngine:
                         await db.rollback()
                         continue
 
-                # Check circuit breaker before spawning
+                # Check circuit breaker before starting workflow
                 allowed, reason = await circuit_breaker.should_allow_spawn(
                     project_id=project_id,
-                    agent_type=agent_type
+                    agent_type=agent_type,
                 )
-                
                 if not allowed:
-                    logger.warning(
-                        f"[ENGINE] Circuit breaker blocked spawn for {task_id[:8]}: {reason}"
-                    )
+                    logger.warning("[ENGINE] Circuit breaker blocked task %s: %s", task_id[:8], reason)
                     continue
 
-                # Try to spawn worker
+                # Route through workflow engine — match task to workflow
+                try:
+                    matched_workflow = await workflow_executor.match_workflow(task_dict)
+                    if matched_workflow:
+                        await workflow_executor.start_run(matched_workflow, task=task_dict, trigger_type="task")
+                        logger.info(
+                            "[ENGINE] Task %s → workflow '%s'",
+                            task_id[:8], matched_workflow.name,
+                        )
+                        continue
+                except Exception as e:
+                    logger.warning("[ENGINE] Workflow match failed for %s: %s", task_id[:8], e)
+
+                # Fallback: direct spawn (legacy path — should rarely hit now)
+                logger.warning(
+                    "[ENGINE] Task %s (agent=%s) has no matching workflow; using legacy direct spawn",
+                    task_id[:8], agent_type,
+                )
                 spawned = await worker_manager.spawn_worker(
                     task=task_dict,
                     project_id=project_id,
-                    agent_type=agent_type
+                    agent_type=agent_type,
                 )
-
                 if spawned:
-                    logger.info(
-                        f"[ENGINE] Spawned worker for task {task_id[:8]} "
-                        f"(project={project_id}, agent={agent_type})"
-                    )
-                    # Continue to try spawning more workers (up to max_workers)
-                else:
-                    logger.debug(
-                        f"[ENGINE] Worker not spawned for task {task_id[:8]} "
-                        f"(likely queued due to locks/capacity)"
-                    )
+                    logger.info("[ENGINE] Legacy spawn for task %s (project=%s, agent=%s)", task_id[:8], project_id, agent_type)
 
         return activity
 

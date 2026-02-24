@@ -42,11 +42,308 @@ async def seed_default_workflows(db: AsyncSession) -> int:
 
 
 DEFAULT_WORKFLOWS = [
+    # ══════════════════════════════════════════════════════════════════
+    # MASTER TASK ROUTER — entry point for ALL tasks
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "task-router",
+        "description": "Master task router: routes all tasks to the correct agent-specific workflow based on assigned agent type. This is the single entry point for all task execution.",
+        "trigger": {"type": "task_match", "agent_types": ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "route_by_agent",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "task.agent == programmer", "goto": "run_code_task"},
+                        {"match": "task.agent == researcher", "goto": "run_research_task"},
+                        {"match": "task.agent == writer", "goto": "run_writer_task"},
+                        {"match": "task.agent == architect", "goto": "run_architect_task"},
+                        {"match": "task.agent == reviewer", "goto": "run_reviewer_task"},
+                        {"match": "task.agent == inbox-responder", "goto": "run_inbox_task"},
+                    ],
+                    "default": "run_generic_task",
+                },
+            },
+            # ── Programmer path ──────────────────────────────────────
+            {
+                "id": "run_code_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "programmer",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "timeout_seconds": 900,
+                },
+                "on_success": "run_tests",
+                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "run_tests",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1 || true",
+                    "timeout_seconds": 300,
+                },
+                "on_success": "check_tests",
+                "on_failure": {"retry": 1, "fallback": "fix_tests", "escalate_after": 3, "abort_on": ["timeout"]},
+            },
+            {
+                "id": "check_tests",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_tests.returncode == 0", "goto": "run_lint"},
+                    ],
+                    "default": "fix_tests",
+                },
+            },
+            {
+                "id": "fix_tests",
+                "type": "send_to_session",
+                "config": {
+                    "session_ref": "run_code_task.session_key",
+                    "message_template": "Tests failed. Fix these errors:\n\nSTDOUT:\n{run_tests.stdout}\n\nSTDERR:\n{run_tests.stderr}",
+                },
+                "on_success": "run_tests_retry",
+                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
+            },
+            {
+                "id": "run_tests_retry",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1 || true",
+                    "timeout_seconds": 300,
+                },
+                "on_success": "check_tests_retry",
+                "on_failure": {"retry": 0, "abort_on": ["timeout"]},
+            },
+            {
+                "id": "check_tests_retry",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_tests_retry.returncode == 0", "goto": "run_lint"},
+                    ],
+                    "default": "escalate_test_failure",
+                },
+            },
+            {
+                "id": "escalate_test_failure",
+                "type": "gate",
+                "config": {
+                    "prompt": "Tests failed after fix attempt for task: {task.title}. Manual review needed.",
+                    "timeout_hours": 24,
+                },
+                "on_success": "cleanup",
+            },
+            {
+                "id": "run_lint",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && ruff check . 2>&1 || true",
+                    "timeout_seconds": 120,
+                },
+                "on_success": "check_lint",
+                "on_failure": {"retry": 0, "abort_on": ["timeout"]},
+            },
+            {
+                "id": "check_lint",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "run_lint.returncode == 0", "goto": "commit"},
+                    ],
+                    "default": "fix_lint",
+                },
+            },
+            {
+                "id": "fix_lint",
+                "type": "send_to_session",
+                "config": {
+                    "session_ref": "run_code_task.session_key",
+                    "message_template": "Lint errors found. Fix them:\n\n{run_lint.stdout}",
+                },
+                "on_success": "run_lint",
+                "on_failure": {"retry": 0},
+            },
+            {
+                "id": "commit",
+                "type": "tool_call",
+                "config": {
+                    "command": "cd {project.repo_path} && git add -A && git diff --cached --quiet || git commit -m 'agent(programmer): {task.title}' --author 'lobs-programmer <thelobsbot@gmail.com>'",
+                    "timeout_seconds": 30,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 1},
+            },
+            # ── Researcher path ──────────────────────────────────────
+            {
+                "id": "run_research_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "researcher",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "timeout_seconds": 900,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            # ── Writer path ──────────────────────────────────────────
+            {
+                "id": "run_writer_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "writer",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "timeout_seconds": 900,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            # ── Architect path ───────────────────────────────────────
+            {
+                "id": "run_architect_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "architect",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "model_tier": "strong",
+                    "timeout_seconds": 1200,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            # ── Reviewer path ────────────────────────────────────────
+            {
+                "id": "run_reviewer_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "reviewer",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "timeout_seconds": 600,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            # ── Inbox responder path ─────────────────────────────────
+            {
+                "id": "run_inbox_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "inbox-responder",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "model_tier": "medium",
+                    "timeout_seconds": 300,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
+            },
+            # ── Generic fallback ─────────────────────────────────────
+            {
+                "id": "run_generic_task",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "programmer",
+                    "prompt_template": "{task.title}\n\n{task.notes}",
+                    "timeout_seconds": 900,
+                },
+                "on_success": "notify_complete",
+                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
+            },
+            # ── Shared terminal nodes ────────────────────────────────
+            {
+                "id": "notify_complete",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Task completed: {task.title} (agent: {task.agent})",
+                },
+                "on_success": "cleanup",
+            },
+            {
+                "id": "cleanup",
+                "type": "cleanup",
+                "config": {"delete_session": True},
+            },
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "core", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # AGENT ASSIGNMENT — LLM assigns agent to unassigned tasks
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "agent-assignment",
+        "description": "Use an LLM to analyze unassigned tasks and assign the correct agent type. Triggered by task.created events or on a schedule.",
+        "trigger": {"type": "event", "event_pattern": "task.needs_assignment"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "assign_agent",
+                "type": "python_call",
+                "config": {
+                    "callable": "assignment.assign_agent",
+                    "args_template": {
+                        "task_id": "{trigger.task_id}",
+                    },
+                },
+                "on_success": "check_assignment",
+                "on_failure": {"retry": 1, "abort_on": ["python_error"]},
+            },
+            {
+                "id": "check_assignment",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "assign_agent.assigned == true", "goto": "done"},
+                    ],
+                    "default": "notify_unassignable",
+                },
+            },
+            {
+                "id": "notify_unassignable",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Could not assign agent for task: {assign_agent.task_title}. Reason: {assign_agent.reason}",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "core", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # SCAN UNASSIGNED — periodic scan for tasks missing agents
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "scan-unassigned",
+        "description": "Periodically scan for active tasks without an assigned agent and emit assignment events.",
+        "trigger": {"type": "schedule", "cron": "*/2 * * * *", "timezone": "UTC"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "scan",
+                "type": "python_call",
+                "config": {"callable": "assignment.scan_unassigned"},
+                "on_success": "done",
+                "on_failure": {"retry": 1},
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "core", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # LEGACY AGENT-SPECIFIC WORKFLOWS (kept for direct triggering)
+    # ══════════════════════════════════════════════════════════════════
     {
         "name": "code-task",
-        "description": "Standard code task: spawn programmer, run tests, fix failures, lint, commit, cleanup.",
-        "trigger": {"type": "task_match", "agent_types": ["programmer"]},
-        "is_active": False,  # Opt-in — enable via API when ready
+        "description": "Standalone code task workflow (superseded by task-router). Available for direct triggering.",
+        "trigger": None,  # No auto-trigger — task-router handles programmer tasks
+        "is_active": False,
         "nodes": [
             {
                 "id": "write_code",
@@ -169,8 +466,8 @@ DEFAULT_WORKFLOWS = [
     },
     {
         "name": "research-task",
-        "description": "Simple research task: spawn researcher, deliver results, cleanup.",
-        "trigger": {"type": "task_match", "agent_types": ["researcher"]},
+        "description": "Standalone research task workflow (superseded by task-router). Available for direct triggering.",
+        "trigger": None,  # No auto-trigger — task-router handles researcher tasks
         "is_active": False,
         "nodes": [
             {
