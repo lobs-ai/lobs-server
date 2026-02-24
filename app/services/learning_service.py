@@ -313,36 +313,48 @@ async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
         if not child_key:
             return None
 
-        # Poll for response
+        # Poll for response — use sessions_list to find transcript path, then read directly
         import asyncio
-        for _ in range(15):
+        for attempt in range(15):
             await asyncio.sleep(3)
+
+            # First check if session is still active
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
                     f"{GATEWAY_URL}/tools/invoke",
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
-                        "tool": "sessions_history",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-hist-{uuid.uuid4().hex[:6]}",
-                        "args": {"sessionKey": child_key, "limit": 5, "includeTools": False},
+                        "tool": "sessions_list",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-learning-list-{uuid.uuid4().hex[:6]}",
+                        "args": {"limit": 50, "messageLimit": 0},
                     },
-                    timeout=aiohttp.ClientTimeout(total=15),
+                    timeout=aiohttp.ClientTimeout(total=10),
                 )
-                hist_data = await resp.json()
+                list_data = await resp.json()
 
-            if hist_data.get("ok"):
-                messages = hist_data.get("result", {}).get("details", {}).get("messages", [])
-                for msg in reversed(messages):
-                    if msg.get("role") == "assistant":
-                        content = msg.get("content", "")
-                        if isinstance(content, list):
-                            # Extract only text blocks (skip thinking blocks)
-                            content = "\n".join(
-                                b.get("text", "") for b in content
-                                if isinstance(b, dict) and b.get("type") == "text"
-                            )
-                        if isinstance(content, str) and len(content.strip()) > 20:
-                            return content.strip()
+            if not list_data.get("ok"):
+                continue
+
+            sessions = list_data.get("result", {}).get("details", {}).get("sessions", [])
+            target = None
+            for s in sessions:
+                if s.get("key") == child_key:
+                    target = s
+                    break
+
+            if not target:
+                # Session gone — try to read transcript from disk before giving up
+                break
+
+            transcript_path = target.get("transcriptPath")
+            if not transcript_path:
+                continue
+
+            # Check if transcript file exists and has content
+            if os.path.exists(transcript_path):
+                content = _extract_from_transcript(transcript_path)
+                if content and len(content) > 20:
+                    return content
 
         logger.warning("[LEARNING] No LLM response after polling")
         return None
@@ -350,6 +362,45 @@ async def _llm_generate(prompt: str, model: str = "sonnet") -> str | None:
     except Exception as e:
         logger.error("[LEARNING] LLM generation failed: %s", e, exc_info=True)
         return None
+
+
+def _extract_from_transcript(transcript_path: str) -> str | None:
+    """Read a JSONL transcript and extract the last assistant text content."""
+    try:
+        with open(transcript_path, "r") as f:
+            lines = f.readlines()
+
+        # Parse JSONL — each line is a JSON object
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            # Look for assistant message
+            role = entry.get("role")
+            if role != "assistant":
+                continue
+
+            content = entry.get("content", "")
+            if isinstance(content, str):
+                return content.strip() if len(content) > 20 else None
+
+            if isinstance(content, list):
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text_parts.append(block.get("text", ""))
+                joined = "\n".join(text_parts).strip()
+                if len(joined) > 20:
+                    return joined
+
+    except Exception as e:
+        logger.debug("[LEARNING] Transcript read failed: %s", e)
+    return None
 
 
 def _parse_json_array(text: str) -> list[dict] | None:
