@@ -227,11 +227,11 @@ if (
     await self._run_daily_brief(db, today_key_et)
 ```
 
-Add private method `_run_daily_brief(self, db, today_key)`:
+Add private method `_run_daily_brief(self, db, today_key_et: str)`:
 1. Import BriefService/BriefFormatter from `app.services.brief_service`
 2. Call `BriefService(db).generate()` → `DailyBrief`
 3. Format markdown, call `store_message` + `manager.broadcast_to_session`
-4. Persist marker to `OrchestratorSetting(key=SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET, value=today_key)`
+4. Persist marker to `OrchestratorSetting(key=SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET, value=today_key_et)` — note: `today_key_et` is the parameter, not a local variable
 5. Logs `[BRIEF] Daily ops brief posted` on success
 6. All wrapped in try/except — never raises
 
