@@ -1,7 +1,7 @@
 # Learning Loop MVP — Design Document
 
 **Status:** Ready for Implementation  
-**Date:** 2026-02-24  
+**Date:** 2026-02-24 (updated 2026-02-24)  
 **Initiative:** `agent-learning-system` (6ef17d1f)  
 **Risk Tier:** B  
 **Owner:** programmer
@@ -16,8 +16,8 @@ This document specifies the minimum production implementation:
 
 1. **Outcome Ledger** — log every agent run with task intent, prompt version hash, and outcome label
 2. **Prompt Variant Attribution** — track which prompt learnings were applied and whether they helped
-3. **`/api/learning/outcomes`** — write endpoint to submit or update outcomes
-4. **`/api/learning/summary`** — read endpoint to surface top failure patterns
+3. **`/api/agent-learning/outcomes`** — write endpoint to submit or update outcomes
+4. **`/api/agent-learning/summary`** — read endpoint to surface top failure patterns
 5. **Daily Batch Job** — ranks failure patterns and queues prompt edit suggestions for human review
 
 The database schema (`task_outcomes`, `outcome_learnings`) and SQLAlchemy models (`TaskOutcome`, `OutcomeLearning`) already exist. The implementation work is services + integration + two API endpoints + one scheduled job.
@@ -26,25 +26,31 @@ The database schema (`task_outcomes`, `outcome_learnings`) and SQLAlchemy models
 
 ## What Already Exists
 
-| Component | Status |
-|-----------|--------|
-| `app/models.py` — `TaskOutcome` model | ✅ Done |
-| `app/models.py` — `OutcomeLearning` model | ✅ Done |
-| Database tables (`task_outcomes`, `outcome_learnings`) | ✅ Migrated |
-| `app/routers/learning.py` — `GET /api/learning/stats` | ✅ Done |
-| `app/routers/learning.py` — `GET /api/learning/health` | ✅ Done |
+> **Updated 2026-02-24** — code audit shows more is done than initially tracked.
+
+| Component | File | Status |
+|-----------|------|--------|
+| `TaskOutcome` model | `app/models.py:846` | ✅ Done |
+| `OutcomeLearning` model | `app/models.py:866` | ✅ Done |
+| Database tables (`task_outcomes`, `outcome_learnings`) | migrations | ✅ Migrated |
+| `PromptEnhancer` service | `app/orchestrator/prompt_enhancer.py` | ✅ **Fully implemented** (not a stub) |
+| Worker A/B test split (20% control group) | `app/orchestrator/worker.py:~234` | ✅ Live |
+| Worker Hook 1 — pre-spawn prompt enhancement | `app/orchestrator/worker.py:~241` | ✅ Live — calls `Prompter.build_task_prompt_enhanced()` |
 
 ## What's Missing
 
-| Component | File | Phase |
-|-----------|------|-------|
-| `OutcomeTracker` service | `app/orchestrator/outcome_tracker.py` | MVP |
-| `LessonExtractor` service | `app/orchestrator/lesson_extractor.py` | MVP |
-| `PromptEnhancer` service | `app/orchestrator/prompt_enhancer.py` | MVP |
-| Worker integration (track + enhance) | `app/orchestrator/worker.py` | MVP |
-| `POST /api/learning/outcomes` | `app/routers/learning.py` | MVP |
-| `GET /api/learning/summary` | `app/routers/learning.py` | MVP |
-| Daily pattern batch job | `app/orchestrator/routine_runner.py` | MVP |
+> See [docs/handoffs/learning-loop-mvp-status.md](handoffs/learning-loop-mvp-status.md) for the authoritative current-state handoff.
+
+| Component | File | Status |
+|-----------|------|--------|
+| `OutcomeTracker` service | `app/orchestrator/outcome_tracker.py` | ❌ Missing |
+| Worker Hook 2 — post-completion tracking | `app/orchestrator/worker.py` | ❌ Missing |
+| Agent learning API endpoints | `app/routers/agent_learning.py` | ❌ Missing |
+| Daily pattern batch job | `app/orchestrator/learning_batch.py` | ❌ Missing |
+| Engine timer for batch (2am ET) | `app/orchestrator/engine.py` | ❌ Missing |
+| Router registration | `app/main.py` | ❌ Missing |
+
+**API prefix:** Use `/api/agent-learning` (not `/api/learning` — that's personal learning plans, a different system).
 
 ---
 
@@ -97,38 +103,41 @@ This hash is stored alongside `applied_learnings` in the outcome and appears in 
 
 The orchestrator's worker completion handler is in `app/orchestrator/worker.py`. Two hooks are needed:
 
-**Hook 1 — Before spawn** (prompt enhancement):
-```python
-# ~line 233, after building base_prompt
-from app.orchestrator.prompt_enhancer import PromptEnhancer
-enhanced_prompt, applied_ids = await PromptEnhancer.enhance_prompt(
-    db=db,
-    base_prompt=base_prompt,
-    task=task,
-    agent_type=agent_type,
-)
-```
+**Hook 1 — Before spawn** (prompt enhancement): ✅ **Already live**
 
-**Hook 2 — After completion** (outcome tracking):
+`worker.py` calls `Prompter.build_task_prompt_enhanced()` at ~line 241, which calls `PromptEnhancer.enhance_prompt()`. The A/B split (20% control group via `LEARNING_CONTROL_GROUP_PCT`) is also live.
+
+**Hook 2 — After completion** (outcome tracking): ❌ **Still needed**
+
 ```python
 # In _handle_worker_completion(), after updating task status
-from app.orchestrator.outcome_tracker import OutcomeTracker
-await OutcomeTracker.track_task_completion(
-    db=db,
-    task=db_task,
-    success=succeeded,
-)
+try:
+    from app.orchestrator.outcome_tracker import OutcomeTracker
+    await OutcomeTracker.track_completion(
+        db=self.db,
+        task=db_task,
+        success=succeeded,
+        agent_type=agent_type,
+        applied_learning_ids=worker_info.applied_learning_ids or [],
+        learning_disabled=worker_info.learning_disabled or False,
+    )
+except Exception as e:
+    logger.warning(f"[LEARNING] OutcomeTracker.track_completion failed: {e}")
 ```
 
-Both hooks are wrapped in `try/except` — a learning failure never crashes a worker.
+Note: `WorkerInfo` needs `applied_learning_ids` and `learning_disabled` fields added so the pre-spawn values are available at completion time.
+
+Both hooks must be wrapped in `try/except` — a learning failure must never crash a worker.
 
 ---
 
 ## API Endpoints
 
-### POST /api/learning/outcomes
+### POST /api/agent-learning/outcomes
 
 Submit or update an outcome. Used by the orchestrator internally and available for manual correction via the UI.
+
+> **Note:** The prefix is `/api/agent-learning`, not `/api/learning`. The `/api/learning` prefix belongs to personal learning plans (a separate system in `app/routers/learning.py`).
 
 **Request:**
 ```json
@@ -190,7 +199,7 @@ Submit or update an outcome. Used by the orchestrator internally and available f
 
 ---
 
-### GET /api/learning/summary
+### GET /api/agent-learning/summary
 
 Returns a human-readable summary of the top failure patterns and current learning effectiveness.
 
@@ -376,7 +385,7 @@ Body:
 
 20% of tasks receive no learning injection (`learning_disabled = True`). This creates a baseline for measuring whether the learning system is actually helping.
 
-The `/api/learning/summary` endpoint computes lift as:
+The `/api/agent-learning/summary` endpoint computes lift as:
 
 ```
 lift = (treatment_success_rate - control_success_rate) / control_success_rate
@@ -406,26 +415,31 @@ The control group percentage is controlled by `LEARNING_CONTROL_GROUP_PCT` (defa
 ### New Files
 
 ```
-app/orchestrator/outcome_tracker.py     OutcomeTracker.track_task_completion()
-app/orchestrator/lesson_extractor.py    LessonExtractor.extract_lessons()
-app/orchestrator/prompt_enhancer.py     PromptEnhancer.enhance_prompt()
-tests/test_learning_mvp.py              Unit + integration tests
+app/orchestrator/outcome_tracker.py     OutcomeTracker.track_completion(), record_feedback()
+app/routers/agent_learning.py           POST /api/agent-learning/outcomes + GET /summary + PATCH /learnings/{id}
+app/orchestrator/learning_batch.py      Daily batch job (pattern aggregation)
+tests/test_agent_learning.py            Unit + integration tests
 ```
 
 ### Modified Files
 
 ```
-app/orchestrator/worker.py              Add two hooks (before spawn, after completion)
-app/routers/learning.py                 Add POST /outcomes, GET /summary endpoints
-app/orchestrator/routine_runner.py      Register daily pattern batch job
+app/orchestrator/worker.py
+  • Add applied_learning_ids + learning_disabled to WorkerInfo
+  • Add Hook 2 in _handle_worker_completion() (call OutcomeTracker.track_completion)
+
+app/orchestrator/engine.py              Add 2am ET timer for learning batch
+
+app/main.py                             Register agent_learning router at /api/agent-learning
 ```
 
 ### Already Done (no changes needed)
 
 ```
-app/models.py                           TaskOutcome, OutcomeLearning defined
+app/models.py                           TaskOutcome, OutcomeLearning defined and correct
 migrations/                             Tables created
-app/routers/learning.py                 GET /stats, GET /health implemented
+app/orchestrator/prompt_enhancer.py     Fully implemented — query, select, inject, A/B logic
+app/orchestrator/worker.py (Hook 1)     Pre-spawn enhancement already live at ~line 241
 ```
 
 ---
@@ -460,16 +474,19 @@ python -m pytest tests/test_learning_mvp.py -v
 
 The MVP is complete when:
 
-- [ ] `OutcomeTracker`, `LessonExtractor`, `PromptEnhancer` service files exist
-- [ ] Worker.py calls both hooks (enhance before spawn, track after completion)
+- [x] `PromptEnhancer` service implemented (already done)
+- [x] Worker Hook 1: pre-spawn enhancement live (already done)
+- [ ] `OutcomeTracker` service exists — `track_completion()` and `record_feedback()`
+- [ ] Worker Hook 2: `OutcomeTracker.track_completion()` called in `_handle_worker_completion()`
 - [ ] `LEARNING_ENABLED=false` disables all learning without crashing workers
-- [ ] `POST /api/learning/outcomes` creates/updates outcome records
-- [ ] `GET /api/learning/summary` returns pattern counts and active learnings
-- [ ] Daily batch job runs at 06:00 ET and appends to ops brief
+- [ ] `POST /api/agent-learning/outcomes` creates/updates outcome records
+- [ ] `GET /api/agent-learning/summary` returns success rate, A/B lift, and top failure patterns
+- [ ] `PATCH /api/agent-learning/learnings/{id}` approves/rejects suggestions
+- [ ] Daily batch job runs at 2am ET and posts summary to ops brief
 - [ ] New pending lessons appear as inbox suggestions for human approval
 - [ ] All learning code wrapped in `try/except` — no worker crashes
-- [ ] 10+ tests pass in `test_learning_mvp.py`
-- [ ] `/api/learning/stats` shows non-zero data after a batch of tasks runs
+- [ ] 12+ tests pass in `tests/test_agent_learning.py`
+- [ ] `GET /api/agent-learning/summary` shows non-zero data after tasks run
 
 ---
 
@@ -477,12 +494,12 @@ The MVP is complete when:
 
 | Document | Purpose |
 |----------|---------|
-| `docs/agent-learning-system.md` | Full 40KB design with all phases |
-| `docs/agent-learning-READY.md` | Architect sign-off and readiness checklist |
-| `docs/PHASE_1.3_RESCUE_FINDINGS.md` | Root cause analysis of previous attempts |
-| `docs/handoffs/learning-phase-1-consolidated-rescue.md` | Detailed consolidated implementation plan |
-| `docs/handoffs/learning-mvp-consolidated.json` | Programmer handoff JSON |
-| `ARCHITECTURE.md` | System overview and component diagram |
+| [docs/handoffs/learning-loop-mvp-status.md](handoffs/learning-loop-mvp-status.md) | **Current state + precise remaining work** (start here) |
+| [docs/handoffs/learning-loop-mvp-handoff.json](handoffs/learning-loop-mvp-handoff.json) | Programmer handoff JSON (acceptance criteria, key details) |
+| [docs/agent-learning-system.md](agent-learning-system.md) | Full 40KB design with all phases |
+| [docs/agent-learning-READY.md](agent-learning-READY.md) | Architect sign-off and readiness checklist |
+| [docs/PHASE_1.3_RESCUE_FINDINGS.md](PHASE_1.3_RESCUE_FINDINGS.md) | Root cause analysis of previous attempts |
+| [ARCHITECTURE.md](../ARCHITECTURE.md) | System overview and component diagram |
 
 ---
 

@@ -1,1 +1,1 @@
-Wrote docs/learning-loop-mvp-design.md (event schema, API spec, batch job) + docs/handoffs/learning-loop-mvp-handoff.json (programmer handoff replacing old consolidated handoff)
+Updated docs/learning-loop-mvp-design.md (correct state/prefix/criteria) + wrote docs/handoffs/learning-loop-mvp-status.md (precise programmer handoff for remaining work)
