@@ -99,7 +99,18 @@ Why this week is ideal for public proof:
 
 ---
 
-## 6) 8-minute demo script (speaker-ready)
+## 6) Proof map (claim → artifact)
+
+| Claim | Minimum proof required | Location/format |
+|---|---|---|
+| “We shipped in parallel across engineering + GTM” | Day-by-day timeline + commit spread + docs shipped | Git log screenshot + `docs/product/*` listing |
+| “~7–9 founder hours reclaimed” | Before/after table + assumption footnote | Slide/table + optional appendix calc |
+| “Decision latency improved to same-day” | 2–3 decision examples with timestamped evidence | Task timeline screenshot, PR/comments, or commit sequence |
+| “Outcomes are inspectable” | Artifact links for each headline claim | Public-safe appendix or private diligence packet |
+
+---
+
+## 7) 8-minute demo script (speaker-ready)
 
 ### 0:00–0:45 — Hook
 “Instead of showing prompts, I’m showing one real operating week with inspectable outcomes.”
@@ -128,7 +139,7 @@ Why this week is ideal for public proof:
 
 ---
 
-## 7) Screenshot checklist (required before publishing)
+## 8) Screenshot checklist (required before publishing)
 
 - [ ] **SS-01** Model routing commit history + diff
 - [ ] **SS-02** Orchestrator/reflection timeline + module view
@@ -141,7 +152,7 @@ Why this week is ideal for public proof:
 
 ---
 
-## 8) Publishing guardrails
+## 9) Publishing guardrails
 
 - Tie each claim to an artifact (commit ID, CI run, doc path, log snippet)
 - Keep any estimate explicitly labeled until telemetry-backed
@@ -150,6 +161,6 @@ Why this week is ideal for public proof:
 
 ---
 
-## 9) 30-second social proof version
+## 10) 30-second social proof version
 
 “In one week (Feb 17–23), we used agents for real product and engineering execution, reclaimed ~8 founder hours, reduced decision latency from next-day to same-day, and shipped reusable GTM assets. Agent-Built Week is inspectable outcomes, not AI theater.”
