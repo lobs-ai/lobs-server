@@ -1,1 +1,1 @@
-PAW Value Proof Dashboard artifacts already complete: schemas/value_proof_event.json (252 lines) and docs/product/value-proof-dashboard.md (237 lines) from prior run — no changes needed.
+Created schemas/value_proof_event.json (JSON Schema draft-07, 4 required fields) and docs/product/value-proof-dashboard.md (copy blocks, metric definitions, programmer handoff)
