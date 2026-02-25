@@ -1473,17 +1473,17 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     "assignment.assign_agent": _pcall_assign_agent,
     "assignment.scan_unassigned": _pcall_scan_unassigned,
     # Calendar
-    "calendar.sync_google": lambda db, wm, ctx, **kw: _pcall_integration("sync_google_calendar", db, wm, ctx, **kw),
-    "calendar.check_upcoming": lambda db, wm, ctx, **kw: _pcall_integration("check_upcoming_events", db, wm, ctx, **kw),
+    "calendar.sync_google": lambda db=None, worker_manager=None, context=None, **kw: _pcall_integration("sync_google_calendar", db, worker_manager, context, **kw),
+    "calendar.check_upcoming": lambda db=None, worker_manager=None, context=None, **kw: _pcall_integration("check_upcoming_events", db, worker_manager, context, **kw),
     # Email
-    "email.check_inbox": lambda db, wm, ctx, **kw: _pcall_integration("check_email_inbox", db, wm, ctx, **kw),
-    "email.send": lambda db, wm, ctx, **kw: _pcall_integration("send_email", db, wm, ctx, **kw),
+    "email.check_inbox": lambda db=None, worker_manager=None, context=None, **kw: _pcall_integration("check_email_inbox", db, worker_manager, context, **kw),
+    "email.send": lambda db=None, worker_manager=None, context=None, **kw: _pcall_integration("send_email", db, worker_manager, context, **kw),
     # Work Tracker
-    "tracker.check_deadlines": lambda db, wm, ctx, **kw: _pcall_integration("check_deadlines", db, wm, ctx, **kw),
-    "tracker.daily_summary": lambda db, wm, ctx, **kw: _pcall_integration("daily_work_summary", db, wm, ctx, **kw),
+    "tracker.check_deadlines": lambda db=None, worker_manager=None, context=None, **kw: _pcall_integration("check_deadlines", db, worker_manager, context, **kw),
+    "tracker.daily_summary": lambda db=None, worker_manager=None, context=None, **kw: _pcall_integration("daily_work_summary", db, worker_manager, context, **kw),
     # Learning
-    "learning.check_due": lambda db, wm, ctx, **kw: _pcall_learning("check_due_lessons", db, wm, ctx, **kw),
-    "learning.create_plan": lambda db, wm, ctx, **kw: _pcall_learning("create_plan_from_request", db, wm, ctx, **kw),
+    "learning.check_due": lambda db=None, worker_manager=None, context=None, **kw: _pcall_learning("check_due_lessons", db, worker_manager, context, **kw),
+    "learning.create_plan": lambda db=None, worker_manager=None, context=None, **kw: _pcall_learning("create_plan_from_request", db, worker_manager, context, **kw),
     # Inbox processing
     "inbox.process_threads": _pcall_inbox_process_threads,
 }
