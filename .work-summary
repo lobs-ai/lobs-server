@@ -1,1 +1,1 @@
-Designed Failure Explainer API for Mission Control. Pure rule-based service (10 failure modes, no LLM) under new /api/intelligence router. Created design doc + 3 programmer handoffs (service, router, tests).
+Analyzed 9,661 worker runs and designed controlled prompt variant experiment for first-response SLA. Found 47% of failures in 5-10min SLA window; proposed action-first Variant B vs. current context-heavy Variant A, with feature flag + WorkerRun instrumentation. Wrote full experiment design + programmer handoff to research-findings.md.
