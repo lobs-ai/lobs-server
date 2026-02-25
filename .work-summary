@@ -1,1 +1,1 @@
-Designed Research-to-Roadmap Bridge: decision memo schema (verdict + problem + user_segment + spec_touchpoints + mvp_scope + owner), soft gate mechanism (needs_memo flag at task close), and weekly stale initiative pruning via BriefService. Wrote findings to research-findings.md with full implementation surfaces mapped to existing codebase.
+Designed Failure Explainer API for Mission Control. Pure rule-based service (10 failure modes, no LLM) under new /api/intelligence router. Created design doc + 3 programmer handoffs (service, router, tests).

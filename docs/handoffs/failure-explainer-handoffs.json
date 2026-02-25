@@ -1,0 +1,191 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "failure-explainer",
+    "title": "Implement FailureExplainerService (service layer)",
+    "context": "Part of the Failure Explainer API for Mission Control. See full design at docs/failure-explainer-design.md. This is task 1 of 3 — the core service logic. No LLM involved; pure deterministic rule evaluation over DB records.",
+    "spec": {
+      "file": "app/services/failure_explainer.py",
+      "class": "FailureExplainerService",
+      "constructor": "__init__(self, db: AsyncSession)",
+      "main_method": "async def explain(self, task_id: str) -> dict | None",
+      "return_when_not_found": "None",
+      "pydantic_models_in": "app/schemas.py or inline in service file",
+      "response_shape": {
+        "task_id": "str",
+        "task_title": "str",
+        "task_status": "str",
+        "work_state": "str | None",
+        "primary_failure_code": "str | None",
+        "all_failure_codes": "list[str]",
+        "explanation": "str",
+        "next_actions": "list[str]",
+        "severity": "'low' | 'medium' | 'high' | None",
+        "supporting_data": {
+          "run_count": "int",
+          "failed_run_count": "int",
+          "escalation_tier": "int",
+          "retry_count": "int",
+          "last_failure_reason": "str | None",
+          "stuck_duration_minutes": "float | None",
+          "latest_run_id": "int | None"
+        },
+        "evaluated_at": "ISO-8601 string"
+      },
+      "rules": [
+        {
+          "code": "worker_crash",
+          "priority": 1,
+          "severity": "high",
+          "condition": "Any WorkerRun for task has ended_at IS NOT NULL AND succeeded IS NULL",
+          "explanation_template": "A worker handling this task appears to have crashed. Run {run_id} ended at {ended_at} without recording a success/failure outcome.",
+          "next_actions": ["Check OpenClaw worker logs for the crash time", "Force-fail the task and retry", "If recurring, check system memory/process limits"]
+        },
+        {
+          "code": "timeout_exceeded",
+          "priority": 2,
+          "severity": "medium",
+          "condition": "Any WorkerRun has timeout_reason IS NOT NULL",
+          "explanation_template": "Worker run timed out: {timeout_reason}. The task exceeded its runtime budget.",
+          "next_actions": ["Consider breaking the task into smaller subtasks", "Review task scope — it may be too large for one agent run", "If appropriate, assign a higher model tier with longer context"]
+        },
+        {
+          "code": "budget_lane_exhausted",
+          "priority": 3,
+          "severity": "medium",
+          "condition": "A ModelUsageEvent with error_code LIKE '%budget%' OR error_code LIKE '%quota%' exists within the time window of a failed WorkerRun for this task (join on started_at/ended_at range, or correlate by session if available)",
+          "explanation_template": "A model budget cap was hit during task execution. Budget lane: {budget_lane}.",
+          "next_actions": ["Check current lane caps at GET /api/usage/budget-lanes", "Consider raising the daily cap for the affected lane (PATCH /api/usage/budget-lanes)", "Or wait for cap reset at midnight UTC"]
+        },
+        {
+          "code": "repeated_failure",
+          "priority": 4,
+          "severity": "high",
+          "condition": "COUNT(WorkerRun where task_id=task.id AND succeeded=False) >= 3",
+          "explanation_template": "This task has failed {failed_run_count} times. Most recent failure: {last_failure_reason}.",
+          "next_actions": ["Review the pattern of failures — are they the same root cause?", "Consider assigning a stronger model tier (strong)", "Break the task into smaller, more targeted subtasks", "If the issue is unclear, escalate to human review"]
+        },
+        {
+          "code": "escalation_stuck",
+          "priority": 5,
+          "severity": "high",
+          "condition": "Task.escalation_tier >= 3 AND Task.work_state NOT IN ('completed') AND Task.updated_at < now() - 4 hours",
+          "explanation_template": "Task has reached escalation tier {escalation_tier} and has not progressed in {stuck_duration_minutes} minutes.",
+          "next_actions": ["Manually review the task and decide on a path forward", "If diagnostic agent was spawned, check its outcome", "Consider rejecting and re-scoping the task"]
+        },
+        {
+          "code": "stuck_in_progress",
+          "priority": 6,
+          "severity": "medium",
+          "condition": "Task.work_state == 'in_progress' AND Task.updated_at < now() - 30 minutes",
+          "explanation_template": "Task has been in-progress for {stuck_duration_minutes} minutes with no state change.",
+          "next_actions": ["Check if a worker session is still running for this task", "If no active session, force-fail and retry via orchestrator", "Check system health at /api/health"]
+        },
+        {
+          "code": "no_artifact_evidence",
+          "priority": 7,
+          "severity": "medium",
+          "condition": "Latest WorkerRun.succeeded == True AND (WorkerRun.files_modified is empty or null) AND (WorkerRun.commit_shas is empty or null)",
+          "explanation_template": "The last run reported success but produced no file changes or commits. Work may not have been saved.",
+          "next_actions": ["Check the worker's session transcript for what was actually done", "Verify the git working directory on the host", "Consider re-running the task with explicit artifact requirements in the prompt"]
+        },
+        {
+          "code": "transcript_not_durable",
+          "priority": 8,
+          "severity": "low",
+          "condition": "Latest WorkerRun.succeeded == True AND WorkerRun.summary IS NULL OR empty — but files_modified IS non-empty (worker did something but didn't write .work-summary)",
+          "explanation_template": "The last run completed but did not produce a work summary. Hard to verify what was done.",
+          "next_actions": ["Review the git diff for the commit to understand what was changed", "Add .work-summary output requirement to the task template for this agent type"]
+        },
+        {
+          "code": "SLA_miss_first_response",
+          "priority": 9,
+          "severity": "medium",
+          "condition": "Task.status == 'active' AND Task.work_state == 'not_started' AND Task.created_at < now() - 2 hours AND COUNT(WorkerRun for task) == 0",
+          "explanation_template": "Task has been active for {stuck_duration_minutes} minutes but no worker has picked it up.",
+          "next_actions": ["Check orchestrator scanner is running (/api/orchestrator/status)", "Verify the task has an assigned agent or is eligible for auto-routing", "Check if agent capacity is exhausted"]
+        },
+        {
+          "code": "cancelled_without_reason",
+          "priority": 10,
+          "severity": "low",
+          "condition": "Task.status == 'rejected' AND Task.failure_reason IS NULL",
+          "explanation_template": "Task was rejected/cancelled without a recorded reason.",
+          "next_actions": ["Add a failure_reason to this task for audit trail", "Review who rejected this task and why", "See /api/inbox/stuck-remediations if this was from an inbox approval flow"]
+        }
+      ],
+      "notes": [
+        "Rules are evaluated in priority order (1=highest). First matching rule = primary_failure_code. ALL matching rules are returned in all_failure_codes.",
+        "If no rules match, return primary_failure_code=None, all_failure_codes=[], severity=None.",
+        "Use Task.created_at for SLA_miss_first_response if started_at is null.",
+        "ModelUsageEvent correlation for budget_lane_exhausted: query events where created_at is within (run.started_at, run.ended_at). If run.ended_at is null, use run.started_at to run.started_at+2h.",
+        "cancel_reason may not exist as a Task column — check models.py. If absent, only check failure_reason for AC-10."
+      ]
+    },
+    "acceptance": "FailureExplainerService.explain() correctly classifies all 10 failure mode fixtures defined in AC-01 through AC-10 of the design doc. AC-11 (negative case) returns null primary_failure_code. All rules are unit-testable without HTTP layer.",
+    "files": ["docs/failure-explainer-design.md", "app/models.py", "app/services/reliability_digest.py"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "failure-explainer",
+    "title": "Implement /api/intelligence router and register endpoint",
+    "context": "Part of the Failure Explainer API. Depends on Task 1 (FailureExplainerService). Creates the new intelligence router and registers it in main.py. See docs/failure-explainer-design.md.",
+    "spec": {
+      "file": "app/routers/intelligence.py",
+      "router_prefix": "/intelligence",
+      "tag": "intelligence",
+      "endpoints": [
+        {
+          "method": "GET",
+          "path": "/tasks/{task_id}/failure-explanation",
+          "description": "Returns a structured failure explanation for a specific task",
+          "auth": "Bearer token (use existing get_current_token dependency)",
+          "response_model": "FailureExplanation (from service or schemas)",
+          "returns_404_when": "task_id not found in DB",
+          "returns_200_with_null_codes_when": "task found but no failure signals detected"
+        }
+      ],
+      "main_py_registration": "Include router with prefix='/api' in app/main.py — follow the same pattern as reliability.py router registration"
+    },
+    "acceptance": "GET /api/intelligence/tasks/{valid_id}/failure-explanation returns 200 with correct schema. GET /api/intelligence/tasks/nonexistent returns 404. Endpoint requires valid Bearer token (401 without it).",
+    "files": ["docs/failure-explainer-design.md", "app/main.py", "app/routers/reliability.py"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "failure-explainer",
+    "title": "Write acceptance tests for all 10 failure modes",
+    "context": "Part of the Failure Explainer API. Depends on Tasks 1 and 2. Writes the full test suite per the acceptance cases in docs/failure-explainer-design.md (Section 6). Tests are pure unit tests of FailureExplainerService — no HTTP required except one integration smoke test.",
+    "spec": {
+      "file": "tests/test_failure_explainer.py",
+      "framework": "pytest + pytest-asyncio",
+      "db_setup": "Use async in-memory SQLite (same pattern as other tests in tests/ directory)",
+      "test_cases": [
+        "test_worker_crash (AC-01)",
+        "test_timeout_exceeded (AC-02)",
+        "test_budget_lane_exhausted (AC-03)",
+        "test_repeated_failure (AC-04)",
+        "test_escalation_stuck (AC-05)",
+        "test_stuck_in_progress (AC-06)",
+        "test_no_artifact_evidence (AC-07)",
+        "test_transcript_not_durable (AC-08)",
+        "test_sla_miss_first_response (AC-09)",
+        "test_cancelled_without_reason (AC-10)",
+        "test_no_failure_signals (AC-11, negative case)"
+      ],
+      "each_test_must": [
+        "Create minimal fixture Task (and WorkerRun/ModelUsageEvent as needed)",
+        "Call FailureExplainerService.explain(task_id)",
+        "Assert primary_failure_code matches expected code",
+        "Assert severity matches expected severity",
+        "Assert next_actions is non-empty (except AC-11)"
+      ],
+      "notes": [
+        "Use datetime.utcnow() - timedelta(hours=5) for 'old' timestamps to trigger stuck/escalation rules",
+        "Do NOT mock datetime — instead inject a 'now' parameter to the service or use DB timestamps that are clearly in the past",
+        "For AC-03 (budget_lane_exhausted): if ModelUsageEvent time-window correlation is too complex to test without a worker run, it's acceptable to test via a separate helper method that classifies by error_code alone"
+      ]
+    },
+    "acceptance": "pytest tests/test_failure_explainer.py passes all 11 test cases. No flaky time-based assertions (use explicit old timestamps). All tests run in <5 seconds total.",
+    "files": ["docs/failure-explainer-design.md", "app/services/failure_explainer.py", "tests/"]
+  }
+]

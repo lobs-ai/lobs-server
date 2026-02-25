@@ -55,6 +55,15 @@ from app.orchestrator.circuit_breaker import CircuitBreaker
 from app.orchestrator.agent_tracker import AgentTracker
 from app.orchestrator.prompter import Prompter
 from app.orchestrator.policy_engine import PolicyEngine
+from app.orchestrator.run_validity import (
+    RunValidityChecker,
+    FIRST_RESPONSE_SLA_SECONDS,
+    RVC_MISSING_LIFECYCLE,
+    RVC_NO_FIRST_RESPONSE,
+    RVC_SLA_BREACH,
+    RVC_NO_TRANSCRIPT,
+    RVC_NO_EVIDENCE,
+)
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     SETTINGS_KEY_DIAG_AUTO_REMEDIATION,
@@ -1017,6 +1026,59 @@ class WorkerManager:
                         db_task_for_title.failure_reason = "No file changes produced"
                         await self.db.commit()
                     succeeded = False
+
+            # ── Run Validity Contract check ───────────────────────────────────────
+            # Only run for non-internal tasks that are still considered successful.
+            # This is fail-closed: any contract violation reverts the task so it can
+            # be retried rather than silently marked done without evidence of completion.
+            validity_result: dict | None = None
+            if succeeded and not is_internal_task:
+                _started_at: Optional[datetime] = None
+                if db_task_for_title:
+                    _started_at = db_task_for_title.started_at
+
+                checker = RunValidityChecker(
+                    task_id=task_id,
+                    started_at=_started_at,
+                    session_key=worker_info.child_session_key,
+                    transcript_path=worker_info.transcript_path,
+                    result_summary=result_summary,
+                    files_modified=list(modified_files) if modified_files else [],
+                    find_transcript_fn=self._find_transcript_file,
+                    read_messages_fn=self._read_transcript_assistant_messages,
+                    first_response_sla_seconds=FIRST_RESPONSE_SLA_SECONDS,
+                )
+                rvc = checker.validate()
+                validity_result = rvc.to_dict()
+
+                if not rvc.passed:
+                    violation_codes = [v.code for v in rvc.violations]
+                    violation_details = "; ".join(v.detail for v in rvc.violations)
+                    logger.warning(
+                        "[RVC] Run validity contract FAILED for task %s "
+                        "(worker=%s violations=%s): %s",
+                        task_id_short, worker_id, violation_codes, violation_details,
+                    )
+                    # Revert task — fail-closed: requires human or retry to re-run
+                    if db_task_for_title:
+                        db_task_for_title.work_state = "not_started"
+                        db_task_for_title.status = "active"
+                        db_task_for_title.finished_at = None
+                        db_task_for_title.updated_at = datetime.now(timezone.utc)
+                        db_task_for_title.failure_reason = (
+                            f"Run validity contract failed: {', '.join(violation_codes)}"
+                        )
+                        await self.db.commit()
+                    succeeded = False
+                else:
+                    logger.info(
+                        "[RVC] Run validity contract PASSED for task %s "
+                        "(first_response=%.1fs, transcript=%s, evidence=%s)",
+                        task_id_short,
+                        rvc.first_response_time_seconds or 0.0,
+                        rvc.transcript_found,
+                        rvc.evidence_ok,
+                    )
 
         else:
             # Failure
