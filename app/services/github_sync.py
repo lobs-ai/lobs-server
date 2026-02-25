@@ -29,6 +29,24 @@ class GitHubSyncService:
             subprocess.run, cmd, capture_output=True, text=True, timeout=timeout
         )
 
+    async def sync_all(self) -> dict[str, Any]:
+        """Sync all GitHub-tracked projects."""
+        result = await self.db.execute(
+            select(ProjectModel).where(ProjectModel.status == "active")
+        )
+        projects = result.scalars().all()
+        synced = 0
+        errors = 0
+        for project in projects:
+            if not (project.notes and "github.com" in (project.notes or "")):
+                continue
+            try:
+                await self.sync_project(project)
+                synced += 1
+            except Exception:
+                errors += 1
+        return {"synced": synced, "errors": errors, "total_projects": len(projects)}
+
     async def sync_project(self, project: ProjectModel, *, push: bool = False) -> dict[str, Any]:
         if project.tracking != "github" or not project.github_repo:
             raise HTTPException(status_code=400, detail="Project is not configured for GitHub tracking")

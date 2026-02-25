@@ -1400,7 +1400,7 @@ async def _pcall_run_diagnostics(db, worker_manager, context, **kw):
 async def _pcall_run_scheduled_events(db, worker_manager, context, **kw):
     from app.orchestrator.scheduler import EventScheduler
     sched = EventScheduler(db)
-    return await sched.fire_due_events()
+    return await sched.check_due_events()
 
 async def _pcall_run_github_sync(db, worker_manager, context, **kw):
     from app.services.github_sync import GitHubSyncService
@@ -1408,9 +1408,8 @@ async def _pcall_run_github_sync(db, worker_manager, context, **kw):
     return await svc.sync_all()
 
 async def _pcall_run_memory_sync(db, worker_manager, context, **kw):
-    from app.services.memory_sync import MemorySyncService
-    svc = MemorySyncService(db)
-    return await svc.sync_all()
+    from app.services.memory_sync import sync_agent_memories
+    return await sync_agent_memories(db)
 
 # Reflection workflow discrete steps
 async def _pcall_list_agents(db, worker_manager, context, **kw):
