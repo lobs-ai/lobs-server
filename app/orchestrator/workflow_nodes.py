@@ -500,15 +500,40 @@ async def _exec_tool_call(config, context, run, *, db, worker_manager):
 
 @register_node("branch")
 async def _exec_branch(config, context, run, *, db, worker_manager):
-    """Evaluate conditions and determine next node."""
+    """Evaluate conditions and determine next node.
+
+    Supports both simple conditions (legacy) and rich expressions with
+    built-in functions. If a condition contains function calls (parentheses),
+    it uses the async expression engine; otherwise falls back to simple eval.
+
+    Config:
+        conditions: list of {match: "expression", goto: "node_id"}
+        default: str — fallback node_id if no condition matches
+
+    Examples:
+        - match: "task.agent == programmer"           (simple, legacy)
+        - match: "numTasks('pending') > 0"            (function call)
+        - match: "agentStatus('programmer') == 'idle'" (function call)
+        - match: "workerCapacity() > 0 and numTasks('open') > 0" (compound)
+    """
     conditions = config.get("conditions", [])
     default = config.get("default")
 
     for cond in conditions:
         match_expr = cond.get("match", "")
         goto = cond.get("goto")
-        if _evaluate_condition(match_expr, context) and goto:
-            return NodeResult(status="completed", output={"goto": goto})
+        if not goto:
+            continue
+
+        # Use async expression engine if expression has function calls or complex syntax
+        if "(" in match_expr:
+            from app.orchestrator.workflow_functions import evaluate_condition_async
+            matched = await evaluate_condition_async(match_expr, context, db, worker_manager)
+        else:
+            matched = _evaluate_condition(match_expr, context)
+
+        if matched:
+            return NodeResult(status="completed", output={"goto": goto, "matched_expr": match_expr})
 
     if default:
         return NodeResult(status="completed", output={"goto": default})
@@ -1079,6 +1104,240 @@ async def _exec_parallel(config, context, run, *, db, worker_manager):
 
 
 # ── delay ────────────────────────────────────────────────────────────
+
+@register_node("expression")
+async def _exec_expression(config, context, run, *, db, worker_manager):
+    """Evaluate one or more expressions and store results in run context.
+
+    This is the "eval" node — runs expressions using the function registry
+    and feeds results into the context for downstream nodes to use.
+
+    Config:
+        expressions: dict — {output_key: "expression string"}
+        goto_if: list — optional conditional routing based on results
+            [{match: "result_key > 0", goto: "node_id"}]
+        default: str — optional default next node
+
+    Examples:
+        expressions:
+            pending_count: "numTasks('pending')"
+            has_capacity: "workerCapacity() > 0"
+            agent_ready: "agentStatus('programmer') == 'idle'"
+        goto_if:
+            - match: "has_capacity and pending_count > 0"
+              goto: "spawn_worker"
+        default: "wait_node"
+    """
+    from app.orchestrator.workflow_functions import evaluate_expression, evaluate_condition_async
+
+    expressions = config.get("expressions", {})
+    goto_if = config.get("goto_if", [])
+    default = config.get("default")
+
+    output = {}
+
+    # Evaluate all expressions
+    for key, expr in expressions.items():
+        try:
+            result = await evaluate_expression(expr, context, db, worker_manager)
+            output[key] = result
+        except Exception as e:
+            logger.warning("[NODE:expression] Failed to evaluate '%s': %s", key, e)
+            output[key] = None
+            output[f"{key}_error"] = str(e)
+
+    # Build a merged context for goto_if evaluation
+    eval_context = {**context, **output}
+
+    # Conditional routing
+    if goto_if:
+        for cond in goto_if:
+            match_expr = cond.get("match", "")
+            goto = cond.get("goto")
+            if not goto:
+                continue
+            if "(" in match_expr:
+                matched = await evaluate_condition_async(match_expr, eval_context, db, worker_manager)
+            else:
+                matched = _evaluate_condition(match_expr, eval_context)
+            if matched:
+                output["goto"] = goto
+                output["matched_expr"] = match_expr
+                return NodeResult(status="completed", output=output)
+
+    if default:
+        output["goto"] = default
+
+    return NodeResult(status="completed", output=output)
+
+
+@register_node("llm_route")
+async def _exec_llm_route(config, context, run, *, db, worker_manager):
+    """Use an LLM to decide which node to go to next.
+
+    The LLM receives a prompt with context and a list of candidate nodes,
+    and returns its choice. This enables dynamic, intelligent routing
+    that goes beyond static conditions.
+
+    Config:
+        prompt_template: str — template describing the decision to make
+        candidates: list — [{id: "node_id", description: "what this path does"}]
+        model_tier: str — model tier to use (default: "micro")
+        model: str — explicit model override
+        context_keys: list[str] — which context keys to include in LLM prompt
+        system_prompt: str — optional system prompt override
+        temperature: float — sampling temperature (default: 0)
+
+    Example:
+        type: llm_route
+        config:
+            prompt_template: |
+                Task: {task.title}
+                Description: {task.notes}
+                Agent: {task.agent}
+                Current status: {task.status}
+
+                Decide the best next step.
+            candidates:
+                - id: run_tests
+                  description: "Run the test suite to validate changes"
+                - id: skip_tests
+                  description: "Skip tests — task is documentation-only"
+                - id: needs_review
+                  description: "Changes are risky, needs human review"
+    """
+    prompt_template = config.get("prompt_template", "")
+    candidates = config.get("candidates", [])
+    model_tier = config.get("model_tier", "micro")
+    model = config.get("model")
+    context_keys = config.get("context_keys")
+    system_prompt = config.get("system_prompt")
+    temperature = config.get("temperature", 0)
+
+    if not candidates:
+        return NodeResult(status="failed", error="No candidates provided for llm_route")
+
+    # Build prompt
+    rendered_prompt = _render_template(prompt_template, context)
+
+    # Build context summary if context_keys specified
+    context_summary = ""
+    if context_keys:
+        ctx_parts = []
+        for key in context_keys:
+            val = _resolve_context_path(context, key)
+            if val is not None:
+                ctx_parts.append(f"{key}: {json.dumps(val, default=str)[:500]}")
+        context_summary = "\n".join(ctx_parts)
+
+    # Build candidates description
+    candidates_text = "\n".join(
+        f"- **{c['id']}**: {c.get('description', 'No description')}"
+        for c in candidates
+    )
+    candidate_ids = [c["id"] for c in candidates]
+
+    full_prompt = f"""You are a workflow router. Based on the context below, choose exactly ONE of the candidate nodes to route to.
+
+{f"Context:{chr(10)}{context_summary}{chr(10)}" if context_summary else ""}
+{f"Situation:{chr(10)}{rendered_prompt}{chr(10)}" if rendered_prompt else ""}
+Available routes:
+{candidates_text}
+
+Respond with ONLY the id of the chosen route. Nothing else."""
+
+    if not system_prompt:
+        system_prompt = "You are a precise workflow routing agent. Respond with only the chosen route id."
+
+    # Resolve model
+    resolved_model = model
+    if not resolved_model and model_tier:
+        resolved_model = await _resolve_model_tier(model_tier, "router", context, db)
+    if not resolved_model:
+        resolved_model = "haiku"  # Safe default
+
+    # Call LLM via Gateway
+    try:
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"{GATEWAY_URL}/tools/invoke",
+                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                json={
+                    "tool": "sessions_spawn",
+                    "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-llmroute-{uuid.uuid4().hex[:6]}",
+                    "args": {
+                        "task": full_prompt,
+                        "mode": "run",
+                        "model": resolved_model,
+                        "runTimeoutSeconds": 30,
+                        "cleanup": "delete",
+                    },
+                },
+                timeout=aiohttp.ClientTimeout(total=60),
+            )
+            data = await resp.json()
+
+        if not data.get("ok"):
+            return NodeResult(status="failed", error=f"LLM route call failed: {data}")
+
+        # Extract the response
+        result_text = ""
+        content = data.get("content", "")
+        if isinstance(content, str):
+            result_text = content.strip()
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    result_text += part.get("text", "")
+            result_text = result_text.strip()
+        elif isinstance(content, dict):
+            result_text = content.get("text", str(content)).strip()
+
+        # Parse the chosen route — find which candidate id appears in the response
+        chosen = None
+        result_lower = result_text.lower().strip()
+
+        # Exact match first
+        for cid in candidate_ids:
+            if result_lower == cid.lower():
+                chosen = cid
+                break
+
+        # Substring match if no exact
+        if not chosen:
+            for cid in candidate_ids:
+                if cid.lower() in result_lower:
+                    chosen = cid
+                    break
+
+        if not chosen:
+            # Default to first candidate with a warning
+            chosen = candidate_ids[0]
+            logger.warning(
+                "[NODE:llm_route] LLM response '%s' didn't match any candidate, defaulting to '%s'",
+                result_text[:100], chosen,
+            )
+
+        return NodeResult(
+            status="completed",
+            output={
+                "goto": chosen,
+                "llm_response": result_text[:200],
+                "model": resolved_model,
+                "candidates": candidate_ids,
+            },
+        )
+    except Exception as e:
+        logger.error("[NODE:llm_route] Failed: %s", e, exc_info=True)
+        # Fallback to first candidate on error
+        fallback = candidate_ids[0] if candidate_ids else None
+        if fallback:
+            return NodeResult(
+                status="completed",
+                output={"goto": fallback, "error": str(e), "fallback": True},
+            )
+        return NodeResult(status="failed", error=str(e))
+
 
 @register_node("delay")
 async def _exec_delay(config, context, run, *, db, worker_manager):

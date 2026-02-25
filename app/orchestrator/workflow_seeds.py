@@ -86,35 +86,66 @@ DEFAULT_WORKFLOWS = [
     # ══════════════════════════════════════════════════════════════════
     {
         "name": "task-router",
-        "description": "Master task router: routes all tasks to the correct agent-specific workflow based on assigned agent type. This is the single entry point for all task execution.",
+        "description": "Master task router: checks capacity, routes tasks to the correct agent workflow, with LLM fallback for ambiguous agent types.",
         "trigger": {"type": "task_match", "agent_types": ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]},
         "is_active": True,
         "nodes": [
-            # Route to the correct agent-specific spawn node.
-            # Each spawn_agent node delegates to WorkerManager which handles:
-            # - Model selection (ModelChooser with fallback chain + provider health)
-            # - Prompt building (Prompter with learning enhancement)
-            # - Worker tracking (active_workers, project_locks)
-            # - On completion: task status, agent tracker, circuit breaker,
-            #   git auto-commit, failure escalation, provider health recording
+            # ── Pre-flight: check system capacity before doing anything ──
+            {
+                "id": "preflight",
+                "type": "expression",
+                "config": {
+                    "expressions": {
+                        "capacity": "workerCapacity()",
+                        "active": "activeWorkers()",
+                        "agent_type": 'taskField("agent")',
+                        "agent_busy": 'agentStatus(taskField("agent")) == "busy"',
+                    },
+                    "goto_if": [
+                        {"match": "capacity > 0", "goto": "route_by_agent"},
+                    ],
+                    "default": "wait_for_capacity",
+                },
+            },
+            {
+                "id": "wait_for_capacity",
+                "type": "delay",
+                "config": {"seconds": 30},
+                "on_success": "preflight",  # Re-check after delay
+            },
+            # ── Route based on agent type ────────────────────────────
             {
                 "id": "route_by_agent",
                 "type": "branch",
                 "config": {
                     "conditions": [
-                        {"match": "task.agent == programmer", "goto": "spawn_programmer"},
-                        {"match": "task.agent == researcher", "goto": "spawn_researcher"},
-                        {"match": "task.agent == writer", "goto": "spawn_writer"},
-                        {"match": "task.agent == architect", "goto": "spawn_architect"},
-                        {"match": "task.agent == reviewer", "goto": "spawn_reviewer"},
-                        {"match": "task.agent == inbox-responder", "goto": "spawn_inbox"},
+                        {"match": 'taskField("agent") == "programmer"', "goto": "spawn_programmer"},
+                        {"match": 'taskField("agent") == "researcher"', "goto": "spawn_researcher"},
+                        {"match": 'taskField("agent") == "writer"', "goto": "spawn_writer"},
+                        {"match": 'taskField("agent") == "architect"', "goto": "spawn_architect"},
+                        {"match": 'taskField("agent") == "reviewer"', "goto": "spawn_reviewer"},
+                        {"match": 'taskField("agent") == "inbox-responder"', "goto": "spawn_inbox"},
                     ],
-                    "default": "spawn_generic",
+                    "default": "llm_classify",
+                },
+            },
+            # ── LLM fallback for unknown/ambiguous agent types ───────
+            {
+                "id": "llm_classify",
+                "type": "llm_route",
+                "config": {
+                    "prompt_template": "Task: {task.title}\nDescription: {task.notes}\nAssigned agent: {task.agent}\n\nThis task has an unrecognized agent type. Choose the best execution path.",
+                    "candidates": [
+                        {"id": "spawn_programmer", "description": "Code changes, bug fixes, implementation, tests"},
+                        {"id": "spawn_researcher", "description": "Investigation, analysis, comparison, synthesis"},
+                        {"id": "spawn_writer", "description": "Documentation, content, summaries, write-ups"},
+                        {"id": "spawn_architect", "description": "System design, architecture, technical strategy"},
+                        {"id": "spawn_reviewer", "description": "Code review, quality checks, feedback"},
+                    ],
+                    "model_tier": "micro",
                 },
             },
             # ── Agent spawn nodes ────────────────────────────────────
-            # Each delegates to WorkerManager.spawn_worker() which builds
-            # the full prompt, selects the model, and handles completion.
             {
                 "id": "spawn_programmer",
                 "type": "spawn_agent",
@@ -138,6 +169,7 @@ DEFAULT_WORKFLOWS = [
                 "config": {
                     "conditions": [
                         {"match": "run_tests_1.returncode == 0", "goto": "done"},
+                        {"match": 'contains(run_tests_1.stdout, "No tests detected")', "goto": "done"},
                     ],
                     "default": "spawn_programmer_fix_1",
                 },
@@ -246,16 +278,7 @@ DEFAULT_WORKFLOWS = [
                 "on_success": "done",
                 "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
             },
-            {
-                "id": "spawn_generic",
-                "type": "spawn_agent",
-                "config": {"agent_type": "programmer"},
-                "on_success": "done",
-                "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
-            },
             # ── Terminal ─────────────────────────────────────────────
-            # WorkerManager already handled task completion, git commit,
-            # escalation, etc. We just close the workflow run.
             {
                 "id": "done",
                 "type": "cleanup",
@@ -270,7 +293,7 @@ DEFAULT_WORKFLOWS = [
     # ══════════════════════════════════════════════════════════════════
     {
         "name": "agent-assignment",
-        "description": "Use an LLM to analyze unassigned tasks and assign the correct agent type. Triggered by task.created events or on a schedule.",
+        "description": "Use LLM routing to analyze unassigned tasks and assign the correct agent type. Triggered by task.needs_assignment events.",
         "trigger": {"type": "event", "event_pattern": "task.needs_assignment"},
         "is_active": True,
         "nodes": [
@@ -315,10 +338,24 @@ DEFAULT_WORKFLOWS = [
     # ══════════════════════════════════════════════════════════════════
     {
         "name": "scan-unassigned",
-        "description": "Periodically scan for active tasks without an assigned agent and emit assignment events.",
+        "description": "Periodically scan for active tasks without an assigned agent and emit assignment events. Skips if no open tasks exist.",
         "trigger": {"type": "schedule", "cron": "*/2 * * * *", "timezone": "UTC"},
         "is_active": True,
         "nodes": [
+            # Pre-check: skip the scan entirely if there are no open tasks
+            {
+                "id": "precheck",
+                "type": "expression",
+                "config": {
+                    "expressions": {
+                        "open_tasks": 'numTasks("open")',
+                    },
+                    "goto_if": [
+                        {"match": "open_tasks > 0", "goto": "scan"},
+                    ],
+                    "default": "done",
+                },
+            },
             {
                 "id": "scan",
                 "type": "python_call",
@@ -505,15 +542,22 @@ DEFAULT_WORKFLOWS = [
                 "id": "check_upcoming",
                 "type": "python_call",
                 "config": {"callable": "calendar.check_upcoming"},
-                "on_success": "check_alerts",
+                "on_success": "eval_alerts",
                 "on_failure": {"retry": 0},
             },
             {
-                "id": "check_alerts",
-                "type": "branch",
+                "id": "eval_alerts",
+                "type": "expression",
                 "config": {
-                    "conditions": [
-                        {"match": "check_upcoming.alerts > 0", "goto": "notify_alerts"},
+                    "expressions": {
+                        "alert_count": 'ctx("check_upcoming.alerts")',
+                        "has_alerts": 'ctx("check_upcoming.alerts") > 0',
+                        "current_hour": 'hour("America/New_York")',
+                        # Only notify during waking hours (8am-11pm)
+                        "should_notify": 'ctx("check_upcoming.alerts") > 0 and hour("America/New_York") >= 8 and hour("America/New_York") < 23',
+                    },
+                    "goto_if": [
+                        {"match": "should_notify", "goto": "notify_alerts"},
                     ],
                     "default": "done",
                 },
@@ -614,10 +658,25 @@ DEFAULT_WORKFLOWS = [
     },
     {
         "name": "tracker-daily-summary",
-        "description": "Generate daily work summary from tracker entries at 7am ET.",
+        "description": "Generate daily work summary at 7am ET. Includes task counts and worker activity.",
         "trigger": {"type": "schedule", "cron": "0 7 * * *", "timezone": "America/New_York"},
         "is_active": True,
         "nodes": [
+            # Gather stats before generating summary
+            {
+                "id": "gather_stats",
+                "type": "expression",
+                "config": {
+                    "expressions": {
+                        "open_tasks": 'numTasks("open")',
+                        "pending_tasks": 'numTasks("pending")',
+                        "active_tasks": 'numTasks("active")',
+                        "is_weekday": 'dayOfWeek("America/New_York") < 5',
+                        "unread_inbox": "numUnread()",
+                    },
+                },
+                "on_success": "summary",
+            },
             {
                 "id": "summary",
                 "type": "python_call",
@@ -640,7 +699,7 @@ DEFAULT_WORKFLOWS = [
                 "type": "notify",
                 "config": {
                     "channel": "internal",
-                    "message_template": "📊 Daily summary: {summary.total_minutes}min across {summary.sessions} sessions, {summary.deadlines_today} deadlines today",
+                    "message_template": "📊 Daily summary: {summary.total_minutes}min across {summary.sessions} sessions, {summary.deadlines_today} deadlines today | Open: {gather_stats.open_tasks} tasks, {gather_stats.unread_inbox} unread inbox",
                 },
                 "on_success": "done",
             },
@@ -748,10 +807,37 @@ DEFAULT_WORKFLOWS = [
     # ── System Workflows (recurring/event-driven) ────────────────────
     {
         "name": "reflection-cycle",
-        "description": "Full strategic reflection pipeline: list agents → build context → spawn reflections → wait → sweep → notify. Replaces the hardcoded engine reflection logic.",
+        "description": "Full strategic reflection pipeline with capacity-aware scheduling. Checks worker capacity before spawning reflections to avoid competing with real work.",
         "trigger": {"type": "schedule", "cron": "0 */6 * * *", "timezone": "America/New_York"},
         "is_active": True,
         "nodes": [
+            # Gate: only run reflections when system has capacity
+            {
+                "id": "capacity_check",
+                "type": "expression",
+                "config": {
+                    "expressions": {
+                        "capacity": "workerCapacity()",
+                        "active": "activeWorkers()",
+                        "pending": 'numTasks("pending")',
+                        # Don't run reflections if pending tasks are waiting
+                        "should_run": 'workerCapacity() > 0 and numTasks("pending") == 0',
+                    },
+                    "goto_if": [
+                        {"match": "should_run", "goto": "list_agents"},
+                    ],
+                    "default": "defer",
+                },
+            },
+            {
+                "id": "defer",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Reflection deferred: {capacity_check.active} workers active, {capacity_check.pending} pending tasks",
+                },
+                "on_success": "done",
+            },
             {
                 "id": "list_agents",
                 "type": "python_call",
@@ -835,10 +921,26 @@ DEFAULT_WORKFLOWS = [
     },
     {
         "name": "diagnostic-scan",
-        "description": "Detect stalls, failures, idle agents, performance drops, repo drift. Spawn targeted diagnostics.",
+        "description": "Detect stalls, failures, idle agents. Skips when system is idle (no active/open tasks).",
         "trigger": {"type": "schedule", "cron": "*/30 * * * *", "timezone": "UTC"},
         "is_active": True,
         "nodes": [
+            # Skip diagnostics if system is completely idle
+            {
+                "id": "activity_check",
+                "type": "expression",
+                "config": {
+                    "expressions": {
+                        "open_tasks": 'numTasks("open")',
+                        "active_workers": "activeWorkers()",
+                        "has_activity": 'numTasks("open") > 0 or activeWorkers() > 0',
+                    },
+                    "goto_if": [
+                        {"match": "has_activity", "goto": "run_diagnostics"},
+                    ],
+                    "default": "done",
+                },
+            },
             {
                 "id": "run_diagnostics",
                 "type": "python_call",

@@ -403,7 +403,7 @@ class WorkflowExecutor:
         ns = node_states.get(node_def["id"], {})
         output = ns.get("output", {})
 
-        # Branch nodes specify their own routing
+        # Branch/expression/llm_route nodes specify their own routing via "goto"
         goto = output.get("goto") if isinstance(output, dict) else None
 
         # Otherwise use on_success or edges
@@ -411,11 +411,20 @@ class WorkflowExecutor:
             goto = node_def.get("on_success")
 
         if not goto:
-            # Check edges
+            # Check edges — support both simple and async expression conditions
             for edge in (workflow.edges or []):
                 if edge.get("from") == node_def["id"]:
-                    condition = edge.get("condition")
-                    if not condition or _evaluate_condition(condition, run.context or {}):
+                    condition = edge.get("condition") or edge.get("when")
+                    if not condition:
+                        goto = edge["to"]
+                        break
+                    # Use async expression engine for function calls
+                    if "(" in condition:
+                        from app.orchestrator.workflow_functions import evaluate_condition_async
+                        matched = await evaluate_condition_async(condition, run.context or {}, self.db, self.worker_manager)
+                    else:
+                        matched = _evaluate_condition(condition, run.context or {})
+                    if matched:
                         goto = edge["to"]
                         break
 

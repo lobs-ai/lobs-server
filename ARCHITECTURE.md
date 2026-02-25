@@ -2,7 +2,10 @@
 
 High-level overview of the backend system design, data flow, and key components.
 
-**Last Updated:** 2026-02-24
+**Last Updated:** 2026-02-25
+
+**Recent Architectural Changes (Feb 25):**
+- **Model Spend Guardrails + Auto-Downgrade** — Budget-aware routing policy with 3-lane daily spend caps (`critical`/`standard`/`background`). Core: `BudgetGuard` class in `app/orchestrator/budget_guard.py` applies caps and tier downgrade at model-selection time; `ModelChooser.choose()` in `model_chooser.py` calls it as layer 2 of a 3-layer guard (per-provider monthly cap → per-lane daily cap → global daily hard cap). Lane is classified from task criticality + agent type; cap breach triggers tier restriction (e.g. standard lane downgrades to ≤medium). Override log persisted to `OrchestratorSetting`. Endpoints: `GET/PATCH /api/usage/budget-lanes`, `GET /api/usage/daily-report`. `ModelUsageEvent.budget_lane` column enables accurate per-lane spend tracking.
 
 **Recent Architectural Changes (Feb 24):**
 - **Daily Ops Brief** — 8am auto-posted summary of calendar, email, GitHub blockers, and top agent tasks (design: [docs/daily-ops-brief-design.md](docs/daily-ops-brief-design.md)); `BriefService` + `/api/brief/today` + direct engine timer pattern (same as memory maintenance — `_brief_hour_et=8` ET, `_last_brief_date_et` persisted to `OrchestratorSetting`). Handoffs: [docs/handoffs/daily-ops-brief-handoffs.json](docs/handoffs/daily-ops-brief-handoffs.json)
