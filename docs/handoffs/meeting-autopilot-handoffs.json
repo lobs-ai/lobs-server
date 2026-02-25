@@ -1,0 +1,58 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "Project scaffold + database models",
+    "context": "New standalone micro-SaaS: Meeting Follow-up Autopilot. See full design at docs/product/meeting-followup-autopilot-design.md. This is a separate repo from lobs-server — create it at ~/meeting-autopilot. Same tech stack: FastAPI + SQLAlchemy async + aiosqlite. Phase 1a of the implementation plan.",
+    "acceptance": "Repo exists at ~/meeting-autopilot. FastAPI app starts. All 6 SQLAlchemy models defined (workspaces, team_members, integrations, meetings, action_items, integration_events). DB auto-creates on startup. GET /api/health returns 200. pytest runs with at least one smoke test.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "AI extraction worker (MeetingParser)",
+    "context": "Part of Meeting Follow-up Autopilot. See design doc. MeetingParser accepts raw meeting text, calls the OpenClaw Gateway (same HTTP pattern as lobs-server worker.py), and returns structured JSON: {action_items: [{text, owner_name, deadline, priority}]}. Use standard model tier. Retry once on JSON parse failure with corrective prompt. Phase 1b.",
+    "acceptance": "MeetingParser class in app/services/meeting_parser.py. Handles: normal notes, empty notes, notes with no action items, malformed AI response (retry). Unit tests use 5 fixture transcripts with pre-recorded expected outputs (mock the Gateway HTTP call). All tests pass.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "Owner resolver + meeting API endpoints",
+    "context": "Part of Meeting Follow-up Autopilot. Phase 1c+1d. OwnerResolver does fuzzy match: exact name match, then contains match, then null. Meeting endpoints: POST /api/meetings (store raw text, kick off async extraction via background task), GET /api/meetings/{id} (return meeting + action items). Auth: Bearer token, workspace-scoped.",
+    "acceptance": "OwnerResolver unit tests pass for: exact, fuzzy, no-match. POST /api/meetings returns 202 with meeting id. Async extraction completes and updates DB. GET /api/meetings/{id} returns action items with resolved owner_id. Integration test: post standup notes → poll → verify items created.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "Linear + Slack integrations",
+    "context": "Part of Meeting Follow-up Autopilot. Phase 2a+2b. LinearConnector: create Linear issue with title, optional assignee (Linear user_id), optional due date. SlackConnector: (1) post channel message summarizing meeting action items, (2) DM each resolved owner with their specific item. Store linear_issue_id and slack_message_ts on action_item. Log all events to integration_events table.",
+    "acceptance": "LinearConnector and SlackConnector classes implemented. Unit tests mock HTTP calls and verify correct API payloads. Integration tests skipped if API keys not set in environment (use pytest.skipif). linear_issue_id and slack_message_ts persisted after successful calls. Failures log to integration_events and don't crash the pipeline.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "Follow-up scheduler (nudge system)",
+    "context": "Part of Meeting Follow-up Autopilot. Phase 2c. APScheduler (AsyncIOScheduler) runs inside FastAPI lifespan. Job runs every 30 minutes: query action_items where status=open AND follow_up_due_at <= NOW() AND follow_up_sent_at IS NULL. For each: send Slack DM nudge to owner, mark follow_up_sent_at. Default follow_up_due_at = created_at + 24h. Cap: 1 nudge per item (no re-nudging in MVP).",
+    "acceptance": "Scheduler starts with app. Job runs every 30 min. Unit tests: time-mocked, verify nudge sent when due, not sent when not due, not sent again if already sent, skipped if no owner slack_user_id. Manual test: create item with follow_up_due_at in past → verify nudge fires within 30 min.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "Auth + team directory + integration config endpoints",
+    "context": "Part of Meeting Follow-up Autopilot. Phase 3a+3b. Bearer token middleware: validate token from Authorization header, load workspace from DB, attach to request state. All /api/* endpoints (except /api/health) require auth. Team member CRUD: POST/GET/DELETE /api/team. Integration CRUD: PUT/GET /api/integrations/{provider} (provider: slack|linear|email). Config stored as JSON blob in integrations table — encrypt sensitive fields (tokens) at rest using Fernet with APP_SECRET_KEY env var.",
+    "acceptance": "Unauthenticated requests → 401. Workspace row-level filtering enforced on all queries. Team CRUD endpoints work. Integration config survives restart. Tokens stored encrypted. Unit tests cover auth rejection + workspace isolation.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "meeting-autopilot",
+    "title": "Minimal htmx UI",
+    "context": "Part of Meeting Follow-up Autopilot. Phase 3c. Single-page HTML + htmx served from FastAPI. No JS framework. Form: meeting title (optional), paste raw notes, submit button. On submit: POST /api/meetings, show spinner, poll GET /api/meetings/{id} until status=done, render action items table (text, owner, deadline, priority, status). Status dropdown per row: open/done/cancelled → PATCH /api/action-items/{id}. Use simple CSS (classless or Pico.css), no build step.",
+    "acceptance": "UI served at GET /. Form submits and shows extracted action items without page reload (htmx swap). Status can be changed inline. Unresolved owners shown as 'Unassigned (raw name)'. Works in Safari + Chrome. No JS build toolchain required.",
+    "files": ["docs/product/meeting-followup-autopilot-design.md"]
+  }
+]
