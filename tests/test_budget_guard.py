@@ -238,13 +238,22 @@ async def test_budget_guard_within_budget_standard_lane():
 
 @pytest.mark.asyncio
 async def test_budget_guard_over_budget_standard_lane_downgrades():
-    """Standard lane over $8 cap — strong tier dropped, downgrade to medium."""
-    db = _make_mock_db(today_spend=9.0)  # Over $8 cap
+    """Standard lane over $8 cap — standard/strong tier dropped, medium passes through."""
+    db = _make_mock_db(today_spend=0.0)
     guard = BudgetGuard(db)
 
+    # Patch today_lane_spend to return 9.0 for standard lane (over $8 cap)
+    async def _fake_lane_spend(lane: str) -> float:
+        return 9.0  # Over the $8 standard cap
+
+    guard.today_lane_spend = _fake_lane_spend  # type: ignore[method-assign]
+
     task = {"id": "t3", "title": "Add feature"}
-    candidates = ["std/s1", "strong/op1"]
+    # Include medium candidate so downgrade actually filters to it
+    candidates = ["medium/m1", "std/s1", "strong/op1"]
     tier_map = {
+        "micro": [],
+        "small": [],
         "medium": ["medium/m1"],
         "standard": ["std/s1"],
         "strong": ["strong/op1"],
@@ -261,13 +270,10 @@ async def test_budget_guard_over_budget_standard_lane_downgrades():
     assert decision.lane == LANE_STANDARD
     assert decision.over_budget is True
     assert decision.downgraded is True
-    # strong/op1 is above medium tier → filtered out
+    # standard and strong tiers dropped; medium survives
+    assert "medium/m1" in decision.effective_candidates
+    assert "std/s1" not in decision.effective_candidates
     assert "strong/op1" not in decision.effective_candidates
-    # std/s1 is in standard tier which is above medium → also filtered
-    # Only medium and below allowed. Since no medium candidates are in the list,
-    # the safety fallback returns original candidates.
-    # (This tests the safety net behavior)
-    assert len(decision.effective_candidates) >= 1
 
 
 @pytest.mark.asyncio
