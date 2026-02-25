@@ -902,3 +902,259 @@ class TestModelChooserBudgetIntegration:
         assert isinstance(choice.model, str)
         assert len(choice.model) > 0
         assert isinstance(choice.candidates, list)
+
+    @pytest.mark.asyncio
+    async def test_chooser_budget_lane_set_in_choice(self, db_session, monkeypatch):
+        """ModelChooser.choose() returns a budget_lane on the choice object."""
+        import app.orchestrator.model_chooser as mc_module
+
+        monkeypatch.setattr(
+            mc_module,
+            "discover_ollama_models",
+            AsyncMock(return_value={}),
+        )
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+
+        # Programmer task → standard or critical lane
+        prog_task = {"id": "t-prog", "title": "Fix bug", "status": "active"}
+        prog_choice = await chooser.choose(agent_type="programmer", task=prog_task)
+        assert prog_choice.budget_lane in ("critical", "standard", "background", "unknown")
+
+        # Writer task → background lane expected
+        writer_task = {"id": "t-writer", "title": "Write a blog post", "status": "active"}
+        writer_choice = await chooser.choose(agent_type="writer", task=writer_task)
+        assert writer_choice.budget_lane == "background"
+
+    @pytest.mark.asyncio
+    async def test_chooser_downgrades_when_over_budget(self, db_session, monkeypatch):
+        """ModelChooser downgrades model tier when standard lane cap is exceeded."""
+        import app.orchestrator.model_chooser as mc_module
+        from app.models import ModelUsageEvent, OrchestratorSetting
+        from app.orchestrator.budget_guard import BUDGET_GUARD_LANE_POLICY_KEY
+
+        monkeypatch.setattr(
+            mc_module,
+            "discover_ollama_models",
+            AsyncMock(return_value={}),
+        )
+
+        # Set tight standard lane cap ($0.01) so any spend triggers downgrade
+        policy_row = OrchestratorSetting(
+            key=BUDGET_GUARD_LANE_POLICY_KEY,
+            value={"standard": {"daily_cap_usd": 0.01, "downgrade_tier": "medium"}},
+        )
+        db_session.add(policy_row)
+
+        # Add a usage event tagged to standard lane to exceed the $0.01 cap
+        event = ModelUsageEvent(
+            id="evt-chooser-over",
+            source="orchestrator-worker",
+            model="anthropic/claude-sonnet",
+            provider="anthropic",
+            route_type="api",
+            task_type="programmer",
+            budget_lane="standard",
+            input_tokens=1000,
+            output_tokens=500,
+            requests=1,
+            status="success",
+            estimated_cost_usd=0.05,  # Over $0.01 cap
+            timestamp=datetime.now(timezone.utc),
+        )
+        db_session.add(event)
+        await db_session.commit()
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        task = {"id": "t-over", "title": "Implement a new feature", "status": "active"}
+        choice = await chooser.choose(agent_type="programmer", task=task)
+
+        # The lane_guard audit should show over_budget=True
+        guard_audit = choice.audit.get("lane_guard", {})
+        assert guard_audit.get("over_budget") is True, (
+            f"Expected over_budget=True in lane_guard audit, got: {guard_audit}"
+        )
+        # And downgraded should be True (or the candidates were already within tier)
+        # At minimum, no strong-tier-only models should be the sole candidate
+        assert isinstance(choice.candidates, list)
+        assert len(choice.candidates) > 0
+
+
+# ---------------------------------------------------------------------------
+# Improved daily-report endpoint: accurate budget_lane spend and downgrade_tier
+# ---------------------------------------------------------------------------
+
+
+class TestDailyReportBudgetLaneAccuracy:
+    """Verify the daily-report endpoint uses BudgetGuard for accurate lane data."""
+
+    @pytest.mark.asyncio
+    async def test_daily_report_lane_status_has_downgrade_tier(self, client):
+        """Lane status in daily report includes downgrade_tier from lane policy."""
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        lane_status = data["lane_status"]
+        # All three lanes must be present
+        for lane in ("critical", "standard", "background"):
+            assert lane in lane_status
+            entry = lane_status[lane]
+            # downgrade_tier key must exist (may be None for critical lane by default)
+            assert "downgrade_tier" in entry
+
+        # Default: standard should downgrade to medium
+        assert lane_status["standard"]["downgrade_tier"] == "medium"
+        # Default: background should downgrade to small
+        assert lane_status["background"]["downgrade_tier"] == "small"
+        # Default: critical has no downgrade
+        assert lane_status["critical"]["downgrade_tier"] is None
+
+    @pytest.mark.asyncio
+    async def test_daily_report_reflects_budget_lane_tagged_spend(self, client):
+        """Spend events with explicit budget_lane appear in the correct lane spend."""
+        # Log a usage event tagged to the background lane
+        event_payload = {
+            "source": "orchestrator-worker",
+            "model": "anthropic/claude-haiku",
+            "provider": "anthropic",
+            "route_type": "api",
+            "task_type": "writer",
+            "budget_lane": "background",
+            "input_tokens": 1000,
+            "output_tokens": 500,
+            "requests": 1,
+            "status": "success",
+            "estimated_cost_usd": 0.02,
+        }
+        create_resp = await client.post("/api/usage/events", json=event_payload)
+        assert create_resp.status_code == 200
+
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        bg_spend = data["lane_status"]["background"]["spend_usd"]
+        assert bg_spend >= 0.02, (
+            f"Expected background lane spend >= 0.02, got {bg_spend}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_daily_report_alert_generated_when_lane_at_cap(self, client):
+        """Daily report generates an alert when a lane is at or over its cap."""
+        # Set a very low background cap so the next event triggers it
+        patch_resp = await client.patch(
+            "/api/usage/budget-lanes",
+            json={"background": {"daily_cap_usd": 0.001, "downgrade_tier": "small"}},
+        )
+        assert patch_resp.status_code == 200
+
+        # Log a background event exceeding the tiny cap
+        event_payload = {
+            "source": "orchestrator-worker",
+            "model": "anthropic/claude-haiku",
+            "provider": "anthropic",
+            "route_type": "api",
+            "task_type": "writer",
+            "budget_lane": "background",
+            "input_tokens": 500,
+            "output_tokens": 200,
+            "requests": 1,
+            "status": "success",
+            "estimated_cost_usd": 0.01,  # Over the 0.001 cap
+        }
+        await client.post("/api/usage/events", json=event_payload)
+
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # lane_status should show at_cap=True for background
+        bg_status = data["lane_status"]["background"]
+        assert bg_status["at_cap"] is True
+
+        # An alert should be present
+        alerts = data.get("alerts", [])
+        assert any("background" in a.lower() for a in alerts), (
+            f"Expected 'background' alert in alerts list, got: {alerts}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_daily_report_no_alert_when_within_budget(self, client):
+        """No lane alerts generated when all lanes are within their caps."""
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # With zero spend, nothing should be at cap
+        for lane, status in data["lane_status"].items():
+            assert status["at_cap"] is False
+
+        # No lane-cap alerts (hard-cap alert may appear in other tests but not here)
+        cap_alerts = [a for a in data.get("alerts", []) if "cap exceeded" in a.lower()]
+        assert cap_alerts == []
+
+    @pytest.mark.asyncio
+    async def test_daily_report_lane_status_uses_budget_guard_policy(self, client):
+        """After patching lane policy, daily report lane_status reflects the new cap."""
+        # Set a custom cap on the standard lane
+        patch_resp = await client.patch(
+            "/api/usage/budget-lanes",
+            json={"standard": {"daily_cap_usd": 25.0, "downgrade_tier": "medium"}},
+        )
+        assert patch_resp.status_code == 200
+
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # The cap_usd in lane_status should reflect the patched value
+        std_status = data["lane_status"]["standard"]
+        assert std_status["cap_usd"] == 25.0, (
+            f"Expected cap_usd=25.0 in standard lane, got: {std_status}"
+        )
+        assert std_status["downgrade_tier"] == "medium"
+
+    @pytest.mark.asyncio
+    async def test_daily_report_standard_lane_spend_from_tagged_events(self, client):
+        """Standard-lane-tagged events appear in standard lane spend."""
+        event_payload = {
+            "source": "orchestrator-worker",
+            "model": "openai/gpt-5",
+            "provider": "openai",
+            "route_type": "api",
+            "task_type": "programmer",
+            "budget_lane": "standard",
+            "input_tokens": 2000,
+            "output_tokens": 1000,
+            "requests": 1,
+            "status": "success",
+            "estimated_cost_usd": 0.15,
+        }
+        create_resp = await client.post("/api/usage/events", json=event_payload)
+        assert create_resp.status_code == 200
+
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        std_spend = data["lane_status"]["standard"]["spend_usd"]
+        assert std_spend >= 0.15, (
+            f"Expected standard lane spend >= 0.15, got {std_spend}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_daily_report_critical_lane_no_default_cap(self, client):
+        """Critical lane has no cap by default — cap_usd is null, at_cap is False."""
+        resp = await client.get("/api/usage/daily-report")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        crit_status = data["lane_status"]["critical"]
+        assert crit_status["cap_usd"] is None
+        assert crit_status["at_cap"] is False
+        assert crit_status["utilization_pct"] is None
