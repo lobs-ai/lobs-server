@@ -1,1 +1,1 @@
-Delivered value-proof dashboard copy+data contract: schemas/value_proof_event.json (JSON Schema for ValueProofEvent with 4 required fields) and docs/product/value-proof-dashboard.md (copy blocks, metric definitions, rendering spec, programmer handoff notes). Both files were already complete from previous run — confirming delivery.
+Drafted PAW Value Proof Dashboard copy/rendering spec (docs/product/value-proof-dashboard.md) and JSON schema (schemas/value_proof_event.json) with all 4 required fields and programmer handoff notes
