@@ -32,13 +32,13 @@ class GitHubSyncService:
     async def sync_all(self) -> dict[str, Any]:
         """Sync all GitHub-tracked projects."""
         result = await self.db.execute(
-            select(ProjectModel).where(ProjectModel.status == "active")
+            select(ProjectModel).where(ProjectModel.archived == False)
         )
         projects = result.scalars().all()
         synced = 0
         errors = 0
         for project in projects:
-            if not (project.notes and "github.com" in (project.notes or "")):
+            if not project.github_repo:
                 continue
             try:
                 await self.sync_project(project)

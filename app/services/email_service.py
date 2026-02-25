@@ -70,10 +70,9 @@ def _get_gmail_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            if not os.path.exists(GMAIL_CREDENTIALS_FILE):
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file(GMAIL_CREDENTIALS_FILE, GMAIL_SCOPES)
-            creds = flow.run_local_server(port=0)
+            # No valid token and no way to refresh — skip (interactive OAuth not supported in daemon)
+            logger.warning("[EMAIL] Gmail token missing or expired and no refresh token — run manual auth first")
+            return None
         os.makedirs(os.path.dirname(GMAIL_TOKEN_FILE) or ".", exist_ok=True)
         with open(GMAIL_TOKEN_FILE, "w") as f:
             f.write(creds.to_json())
