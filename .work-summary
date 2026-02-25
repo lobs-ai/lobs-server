@@ -1,1 +1,1 @@
-Delivered PAW 'One-Minute Value Proof' dashboard: schemas/value_proof_event.json (JSON Schema with all 4 required fields) + docs/product/value-proof-dashboard.md (copy blocks, metric defs, detail drawer spec, programmer handoff)
+Shipped PAW Value Proof Dashboard: schemas/value_proof_event.json + docs/product/value-proof-dashboard.md — copy blocks, metric definitions, rendering spec, and programmer handoff complete.
