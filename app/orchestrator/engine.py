@@ -80,6 +80,9 @@ class OrchestratorEngine:
         self._runtime_settings_refresh_interval = 60
         self._last_openclaw_model_sync = 0.0
         self._openclaw_model_sync_interval = 900
+        # Daily Ops Brief — fires once daily at _brief_hour_et (ET)
+        self._brief_hour_et: int = 8
+        self._last_brief_date_et: str = ""
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
         # Provider health tracking (persistent across ticks)
@@ -458,6 +461,17 @@ class OrchestratorEngine:
 
             # 2. Inbox processing now handled by inbox-processing workflow (every minute)
 
+            # 2a. Daily Ops Brief — fires once daily at _brief_hour_et (ET)
+            ET_ZONE = ZoneInfo("America/New_York")
+            now_et = datetime.now(ET_ZONE)
+            today_key_et = now_et.strftime("%Y-%m-%d")
+            if (
+                self._last_brief_date_et != today_key_et
+                and now_et.hour >= self._brief_hour_et
+            ):
+                self._last_brief_date_et = today_key_et
+                await self._run_daily_brief(db, today_key_et)
+
             # 3. Capability registry sync (hourly)
             if current_time - self._last_capability_sync >= self._capability_sync_interval:
                 try:
@@ -644,8 +658,11 @@ class OrchestratorEngine:
 
     async def _refresh_runtime_settings(self, db: Any) -> None:
         """Load runtime loop intervals from DB without restart."""
-        # Only load the OpenClaw model sync interval — everything else is workflow-managed
-        keys = (SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,)
+        keys = (
+            SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
+            SETTINGS_KEY_DAILY_BRIEF_HOUR_ET,
+            SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET,
+        )
         result = await db.execute(select(OrchestratorSetting).where(OrchestratorSetting.key.in_(keys)))
         rows = {row.key: row.value for row in result.scalars().all()}
 
@@ -654,6 +671,67 @@ class OrchestratorEngine:
             self._openclaw_model_sync_interval = max(30, int(raw))
         except Exception:
             self._openclaw_model_sync_interval = 900
+
+        # Daily brief hour (clamp 0–23)
+        raw_brief_hour = rows.get(SETTINGS_KEY_DAILY_BRIEF_HOUR_ET, DEFAULT_RUNTIME_SETTINGS.get(SETTINGS_KEY_DAILY_BRIEF_HOUR_ET, 8))
+        try:
+            self._brief_hour_et = max(0, min(23, int(raw_brief_hour)))
+        except Exception:
+            self._brief_hour_et = 8
+
+        # Brief last-run marker (persisted date string, e.g. "2026-02-25")
+        raw_brief_last = rows.get(SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET, "")
+        self._last_brief_date_et = str(raw_brief_last) if raw_brief_last else ""
+
+    async def _run_daily_brief(self, db: Any, today_key_et: str) -> None:
+        """Generate and post the Daily Ops Brief to chat. Never raises."""
+        try:
+            import os
+            from app.services.brief_service import BriefService, BriefFormatter
+            from app.routers.chat import store_message
+            from app.services.chat_manager import manager
+
+            brief = await BriefService(db).generate()
+            markdown = BriefFormatter.to_markdown(brief)
+            session_key = os.getenv("BRIEF_CHAT_SESSION_KEY", "main")
+
+            msg = await store_message(
+                session_key=session_key,
+                role="assistant",
+                content=markdown,
+                db=db,
+                metadata={
+                    "source": "daily_brief",
+                    "generated_at": brief.generated_at.isoformat(),
+                },
+            )
+            await db.commit()
+
+            await manager.broadcast_to_session(
+                session_key,
+                {
+                    "type": "message",
+                    "data": {
+                        "id": msg.id,
+                        "role": msg.role,
+                        "content": msg.content,
+                        "created_at": msg.created_at.isoformat(),
+                        "message_metadata": msg.message_metadata,
+                    },
+                },
+            )
+            logger.info("[BRIEF] Daily ops brief posted to session '%s'", session_key)
+
+            # Persist the marker so we don't re-fire after a restart
+            brief_marker = await db.get(OrchestratorSetting, SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET)
+            if brief_marker is None:
+                brief_marker = OrchestratorSetting(key=SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET, value=today_key_et)
+                db.add(brief_marker)
+            else:
+                brief_marker.value = today_key_et
+            await db.commit()
+        except Exception as e:
+            logger.error("[BRIEF] Daily brief failed: %s", e, exc_info=True)
 
     async def get_status(self) -> dict[str, Any]:
         """Get current orchestrator status."""
@@ -689,6 +767,8 @@ class OrchestratorEngine:
                     "last_heartbeat": heartbeat.last_heartbeat_at.isoformat() if heartbeat else None,
                     "heartbeat_phase": heartbeat.phase if heartbeat else None,
                 },
+                "brief_hour_et": self._brief_hour_et,
+                "brief_last_date_et": self._last_brief_date_et or None,
             }
 
     async def get_worker_details(self) -> list[dict[str, Any]]:

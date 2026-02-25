@@ -53,6 +53,7 @@ from app.routers import text_dumps
 from app.routers.workflows import router as workflows_router, runs_router as workflow_runs_router, events_router as workflow_events_router, subs_router as workflow_subs_router
 from app.routers import integrations as integrations_router
 from app.routers import learning as learning_router
+from app.routers import brief as brief_router
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ app.include_router(usage.routing_router, prefix=settings.API_PREFIX, dependencie
 app.include_router(learning.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(knowledge.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(reliability.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(brief_router.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 
 # Workflow engine
 app.include_router(workflows_router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
