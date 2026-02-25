@@ -9,6 +9,7 @@ import pytest_asyncio
 from typing import AsyncGenerator, Dict, Any
 from datetime import datetime, timezone
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from tests.helpers.factories import (
     create_project_data,
@@ -16,6 +17,8 @@ from tests.helpers.factories import (
     create_agent_data,
     create_topic_data,
     create_memory_data,
+    make_project_model,
+    make_task_model,
 )
 
 
@@ -63,15 +66,16 @@ async def multiple_tasks(client: AsyncClient, sample_project) -> list[Dict[str, 
 @pytest_asyncio.fixture
 async def agent_status(client: AsyncClient) -> Dict[str, Any]:
     """Create a test agent status record.
-    
+
+    Uses PUT /api/agents/{agent_type} which creates-or-updates an agent.
+
     Returns:
-        Created agent status dict
+        Created/updated agent status dict
     """
-    agent_data = create_agent_data(
-        agent_id="programmer",
-        status="active"
+    response = await client.put(
+        "/api/agents/programmer",
+        json={"status": "active"},
     )
-    response = await client.post("/api/agents/status", json=agent_data)
     assert response.status_code == 200
     return response.json()
 
@@ -208,3 +212,65 @@ def api_base_headers(test_token) -> Dict[str, str]:
         "Authorization": f"Bearer {test_token}",
         "Content-Type": "application/json"
     }
+
+
+# ============================================================================
+# DB-level fixtures (bypass HTTP layer, use db_session directly)
+# ============================================================================
+
+
+@pytest_asyncio.fixture
+async def db_project(db_session: AsyncSession) -> Any:
+    """Create a Project row directly in the test database.
+
+    Returns:
+        The committed Project model instance.
+
+    Use this in lower-level tests that work directly with the database or
+    with OrchestratorEngine, rather than tests that go through the HTTP API.
+    """
+    project = make_project_model()
+    db_session.add(project)
+    await db_session.commit()
+    await db_session.refresh(project)
+    return project
+
+
+@pytest_asyncio.fixture
+async def db_task(db_session: AsyncSession, db_project: Any) -> Any:
+    """Create a Task row directly in the test database.
+
+    Depends on ``db_project``; uses the project's ID as the foreign key.
+
+    Returns:
+        The committed Task model instance with ``status="queued"`` and
+        ``agent="programmer"``.
+    """
+    task = make_task_model(
+        project_id=db_project.id,
+        status="queued",
+        agent="programmer",
+    )
+    db_session.add(task)
+    await db_session.commit()
+    await db_session.refresh(task)
+    return task
+
+
+@pytest_asyncio.fixture
+async def orchestrator_engine(db_session: AsyncSession) -> Any:
+    """Create an OrchestratorEngine instance for integration tests.
+
+    Configures ``_openclaw_available = True`` so the engine will attempt
+    to spawn workers.  The global ORCHESTRATOR_ENABLED setting is
+    irrelevant here — this fixture operates directly on the engine object.
+
+    Returns:
+        A configured ``OrchestratorEngine`` instance.
+    """
+    from app.orchestrator.engine import OrchestratorEngine
+    from tests.conftest import TestSessionLocal
+
+    engine = OrchestratorEngine(TestSessionLocal)
+    engine._openclaw_available = True
+    return engine

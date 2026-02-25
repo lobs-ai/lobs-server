@@ -2,6 +2,10 @@
 
 Provides simple factory functions to create test data with sensible defaults
 and optional overrides. Reduces duplication across test files.
+
+Two levels of helpers:
+- ``create_*_data`` — plain dict factories for API request payloads
+- ``make_*_model`` — SQLAlchemy model instance factories for direct DB insertion
 """
 
 from datetime import datetime, timezone
@@ -261,3 +265,78 @@ def create_template_data(
     }
     data.update(overrides)
     return data
+
+
+# ============================================================================
+# DB Model Factories
+#
+# These return SQLAlchemy model instances (not dicts) ready for db_session.add().
+# Use these for lower-level tests that bypass the HTTP API (e.g. engine tests).
+# ============================================================================
+
+
+def make_project_model(
+    id: Optional[str] = None,
+    title: str = "Test Project",
+    **overrides: Any,
+) -> Any:
+    """Create a Project SQLAlchemy model instance.
+
+    Suitable for direct database insertion (``db_session.add(obj)``).  Uses
+    correct field names (``title``, not ``name``) and sane defaults.
+
+    Args:
+        id: Project ID (auto-generated if not provided).
+        title: Human-readable project title.
+        **overrides: Any extra column values to set on the model.
+
+    Returns:
+        An un-committed ``Project`` model instance.
+    """
+    from app.models import Project  # local import to avoid circular deps at module load
+
+    data = {
+        "id": id or f"test-project-{secrets.token_hex(4)}",
+        "title": title,
+        "type": overrides.pop("type", "kanban"),
+        "archived": overrides.pop("archived", False),
+        "created_at": overrides.pop("created_at", datetime.now(timezone.utc)),
+    }
+    data.update(overrides)
+    return Project(**data)
+
+
+def make_task_model(
+    id: Optional[str] = None,
+    title: str = "Test Task",
+    project_id: Optional[str] = None,
+    **overrides: Any,
+) -> Any:
+    """Create a Task SQLAlchemy model instance.
+
+    Suitable for direct database insertion (``db_session.add(obj)``).
+
+    Args:
+        id: Task ID (auto-generated if not provided).
+        title: Task title.
+        project_id: Associated project ID.
+        **overrides: Any extra column values to set on the model.
+
+    Returns:
+        An un-committed ``Task`` model instance.
+    """
+    from app.models import Task  # local import to avoid circular deps at module load
+
+    data = {
+        "id": id or f"test-task-{secrets.token_hex(4)}",
+        "title": title,
+        "status": overrides.pop("status", "queued"),
+        "project_id": project_id,
+        "created_at": overrides.pop("created_at", datetime.now(timezone.utc)),
+    }
+    # Include optional fields only when explicitly provided
+    for field in ("agent", "notes", "sort_order", "pinned", "shape"):
+        if field in overrides:
+            data[field] = overrides.pop(field)
+    data.update(overrides)
+    return Task(**data)

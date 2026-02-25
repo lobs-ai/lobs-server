@@ -1,0 +1,26 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "decision-card",
+    "title": "Implement decision_card utility module",
+    "context": "Part of the 60-Second Decision Card system. See spec at docs/communication/decision-card-spec.md and sample copy at docs/communication/decision-card-copy.md. This is the lowest-level building block — a pure utility function that generates decision card markdown from structured inputs.",
+    "acceptance": "1. `app/utils/decision_card.py` exists with a `make_decision_card(title, task_id, deadline, urgency, consequence_of_no_response, what_happened, options, recommendation, approve_action) -> str` function. 2. `options` is a list of dicts: `[{key: 'A', action: str, consequence: str}, ...]`. 3. Function validates: 2–4 options required (raise ValueError otherwise), recommendation must be one of the option keys, all required fields non-empty. 4. Returns markdown matching the canonical template in the spec. 5. Unit tests in `tests/utils/test_decision_card.py` cover: valid 2-option card, valid 3-option card, valid 4-option card, ValueError on 1 option, ValueError on 5+ options, ValueError when recommendation not in option keys, ValueError on missing required fields.",
+    "files": ["docs/communication/decision-card-spec.md", "docs/communication/decision-card-copy.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "decision-card",
+    "title": "Add DecisionCardPayload schema and optional inbox item support",
+    "context": "Extends the inbox POST endpoint to accept an optional structured `decision_card` payload. When provided, the endpoint auto-generates the markdown `content` using the decision_card utility. This makes it easy for agents to create properly-formatted decision cards without templating strings manually. Depends on the decision_card utility module being implemented first.",
+    "acceptance": "1. New pydantic schema `DecisionCardPayload` in `app/schemas/inbox.py` (or appropriate schemas file) with all fields from `make_decision_card()`. 2. `InboxItemCreate` gains an optional `decision_card: Optional[DecisionCardPayload] = None` field. 3. In `POST /api/inbox`, if `decision_card` is present: call `make_decision_card()` and set `content` from the result (overrides any passed `content`). 4. If `decision_card` is absent: existing freeform `content` behavior unchanged (backward compatible). 5. Integration test: POST with `decision_card` payload → verify `content` in response matches expected template output. 6. Integration test: POST without `decision_card` → verify existing behavior unchanged.",
+    "files": ["docs/communication/decision-card-spec.md", "app/routers/inbox.py", "app/schemas/"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "decision-card",
+    "title": "Add 'Pending Decisions' section to BriefService",
+    "context": "The daily ops brief (BriefService) should surface pending decision cards so Rafe sees them every morning. This adds a new section that queries for unread inbox items containing decision cards, sorted by urgency. Depends on the decision card format being standardized (decision cards contain the `🃏 Decision Required` header string). See BriefService at app/services/brief_service.py and the daily ops brief design doc.",
+    "acceptance": "1. `BriefService` has a new adapter `PendingDecisionsAdapter` that queries inbox items where: `is_read = False` AND `content LIKE '%🃏 Decision Required%'`. 2. Results sorted: 🔴 Critical first, then 🟡 Standard, then 🟢 Advisory (detected by parsing the Urgency line in content). 3. Items older than 72 hours with 🟢 Advisory urgency are excluded (already expired). 4. Each item in brief renders as: urgency emoji + title + deadline + recommendation line only (not full card). 5. Section header: `### 🃏 Pending Decisions ({count})`. 6. If no pending decisions, section is omitted entirely (no empty section). 7. Unit test: brief with 0 decision cards → no pending decisions section. 8. Unit test: brief with 2 decision cards (1 critical, 1 standard) → section present, critical first.",
+    "files": ["docs/communication/decision-card-spec.md", "docs/daily-ops-brief-design.md", "app/services/"]
+  }
+]

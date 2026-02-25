@@ -20,6 +20,9 @@ from tests.helpers.factories import (
     create_topic_data,
     create_calendar_event_data,
     create_template_data,
+    # DB-level model factories
+    make_project_model,
+    make_task_model,
 )
 
 from tests.helpers.mocks import (
@@ -33,6 +36,8 @@ from tests.helpers.mocks import (
     mock_sweep_arbitrator,
     mock_inbox_processor,
     mock_db_session,
+    # Combined engine component patcher
+    mock_engine_components,
 )
 
 from tests.helpers.assertions import (
@@ -52,7 +57,7 @@ from tests.helpers.assertions import (
 )
 
 __all__ = [
-    # Factories
+    # Factories — API payload dicts
     "create_project_data",
     "create_task_data",
     "create_inbox_data",
@@ -62,7 +67,10 @@ __all__ = [
     "create_topic_data",
     "create_calendar_event_data",
     "create_template_data",
-    # Mocks
+    # Factories — SQLAlchemy model instances
+    "make_project_model",
+    "make_task_model",
+    # Mocks — individual components
     "mock_worker_manager",
     "mock_scanner",
     "mock_monitor",
@@ -73,6 +81,8 @@ __all__ = [
     "mock_sweep_arbitrator",
     "mock_inbox_processor",
     "mock_db_session",
+    # Mocks — combined helpers
+    "mock_engine_components",
     # Assertions
     "assert_task_status",
     "assert_response_success",
