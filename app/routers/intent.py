@@ -219,10 +219,10 @@ def _score_intents(text: str) -> list[CaptureIntent]:
     # Build proposed action strings
     agent = _agent_for_task(text)
     actions: dict[str, str] = {
-        "task": f"Create a task assigned to {agent}: "{title}"",
-        "reminder": f"Save as reminder: "{title}"",
-        "research": f"Queue a research request: "{title}"",
-        "reply_needed": f"Flag as reply-needed in inbox: "{title}"",
+        "task": f'Create a task assigned to {agent}: "{title}"',
+        "reminder": f'Save as reminder: "{title}"',
+        "research": f'Queue a research request: "{title}"',
+        "reply_needed": f'Flag as reply-needed in inbox: "{title}"',
     }
 
     # Tags (simple heuristic)
@@ -305,7 +305,7 @@ async def confirm_capture(
             entity_id=entity_id,
             title=title,
             nav_path="tasks",
-            message=f"Task created and assigned to {agent}: "{title}"",
+            message=f'Task created and assigned to {agent}: "{title}"',
         )
 
     # All other intent types → InboxItem with metadata in content/summary
@@ -343,5 +343,5 @@ async def confirm_capture(
         entity_id=entity_id,
         title=title,
         nav_path="inbox",
-        message=f"{action_msg}: "{title}"",
+        message=f'{action_msg}: "{title}"',
     )

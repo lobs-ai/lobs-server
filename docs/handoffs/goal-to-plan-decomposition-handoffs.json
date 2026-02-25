@@ -1,0 +1,121 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "goal-to-plan-decomposition",
+    "title": "DB migration + Task/TaskDecomposition models",
+    "context": "Task 1 of 3 for goal-to-plan decomposition. See full design doc: docs/goal-to-plan-decomposition-design.md, Section 3 (Data Model) and Section 7 (Task 1). Add parent_task_id + subtask_order columns to tasks table. Create task_decompositions table. Update SQLAlchemy models and Pydantic schemas.",
+    "acceptance": "Migration runs clean (python -m pytest -v passes, no table errors). Task model has parent_task_id (nullable FK to tasks.id) and subtask_order (nullable int). TaskDecomposition model has all fields from design doc section 3.2. Pydantic schemas updated: TaskBase + Task include parent_task_id and subtask_order; new TaskDecompositionCreate, TaskDecompositionUpdate, TaskDecomposition schemas. Existing task tests unchanged.",
+    "files": ["docs/goal-to-plan-decomposition-design.md"],
+    "spec": {
+      "new_migration": "migrations/add_task_decomposition.py",
+      "task_columns_to_add": [
+        "parent_task_id TEXT NULLABLE REFERENCES tasks(id)",
+        "subtask_order INT NULLABLE"
+      ],
+      "new_table_task_decompositions": {
+        "id": "TEXT PRIMARY KEY",
+        "goal_text": "TEXT NOT NULL",
+        "project_id": "TEXT REFERENCES projects(id)",
+        "status": "TEXT NOT NULL DEFAULT 'pending'",
+        "model_used": "TEXT",
+        "raw_llm_output": "JSON",
+        "committed_plan": "JSON",
+        "parent_task_id": "TEXT REFERENCES tasks(id)",
+        "subtask_ids": "JSON",
+        "created_at": "DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP",
+        "committed_at": "DATETIME"
+      },
+      "files_to_modify": [
+        "app/models.py",
+        "app/schemas.py",
+        "migrations/add_task_decomposition.py (new)"
+      ]
+    }
+  },
+  {
+    "to": "programmer",
+    "initiative": "goal-to-plan-decomposition",
+    "title": "DecompositionService — LLM call + commit logic",
+    "context": "Task 2 of 3 for goal-to-plan decomposition. Depends on Task 1 (migration + models). See design doc section 5 (DecompositionService) and section 7 (Task 2). Implement app/services/decomposition.py. Uses same Gateway sessions_spawn pattern as app/orchestrator/auto_assigner.py — study that file for the LLM call pattern.",
+    "acceptance": "generate() calls LLM via Gateway, saves TaskDecomposition(status=pending), returns DecompositionPreview with parent_task and subtasks list. commit() creates parent Task + subtask Tasks with parent_task_id set and subtask_order set; converts depends_on indices to blocked_by task IDs; updates decomposition record to committed. discard() sets status=discarded. _parse_llm_response() handles clean JSON, ```json-wrapped JSON, and raises on unparseable. Unit tests for _parse_llm_response() and depends_on→blocked_by conversion. Integration test for generate() with mocked Gateway.",
+    "files": ["docs/goal-to-plan-decomposition-design.md", "app/orchestrator/auto_assigner.py"],
+    "spec": {
+      "file_to_create": "app/services/decomposition.py",
+      "llm_pattern": "Follow app/orchestrator/auto_assigner.py _choose_agent_llm() pattern: sessions_spawn then poll sessions_history up to 45s (9 polls x 5s)",
+      "model_tier": "standard (fallback medium)",
+      "prompt_requirements": [
+        "Output strict JSON only",
+        "Schema: { parent_task: {title, notes, agent, shape}, subtasks: [{title, notes, agent, order, depends_on}], rationale: string }",
+        "agent must be one of: programmer, writer, reviewer, researcher, architect",
+        "depends_on is list of order integers (1-based) for blocking subtasks",
+        "order is 1-based sequential integer"
+      ],
+      "commit_logic": {
+        "blocked_by_conversion": "For each subtask, depends_on=[1,3] means it's blocked by the tasks created for order=1 and order=3. Map order index to generated task UUID.",
+        "parent_task_fields": "status defaults to inbox, owner defaults to lobs, project_id from decomposition record",
+        "subtask_fields": "Same as parent but with parent_task_id=parent.id and subtask_order=order value from plan"
+      },
+      "error_handling": {
+        "gateway_unreachable": "raise HTTPException 503",
+        "llm_timeout": "raise HTTPException 504",
+        "invalid_json": "raise HTTPException 503 with detail explaining parse failure",
+        "decomposition_not_found": "raise HTTPException 404",
+        "already_committed": "raise HTTPException 409"
+      }
+    }
+  },
+  {
+    "to": "programmer",
+    "initiative": "goal-to-plan-decomposition",
+    "title": "API router — decompose endpoints",
+    "context": "Task 3 of 3 for goal-to-plan decomposition. Depends on Tasks 1 and 2. See design doc section 4 (API Specification) and section 7 (Task 3). Add decompose endpoints to tasks router or create a new app/routers/decompose.py. Wire into app/main.py.",
+    "acceptance": "POST /api/tasks/decompose returns 200 with parent_task and subtasks preview. POST /api/tasks/decompose/{id}/commit returns 201 with parent_task_id and subtask_ids. DELETE /api/tasks/decompose/{id} returns 200. GET /api/tasks/decompose/{id} returns decomposition record. Round-trip integration test: generate → commit → tasks exist in DB with correct parent_task_id and blocked_by. Double-commit returns 409. Bad project_id on generate returns 404.",
+    "files": ["docs/goal-to-plan-decomposition-design.md"],
+    "spec": {
+      "router_location": "app/routers/decompose.py (new, prefix /tasks/decompose)",
+      "endpoints": [
+        {
+          "method": "POST",
+          "path": "/api/tasks/decompose",
+          "request_body": "DecomposeRequest { goal_text: str, project_id: str, context: str | None }",
+          "response": "DecompositionPreview { decomposition_id: str, parent_task: {...}, subtasks: [...], rationale: str }",
+          "status": 200,
+          "notes": "Validate project_id exists. goal_text must be non-empty."
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/decompose/{decomposition_id}/commit",
+          "request_body": "CommitRequest { parent_task: TaskCommitData, subtasks: list[SubtaskCommitData] }",
+          "response": "CommitResult { parent_task_id: str, subtask_ids: list[str] }",
+          "status": 201,
+          "notes": "Validate decomposition exists and is pending. Validate subtask depends_on indices are valid. Check for dependency cycles."
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/tasks/decompose/{decomposition_id}",
+          "response": "{ status: 'discarded' }",
+          "status": 200
+        },
+        {
+          "method": "GET",
+          "path": "/api/tasks/decompose/{decomposition_id}",
+          "response": "TaskDecompositionRecord (full decomposition model)",
+          "status": 200
+        }
+      ],
+      "main_py_addition": "from app.routers import decompose; app.include_router(decompose.router, prefix='/api', dependencies=[Depends(require_auth)])",
+      "schemas_to_add_in_schemas_py": [
+        "DecomposeRequest",
+        "SubtaskPreview",
+        "ParentTaskPreview",
+        "DecompositionPreview",
+        "TaskCommitData",
+        "SubtaskCommitData",
+        "CommitRequest",
+        "CommitResult",
+        "TaskDecompositionRecord"
+      ],
+      "cycle_detection": "Simple DFS on depends_on graph. If cycle detected, return 422 with which indices form the cycle."
+    }
+  }
+]
