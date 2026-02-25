@@ -194,10 +194,9 @@ class TestAPIContract:
     async def test_memory_create_schema(self, client: AsyncClient):
         """Validate memory creation response schema."""
         memory_data = {
-            "id": "contract-test-memory-1",
-            "category": "daily",
             "title": "Contract Test Memory",
             "content": "Testing memory API contract",
+            "memory_type": "daily",
         }
         
         response = await client.post("/api/memories", json=memory_data)
@@ -207,10 +206,9 @@ class TestAPIContract:
         validate_memory_schema(memory)
         
         # Verify input fields are preserved
-        assert memory["id"] == memory_data["id"]
-        assert memory["category"] == memory_data["category"]
         assert memory["title"] == memory_data["title"]
         assert memory["content"] == memory_data["content"]
+        assert memory["memory_type"] == memory_data["memory_type"]
     
         # Validate datetime format
         try:
