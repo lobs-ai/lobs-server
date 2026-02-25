@@ -1072,7 +1072,8 @@ class BudgetLimits(BaseModel):
     daily_alert_usd: float = 0.0
     daily_hard_cap_usd: float = 0.0
     per_provider_monthly_usd: dict[str, float] = Field(default_factory=dict)
-    per_lane_daily_caps: dict[str, float] = Field(default_factory=dict)
+    # per_lane_daily_caps: None values are valid (meaning uncapped for that lane).
+    per_lane_daily_caps: dict[str, Optional[float]] = Field(default_factory=dict)
     per_task_hard_cap_usd: float = 0.0
 
 
