@@ -1,1 +1,1 @@
-Delivered: schemas/value_proof_event.json (JSON Schema draft-07, 252 lines) + docs/product/value-proof-dashboard.md (rendering spec, copy blocks, metric defs, programmer handoff, 237 lines). Both complete and ready for programmer implementation.
+Shipped PAW Value Proof Dashboard: schemas/value_proof_event.json (JSON Schema draft-07) + docs/product/value-proof-dashboard.md (copy blocks, metric defs, programmer handoff for GET /api/value-proof/today)
