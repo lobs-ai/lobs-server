@@ -348,7 +348,7 @@ async def build_daily_report(
     lane_caps: dict[str, float] = {}
     raw_lane_caps = budget_limits.get("per_lane_daily_caps")
     if isinstance(raw_lane_caps, dict):
-        lane_caps = {k: float(v) for k, v in raw_lane_caps.items()}
+        lane_caps = {k: float(v) for k, v in raw_lane_caps.items() if v is not None}
 
     # Utilization percentages
     def _utilization(spend: float, cap: float) -> float | None:

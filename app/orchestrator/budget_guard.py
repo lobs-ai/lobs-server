@@ -198,58 +198,86 @@ class BudgetGuard:
     async def today_lane_spend(self, lane: str) -> float:
         """Sum today's estimated API cost attributed to *lane*.
 
-        Attribution is approximate: based on model name heuristics.
+        Primary: uses the ``budget_lane`` column (set at worker spawn time).
+        Fallback for legacy events without ``budget_lane``: model-name keyword heuristics.
         Subscription route costs are excluded (always $0).
         """
         today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        result = await self.db.execute(
+
+        # --- Primary: events with explicit budget_lane set ---
+        r_explicit = await self.db.execute(
             select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
                 ModelUsageEvent.timestamp >= today_start,
                 ModelUsageEvent.route_type != "subscription",
+                ModelUsageEvent.budget_lane == lane,
             )
         )
-        total_today = float(result.scalar() or 0.0)
+        explicit_spend = float(r_explicit.scalar() or 0.0)
 
+        # --- Fallback: legacy events where budget_lane is NULL, use model heuristics ---
         if lane == LANE_CRITICAL:
-            # Sum events where model matches critical keywords
-            crit_result = await self.db.execute(
-                select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
-                    ModelUsageEvent.timestamp >= today_start,
-                    ModelUsageEvent.route_type != "subscription",
-                    # SQLite LIKE is case-insensitive by default for ASCII
-                    *[ModelUsageEvent.model.ilike(f"%{k}%") for k in _CRITICAL_KEYWORDS[:1]],
-                )
-            )
-            # Sum all critical keyword matches (OR logic)
-            crit_total = 0.0
+            fallback_total = 0.0
             for kw in _CRITICAL_KEYWORDS:
                 r = await self.db.execute(
                     select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
                         ModelUsageEvent.timestamp >= today_start,
                         ModelUsageEvent.route_type != "subscription",
+                        ModelUsageEvent.budget_lane.is_(None),
                         ModelUsageEvent.model.ilike(f"%{kw}%"),
                     )
                 )
-                crit_total = max(crit_total, float(r.scalar() or 0.0))
-            return crit_total
+                # Sum across distinct keyword matches (additive attribution is
+                # an overestimate but prevents undercount for legacy events).
+                fallback_total += float(r.scalar() or 0.0)
+            return explicit_spend + fallback_total
 
         if lane == LANE_BACKGROUND:
-            bg_total = 0.0
+            fallback_total = 0.0
             for kw in _BACKGROUND_KEYWORDS:
                 r = await self.db.execute(
                     select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
                         ModelUsageEvent.timestamp >= today_start,
                         ModelUsageEvent.route_type != "subscription",
+                        ModelUsageEvent.budget_lane.is_(None),
                         ModelUsageEvent.model.ilike(f"%{kw}%"),
                     )
                 )
-                bg_total = max(bg_total, float(r.scalar() or 0.0))
-            return bg_total
+                fallback_total += float(r.scalar() or 0.0)
+            return explicit_spend + fallback_total
 
-        # LANE_STANDARD: total - critical - background (approximate)
-        bg_total = await self.today_lane_spend(LANE_BACKGROUND)
-        crit_total = await self.today_lane_spend(LANE_CRITICAL)
-        return max(0.0, total_today - bg_total - crit_total)
+        # LANE_STANDARD: legacy events = total - critical - background (approximate)
+        r_total = await self.db.execute(
+            select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
+                ModelUsageEvent.timestamp >= today_start,
+                ModelUsageEvent.route_type != "subscription",
+                ModelUsageEvent.budget_lane.is_(None),
+            )
+        )
+        legacy_total = float(r_total.scalar() or 0.0)
+
+        r_crit_legacy = await self.db.execute(
+            select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
+                ModelUsageEvent.timestamp >= today_start,
+                ModelUsageEvent.route_type != "subscription",
+                ModelUsageEvent.budget_lane.is_(None),
+                # Critical keywords heuristic
+                func.lower(ModelUsageEvent.model).contains("opus"),
+            )
+        )
+        r_bg_legacy = await self.db.execute(
+            select(func.coalesce(func.sum(ModelUsageEvent.estimated_cost_usd), 0.0)).where(
+                ModelUsageEvent.timestamp >= today_start,
+                ModelUsageEvent.route_type != "subscription",
+                ModelUsageEvent.budget_lane.is_(None),
+                # Background keywords heuristic
+                func.lower(ModelUsageEvent.model).contains("haiku"),
+            )
+        )
+        legacy_crit = float(r_crit_legacy.scalar() or 0.0)
+        legacy_bg = float(r_bg_legacy.scalar() or 0.0)
+        legacy_standard = max(0.0, legacy_total - legacy_crit - legacy_bg)
+
+        return explicit_spend + legacy_standard
 
     async def _load_lane_policy(self) -> dict[str, dict[str, Any]]:
         row = await self.db.get(OrchestratorSetting, BUDGET_GUARD_LANE_POLICY_KEY)

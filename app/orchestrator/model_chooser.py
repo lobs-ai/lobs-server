@@ -174,6 +174,10 @@ class ModelChoice:
     strict_coding_tier: bool
     degrade_on_quota: bool
     audit: dict[str, Any]
+    # budget_lane: classified lane for this task (critical|standard|background).
+    # Set at model-selection time; used to tag ModelUsageEvents for accurate
+    # per-lane spend tracking.
+    budget_lane: str = "standard"
 
 
 class ModelChooser:
@@ -242,12 +246,15 @@ class ModelChooser:
         if not candidates:
             candidates = list(decision.models)
 
+        detected_lane: str = lane_guard_decision.get("lane", "standard") or "standard"
+
         return ModelChoice(
             model=candidates[0],
             candidates=candidates,
             routing_policy=cfg["routing_policy"],
             strict_coding_tier=cfg["strict_coding_tier"],
             degrade_on_quota=cfg["degrade_on_quota"],
+            budget_lane=detected_lane,
             audit={
                 **decision.audit,
                 "purpose": purpose,

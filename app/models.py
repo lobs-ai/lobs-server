@@ -743,6 +743,10 @@ class ModelUsageEvent(Base):
     model = Column(String, nullable=False, index=True)
     route_type = Column(String, nullable=False, default="api", index=True)  # api|subscription
     task_type = Column(String, nullable=False, default="other", index=True)
+    # budget_lane: explicit lane classification (critical|standard|background).
+    # Populated at worker spawn time so lane-based spend queries are accurate.
+    # NULL on legacy events — those fall back to keyword-based heuristics.
+    budget_lane = Column(String, nullable=True, index=True)
     input_tokens = Column(Integer, nullable=False, default=0)
     output_tokens = Column(Integer, nullable=False, default=0)
     cached_tokens = Column(Integer, nullable=False, default=0)
