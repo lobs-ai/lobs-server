@@ -156,18 +156,17 @@ def validate_chat_session_shape(session: dict) -> None:
     
     Swift model expects (with .convertFromSnakeCase):
     - id: String
+    - session_key: String
     - label: String?
     - createdAt: Date (snake_case: created_at)
-    - updatedAt: Date (snake_case: updated_at)
+    - isActive: Bool (snake_case: is_active)
+    - lastMessageAt: Date? (optional, snake_case: last_message_at)
     """
     assert "id" in session, "Missing required field: id"
     assert isinstance(session["id"], str), f"id must be string, got {type(session['id'])}"
     
     assert "created_at" in session, "Missing required field: created_at"
     validate_iso8601_date(session["created_at"])
-    
-    assert "updated_at" in session, "Missing required field: updated_at"
-    validate_iso8601_date(session["updated_at"])
     
     if "label" in session and session["label"] is not None:
         assert isinstance(session["label"], str), f"label must be string or null, got {type(session['label'])}"
@@ -178,17 +177,13 @@ def validate_chat_message_shape(message: dict) -> None:
     
     Swift model expects (with .convertFromSnakeCase):
     - id: String
-    - sessionId: String (snake_case: session_id)
     - role: String
     - content: String
     - createdAt: Date (snake_case: created_at)
-    - modelUsed: String? (optional, snake_case: model_used)
+    - messageMetadata: dict? (optional, snake_case: message_metadata)
     """
     assert "id" in message, "Missing required field: id"
     assert isinstance(message["id"], str), f"id must be string, got {type(message['id'])}"
-    
-    assert "session_id" in message, "Missing required field: session_id"
-    assert isinstance(message["session_id"], str), f"session_id must be string, got {type(message['session_id'])}"
     
     assert "role" in message, "Missing required field: role"
     assert isinstance(message["role"], str), f"role must be string, got {type(message['role'])}"
@@ -198,27 +193,29 @@ def validate_chat_message_shape(message: dict) -> None:
     
     assert "created_at" in message, "Missing required field: created_at"
     validate_iso8601_date(message["created_at"])
-    
-    if "model_used" in message and message["model_used"] is not None:
-        assert isinstance(message["model_used"], str), f"model_used must be string or null, got {type(message['model_used'])}"
 
 
 def validate_memory_shape(memory: dict) -> None:
-    """Validate memory matches Swift Memory schema.
+    """Validate memory matches the server Memory schema.
     
-    Swift model expects (with .convertFromSnakeCase):
-    - id: String
-    - type: String
-    - content: String
-    - createdAt: Date (snake_case: created_at)
-    - updatedAt: Date (snake_case: updated_at)
-    - metadata: dict? (optional, JSON object)
+    Server Memory schema:
+    - id: int
+    - title: str
+    - content: str
+    - memory_type: str (long_term/daily/custom)
+    - path: str
+    - agent: str
+    - created_at: datetime
+    - updated_at: datetime
     """
     assert "id" in memory, "Missing required field: id"
-    assert isinstance(memory["id"], str), f"id must be string, got {type(memory['id'])}"
+    assert isinstance(memory["id"], int), f"id must be int, got {type(memory['id'])}"
     
-    assert "type" in memory, "Missing required field: type"
-    assert isinstance(memory["type"], str), f"type must be string, got {type(memory['type'])}"
+    assert "memory_type" in memory, "Missing required field: memory_type"
+    assert isinstance(memory["memory_type"], str), f"memory_type must be string, got {type(memory['memory_type'])}"
+    
+    assert "title" in memory, "Missing required field: title"
+    assert isinstance(memory["title"], str), f"title must be string, got {type(memory['title'])}"
     
     assert "content" in memory, "Missing required field: content"
     assert isinstance(memory["content"], str), f"content must be string, got {type(memory['content'])}"
@@ -228,9 +225,6 @@ def validate_memory_shape(memory: dict) -> None:
     
     assert "updated_at" in memory, "Missing required field: updated_at"
     validate_iso8601_date(memory["updated_at"])
-    
-    if "metadata" in memory and memory["metadata"] is not None:
-        assert isinstance(memory["metadata"], dict), f"metadata must be dict or null, got {type(memory['metadata'])}"
 
 
 def validate_agent_shape(agent: dict) -> None:

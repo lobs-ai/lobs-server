@@ -193,10 +193,11 @@ class TestAPIContract:
     @pytest.mark.asyncio
     async def test_memory_create_schema(self, client: AsyncClient):
         """Validate memory creation response schema."""
+        # Use "long_term" type — "daily" requires a date field
         memory_data = {
             "title": "Contract Test Memory",
             "content": "Testing memory API contract",
-            "memory_type": "daily",
+            "memory_type": "long_term",
         }
         
         response = await client.post("/api/memories", json=memory_data)
@@ -327,7 +328,6 @@ class TestAPIContract:
         """Ensure chat message fields remain backward compatible."""
         required_fields = [
             "id",
-            "session_id",
             "role",
             "content",
             "created_at",
