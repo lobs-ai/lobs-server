@@ -212,7 +212,7 @@ Response: JSON conforming to `schemas/value_proof_event.json`.
 | `minutes_saved.total` | Sum of per-task baselines (see definitions above); store baseline in `task_types` config or hardcode initial map |
 | `decisions_required.count` | `inbox_items` where `created_at` in period and `requires_decision=true` |
 | `decisions_required.pending` | Above + `status='pending'` |
-| `risk_prevented.count` | `orchestrator_events` or `worker_runs` where event_type in `['budget_cap_hit', 'cascade_guardrail_triggered', 'diagnostic_escalation']` |
+| `risk_prevented.count` | `orchestrator_events` or `worker_runs` where event_type in `['budget_cap_hit', 'cascade_guardrail_triggered', 'diagnostic_escalation']`; also check `failure_bundles` (new Feb 25) for `task_failure_cascade` events — each bundle represents a caught failure that triggered the diagnostic pipeline |
 
 **Step 2 — Endpoint.** Build `GET /api/value-proof/today` that aggregates and returns a `ValueProofEvent`. Cache with 5-min TTL; invalidate on task completion or inbox resolution.
 

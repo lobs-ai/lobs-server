@@ -1,1 +1,1 @@
-Shipped PAW Value Proof Dashboard: schemas/value_proof_event.json + docs/product/value-proof-dashboard.md — copy blocks, metric definitions, rendering spec, and programmer handoff complete.
+Verified and updated PAW Value Proof Dashboard copy + data contract. Schema at schemas/value_proof_event.json, rendering spec at docs/product/value-proof-dashboard.md. Added failure_bundles table reference to risk_prevented telemetry mapping (Feb 25 architecture addition).
