@@ -14,6 +14,7 @@ from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Task, InboxItem
+from app.services.failure_explainer import explain_failure_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +333,11 @@ class EscalationManagerEnhanced:
             alert_id = f"escalation_{task.id}_{int(now.timestamp())}"
             
             # Create inbox alert
+            # Build runbook section if a matching runbook exists
+            runbook_section = explain_failure_markdown(
+                task.failure_reason, include_runbook_link=True
+            )
+
             alert = InboxItem(
                 id=alert_id,
                 title=f"🚨 Task Escalation: {task.title[:50]}",
@@ -350,6 +356,8 @@ class EscalationManagerEnhanced:
                     f"2. ✗ Agent switch\n"
                     f"3. ✗ Diagnostic analysis\n"
                     f"4. → **Manual intervention required**\n\n"
+                    f"## Failure Diagnosis\n\n"
+                    f"{runbook_section}\n\n"
                     f"## Task Details\n\n"
                     f"**Title:** {task.title}\n\n"
                     f"**Last Failure Reason:**\n{task.failure_reason or 'Unknown'}\n\n"

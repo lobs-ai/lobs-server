@@ -256,7 +256,10 @@ def format_digest_markdown(digest: Dict[str, Any]) -> str:
     Format digest data as concise, actionable markdown.
     
     Designed for inbox delivery - emphasizes deltas and action items.
+    Includes runbook links for recognised failure codes.
     """
+    from app.services.failure_explainer import explain_failure
+
     lines = []
     
     # Header
@@ -285,6 +288,12 @@ def format_digest_markdown(digest: Dict[str, Any]) -> str:
             lines.append(f"- **Affected tasks:** {', '.join(f['affected_tasks'][:5])}")
             if f["sample_runs"]:
                 lines.append(f"- **Example:** {f['sample_runs'][0]['summary'][:100]}")
+            # Add runbook link if the pattern matches a known failure code
+            explanation = explain_failure(f["failure_pattern"])
+            if explanation:
+                lines.append(
+                    f"- 📖 **Runbook:** [{explanation.title}]({explanation.runbook_url})"
+                )
             lines.append("")
     else:
         lines.append("## ✅ No Recurring Failures")
@@ -299,6 +308,12 @@ def format_digest_markdown(digest: Dict[str, Any]) -> str:
             lines.append(f"- **State:** {task['work_state']} | Escalation: {task['escalation_tier']} | Retries: {task['retry_count']}")
             if task["failure_reason"]:
                 lines.append(f"- **Reason:** {task['failure_reason'][:150]}")
+                # Add runbook link for the failure reason
+                explanation = explain_failure(task["failure_reason"])
+                if explanation:
+                    lines.append(
+                        f"- 📖 **Runbook:** [{explanation.title}]({explanation.runbook_url})"
+                    )
             if task["blocked_by"]:
                 lines.append(f"- **Blocked by:** {task['blocked_by']}")
             lines.append("")
