@@ -1,1 +1,1 @@
-Shipped PAW 'One-Minute Value Proof': schema at schemas/value_proof_event.json, rendering spec + copy blocks + programmer handoff at docs/product/value-proof-dashboard.md
+Shipped PAW Value Proof Dashboard: schemas/value_proof_event.json (JSON Schema draft-07) and docs/product/value-proof-dashboard.md (copy blocks, metric definitions, programmer handoff table). Ready for programmer implementation.
