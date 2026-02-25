@@ -772,6 +772,50 @@ class WorkerMonitor:
             logger.error("[SWEEP_REVIEW] Failed to process sweep review results: %s", e, exc_info=True)
             await self.db.rollback()
 
+    @staticmethod
+    def _git_push_sync(*, repo_path: Path, project_id: str, task_id: str) -> None:
+        """Synchronous git push. Designed to run in asyncio.to_thread."""
+        def run_git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", "-C", str(repo_path), *args],
+                capture_output=True, text=True, check=check,
+            )
+
+        inside = run_git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return
+
+        dirty = run_git("status", "--porcelain")
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            logger.info("[WORKER] Repo has uncommitted changes; skipping auto-push (%s)", repo_path)
+            return
+
+        upstream = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if upstream.returncode != 0:
+            return
+
+        run_git("fetch", "--prune", "origin")
+        counts = run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
+        if counts.returncode != 0:
+            return
+
+        behind_str, ahead_str = (counts.stdout.strip().split() + ["0", "0"])[:2]
+        behind, ahead = int(behind_str), int(ahead_str)
+
+        if ahead <= 0 and behind <= 0:
+            return
+
+        if behind > 0:
+            pull = run_git("pull", "--rebase")
+            if pull.returncode != 0:
+                raise RuntimeError(pull.stderr.strip() or pull.stdout.strip() or "git pull --rebase failed")
+
+        push = run_git("push")
+        if push.returncode != 0:
+            raise RuntimeError(push.stderr.strip() or push.stdout.strip() or "git push failed")
+
+        logger.info("[WORKER] Auto-pushed repo (project=%s task=%s ahead=%s)", project_id, task_id[:8], ahead)
+
     async def _push_project_repo_if_needed(
         self,
         *,
@@ -800,60 +844,12 @@ class WorkerMonitor:
             if not repo_path.exists():
                 return
 
-            def run_git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
-                return subprocess.run(
-                    ["git", "-C", str(repo_path), *args],
-                    capture_output=True,
-                    text=True,
-                    check=check,
-                )
-
-            inside = run_git("rev-parse", "--is-inside-work-tree")
-            if inside.returncode != 0 or inside.stdout.strip() != "true":
-                return
-
-            # Don't attempt to push if the repo is dirty.
-            dirty = run_git("status", "--porcelain")
-            if dirty.returncode == 0 and dirty.stdout.strip():
-                logger.info(
-                    "[WORKER] Repo has uncommitted changes; skipping auto-push (%s)",
-                    repo_path,
-                )
-                return
-
-            # Ensure upstream exists; if not, skip.
-            upstream = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-            if upstream.returncode != 0:
-                return
-
-            run_git("fetch", "--prune", "origin")
-
-            counts = run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
-            if counts.returncode != 0:
-                return
-
-            behind_str, ahead_str = (counts.stdout.strip().split() + ["0", "0"])[:2]
-            behind = int(behind_str)
-            ahead = int(ahead_str)
-
-            if ahead <= 0 and behind <= 0:
-                return
-
-            # If we're behind, try to rebase first.
-            if behind > 0:
-                pull = run_git("pull", "--rebase")
-                if pull.returncode != 0:
-                    raise RuntimeError(pull.stderr.strip() or pull.stdout.strip() or "git pull --rebase failed")
-
-            push = run_git("push")
-            if push.returncode != 0:
-                raise RuntimeError(push.stderr.strip() or push.stdout.strip() or "git push failed")
-
-            logger.info(
-                "[WORKER] Auto-pushed repo after completion (project=%s task=%s ahead=%s)",
-                project_id,
-                task_id[:8],
-                ahead,
+            import asyncio
+            await asyncio.to_thread(
+                self._git_push_sync,
+                repo_path=repo_path,
+                project_id=project_id,
+                task_id=task_id,
             )
 
         except Exception as e:

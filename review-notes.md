@@ -1,147 +1,140 @@
-# Diagnostic Review: Task bc10aeab — Daily Ops Brief Failure
+# Diagnostic Review — Model Spend Guardrails + Auto-Downgrade Policy
 
+**Task ID:** `124b5b33-2a6e-4db5-8293-5529d224ae82`  
+**Diagnostic ID:** `diag_124b5b33-2a6e-4db5-8293-5529d224ae82_1771975866`  
 **Date:** 2026-02-25  
-**Reviewer:** reviewer-agent  
-**Task ID:** bc10aeab-75e0-4ac8-9df3-e78bffcc1b77  
-**Reported Error:** `Session not found`
+**Reviewer:** reviewer agent
 
 ---
 
-## Root Cause Analysis
+## TL;DR
 
-The task failed due to a **cascade of 3 compounding failures**, not a single issue:
+**The task is actually completed.** The feature is fully implemented in production code and all 106 budget-related tests pass. The repeated agent failures were **not caused by broken code** — they were caused by agents running into context/timeout limits (evident from the error log: *"No assistant response in deleted transcript"*). Each retry spawned a new agent that re-implemented the feature rather than recognizing the prior work was already done.
 
-### Failure 1 (Primary): SQLite DB Lock — Paralyzed the Orchestrator (Feb 24, ~19:49–20:10 UTC)
+---
 
-The orchestrator engine's control loop was crashing **every ~90 seconds** with:
+## Root Cause of Failures
 
+### Primary: Context Exhaustion / Transcript Deletion
+
+The error log for every failed attempt contains:
 ```
-sqlite3.OperationalError: database is locked
-INSERT INTO agent_reflections ...
-```
-
-**Stack trace root:** `engine.py → _run_reflection() → reflection_cycle.py → model_chooser.py → _load_runtime_config()` triggers an autoflush of a pending `agent_reflections` INSERT, which conflicts with another DB writer. This locked up the entire control loop for ~20 minutes.
-
-**Impact:** During this window, no tasks could be dispatched, no sessions could be spawned. The architect task for bc10aeab was queued during this outage period.
-
-### Failure 2: Architect Workflow Missing — Tasks Blocked (`legacy spawn disabled`)
-
-At 20:18 UTC, when the control loop recovered, it logged:
-```
-[ENGINE] Task bc10aeab (agent=architect) has no matching workflow; blocking task (legacy spawn disabled)
+No assistant response in deleted transcript
 ```
 
-Six architect tasks hit this at once — meaning the workflow registry didn't have a matching workflow for architect-type tasks at that moment. This is likely a timing issue (workflow seeds not re-loaded after DB lock recovery) or a missing workflow definition for this agent type.
+This is **not a code bug**. It means the agent's conversation transcript was deleted before it could produce a response — most likely because the context window was exhausted. The programmer was likely reading/re-reading large files (model_chooser.py, worker.py, models.py) to understand the codebase, running out of tokens, and the orchestrator detected a missing response.
 
-### Failure 3: Session Spawn Failed — Both Model Attempts Rejected
+### Secondary: Multiple Agents, Redundant Implementations
 
-At 20:33 UTC, the worker finally tried to spawn a session:
-```json
-{
-  "attempts": [
-    {"model": "anthropic/claude-sonnet-4-6", "ok": false, "error_type": "unknown"},
-    {"model": "anthropic/claude-opus-4-6",  "ok": false, "error_type": "unknown"}
-  ]
-}
+Because each retry spawned a fresh agent with no context of prior work, multiple versions of the budget guardrail were written across 10+ commits:
+- `app/orchestrator/budget_guard.py` — second, cleaner implementation (BudgetGuard class with DB-backed policy)
+- `app/orchestrator/budget_guardrails.py` — first implementation (standalone functions + daily report)
+- `app/orchestrator/model_chooser.py` — imports from **both** files
+
+This dual-implementation is not a bug but creates maintenance overhead.
+
+---
+
+## Implementation Status: ✅ COMPLETE
+
+All required features are implemented and tested:
+
+### Features Delivered
+
+| Feature | Status | Location |
+|---|---|---|
+| Budget lane classification (critical/standard/background) | ✅ | `budget_guard.py:classify_task_lane()` |
+| Per-lane daily spend caps with DB-backed config | ✅ | `budget_guard.py:BudgetGuard` |
+| Model tier downgrade when cap exceeded | ✅ | `budget_guard.py:_filter_to_tier_and_below()` |
+| Global daily hard cap (last-resort guardrail) | ✅ | `budget_guardrails.py:apply_daily_hard_cap()` |
+| BudgetGuard wired into ModelChooser.choose() | ✅ | `model_chooser.py` (layer 2 of 3-layer guard) |
+| Override log (rolling, persisted to DB) | ✅ | `budget_guard.py:_append_override_log()` |
+| `GET /api/usage/budget-lanes` | ✅ | `routers/usage.py:552` |
+| `PATCH /api/usage/budget-lanes` | ✅ | `routers/usage.py:583` |
+| `GET /api/usage/daily-report` | ✅ | `routers/usage.py:633` |
+| `ModelUsageEvent.budget_lane` column | ✅ | `models.py:750` |
+| budget_lane tagged at worker spawn time | ✅ | `worker.py:297,421,430` |
+
+### Test Results
+
+```
+106 passed, 966 deselected, 3 warnings in 19.07s
 ```
 
-Both fallback models failed. Earlier (20:28), we also see:
-```
-model not allowed: openai-codex/gpt-4
-model not allowed: openai-codex/gpt-4-sub
-```
+All budget-related tests pass. Test files:
+- `tests/test_budget_guard.py` — 20+ unit + integration tests
+- `tests/test_budget_guardrails.py` — 35+ tests covering endpoints, model chooser integration, hard cap
 
-The model allowlist rejected certain models, and the fallback chain exhausted without success. The worker's age-based fallback then returned `"Session not found"` — this is the error surfaced to the task system.
+---
 
-### Failure 4 (Current, Active Bug): MissingGreenlet in workflow_executor.py
+## Issues Found
 
-As of today (08:25 ET), a new error is recurring:
-```
-[WORKFLOW] Node spawn_architect execution error: greenlet_spawn has not been called
-```
+### 🟡 Important: Dual Implementation Creates Maintenance Risk
 
-At `workflow_executor.py:348`:
+Two files implement overlapping budget guardrail concerns:
+- `budget_guard.py` — Primary class-based implementation (`BudgetGuard`)
+- `budget_guardrails.py` — Older function-based implementation (some used in `model_chooser.py`)
+
+`model_chooser.py` imports from both:
 ```python
-ctx = dict(run.context or {})
+from app.orchestrator.budget_guard import BudgetGuard
+from app.orchestrator.budget_guardrails import (
+    apply_daily_hard_cap,
+    get_today_total_spend,
+    append_override_log,
+)
 ```
 
-This is a **lazy-load of an ORM attribute outside an async greenlet context**. SQLAlchemy async sessions can't do lazy loads synchronously. `run.context` is being accessed after the session's greenlet context has exited.
+This works correctly but creates confusion: where does the logic live? Future maintainers (or agents) may modify one and not the other.
 
----
+**Recommendation:** Consolidate `apply_daily_hard_cap`, `get_today_total_spend`, and `append_override_log` into `budget_guard.py`. Deprecate or remove `budget_guardrails.py` after migrating the daily report builder.
 
-## Priority Breakdown
+**Priority:** Important (not critical — current code is correct).
 
-### 🔴 Critical: MissingGreenlet bug (active, blocking all spawn_architect attempts)
+### 🟡 Important: Lane Spend Fallback Uses Double-Counting Heuristics
 
-**File:** `app/orchestrator/workflow_executor.py` around line 348  
-**Fix:** Eagerly load `run.context` when the WorkerRun is fetched (using `selectinload` or `options(load_only(...))` in the DB query that populates `run`), or use `with db.no_autoflush:` / `await db.refresh(run)` before accessing it. The attribute must be loaded while still in an async context.
+In `budget_guard.py:today_lane_spend()`, the legacy fallback for events without `budget_lane` column sums per-keyword independently for critical lane:
 
-### 🔴 Critical: SQLite lock in reflection cycle (systemic)
-
-**File:** `app/orchestrator/reflection_cycle.py` / `model_chooser.py`  
-**Fix:** The `agent_reflections` INSERT is being staged in the session before `model_chooser._load_runtime_config()` runs a SELECT, triggering autoflush. Options:
-1. Add `with db.no_autoflush:` block around the DB query in `_load_runtime_config()`
-2. Commit or expire the pending INSERT before the SELECT
-3. More broadly: review the reflection cycle's session lifecycle — it may need a separate session
-
-### 🟡 Important: "No matching workflow" for architect tasks
-
-**File:** `app/orchestrator/engine.py` / workflow registry  
-**Fix:** Confirm there's a workflow definition registered for `agent=architect`. The 6-task block suggests the workflow registry was empty or stale post-recovery. Add logging to show registered workflows at startup and after reload.
-
-### 🟡 Important: Model allowlist blocking fallback
-
-**Logs show:** `model not allowed: openai-codex/gpt-4` and `gpt-4-sub`  
-These appear to be stale model IDs the router is attempting. The model tier config may have leftover entries for deprecated model identifiers. The allowlist check is working correctly — but the model chooser is trying invalid models.
-
----
-
-## What Should Happen With This Task
-
-**Recommendation: Modify + Retry**
-
-The task itself (Daily Ops Brief) is valid. The infrastructure was the failure point, not the task's design. However:
-
-1. **Do NOT retry with `architect` agent** — architect tasks are currently blocked by the MissingGreenlet bug in workflow_executor.py (see Failure 4). They'll keep failing until that's fixed.
-
-2. **Retry with `programmer` agent** — this is the right move (already in progress per the task's history). The handoffs in `docs/handoffs/daily-ops-brief-handoffs.json` are detailed and correct. A programmer can implement without architecture input since the design doc exists.
-
-3. **Fix the infrastructure first** — the MissingGreenlet bug needs a programmer fix or it will block the next attempt too.
-
----
-
-## Handoffs
-
-### Handoff 1: MissingGreenlet in workflow_executor.py
-
-```json
-{
-  "to": "programmer",
-  "initiative": "infra-bugfix",
-  "title": "Fix MissingGreenlet: workflow_executor.py lazy-loads ORM attribute outside async context",
-  "context": "workflow_executor.py line 348: `ctx = dict(run.context or {})` triggers SQLAlchemy lazy load of WorkerRun.context outside the async greenlet. Logs show this error recurring every time spawn_architect is retried. Fix: eagerly load run.context when the WorkerRun is fetched from DB (e.g., add options(selectinload(WorkerRun.context)) or load_only). See logs/error.log timestamps 2026-02-25T02:04 and T12:46.",
-  "acceptance": "spawn_architect workflow node executes without MissingGreenlet error. WorkerRun.context is loaded eagerly in the query that fetches run.",
-  "files": ["app/orchestrator/workflow_executor.py"]
-}
+```python
+for kw in _CRITICAL_KEYWORDS:
+    r = await self.db.execute(...)
+    fallback_total += float(r.scalar() or 0.0)
 ```
 
-### Handoff 2: SQLite DB Lock in Reflection Cycle
+If a model name matches multiple critical keywords (e.g., "gpt-5-turbo-opus"), the spend would be double-counted in the critical lane. This is acknowledged in a comment as "an overestimate" but could lead to false positives (triggering downgrade when under actual budget).
 
-```json
-{
-  "to": "programmer",
-  "initiative": "infra-bugfix",
-  "title": "Fix SQLite lock: agent_reflections autoflush conflicts during reflection cycle",
-  "context": "engine.py reflection cycle stages an INSERT into agent_reflections, then model_chooser._load_runtime_config() does a SELECT which triggers autoflush, causing sqlite3.OperationalError: database is locked. This crashed the control loop every ~90 seconds for 20+ minutes (see error.log 2026-02-24T19:49–20:10). Fix: wrap the SELECT in model_chooser._load_runtime_config() with `async with db.no_autoflush:` or commit/expire the pending INSERT before the SELECT runs.",
-  "acceptance": "No more 'database is locked' errors from the reflection cycle. Control loop runs stably for 30+ minutes under reflection load.",
-  "files": ["app/orchestrator/model_chooser.py", "app/orchestrator/reflection_cycle.py"]
-}
+**Recommendation:** Use `OR` filtering in a single query with `func.or_()` instead of summing per keyword separately.
+
+### 🔵 Suggestion: `budget_guardrails.py` Lane Classification Disagrees with `budget_guard.py`
+
+`budget_guardrails.py:classify_task_lane()` classifies `programmer` agents as `critical`:
+```python
+if is_high_criticality or (agent_type == "programmer" and purpose == "execution"):
+    return "critical"
 ```
+
+But `budget_guard.py:classify_task_lane()` classifies programmer as `standard` unless criticality is explicitly "high":
+```python
+if criticality == "high" or explicit_tier == "strong":
+    return LANE_CRITICAL
+```
+
+The `ModelChooser` uses `budget_guard.py`'s version (via `BudgetGuard.apply()`), so in practice programmers are `standard` lane, not `critical`. This inconsistency is confusing but currently harmless since `budget_guardrails.py:classify_task_lane()` is not called from hot paths.
 
 ---
 
-## Additional Notes
+## Recommendation
 
-- The `brief_service.py` file already exists in `app/services/` — Task 1 of the daily-ops-brief handoffs is complete or partially complete. The programmer retrying this task should check what's already implemented before re-doing work.
-- The workflow_executor is seeing recurring `spawn_architect` retry attempts today (08:27–08:28 ET) — this is an active loop that will consume resources. The MissingGreenlet fix is urgent.
-- The "Session not found" error message in the task failure log is misleading — the actual root cause is infrastructure failure, not a missing session per se.
+**Mark this task as COMPLETE.** The implementation is done, tests pass, and endpoints are live.
+
+The orchestration failure was a systemic issue (context exhaustion causing transcript deletion) that caused the escalation cascade. The underlying code never actually failed — agents just couldn't report success.
+
+### Suggested Systemic Fix
+
+For complex feature tasks that touch many files:
+1. **Agents should check git log first** before starting work — "Did a previous agent commit anything?" This prevents re-implementing already-completed work.
+2. **Context budget awareness** — Large codebase reads should be chunked. The programmer likely ran out of context reading files like `model_chooser.py` (800+ lines) and `worker.py` (1400+ lines) in full.
+
+### Optional Follow-up Handoff
+
+A cleanup handoff to merge `budget_guardrails.py` into `budget_guard.py` would reduce maintenance confusion, but is **not urgent**.

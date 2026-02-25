@@ -83,6 +83,8 @@ class OrchestratorEngine:
         # Daily Ops Brief — fires once daily at _brief_hour_et (ET)
         self._brief_hour_et: int = 8
         self._last_brief_date_et: str = ""
+        self._startup_time: float = 0.0  # set when engine starts
+        self._startup_grace_seconds: float = 60.0  # don't run blocking tasks in first 60s
         # Persistent worker manager (survives across ticks)
         self._worker_manager: Optional[WorkerManager] = None
         # Provider health tracking (persistent across ticks)
@@ -114,6 +116,7 @@ class OrchestratorEngine:
         
         self._running = True
         self._paused = False
+        import time as _t; self._startup_time = _t.time()
         self._task = asyncio.create_task(self._run_loop())
         
         logger.info("=" * 60)
@@ -140,39 +143,61 @@ class OrchestratorEngine:
                     await db.commit()
                     logger.info("[ENGINE] Created default project 'General'")
 
-                # 2. Reset orphaned in_progress tasks (no worker alive after restart)
-                result = await db.execute(
-                    select(TaskModel).where(TaskModel.work_state == "in_progress")
-                )
-                orphaned = result.scalars().all()
-
-                if orphaned:
-                    for task in orphaned:
-                        task.work_state = "not_started"
-                        task.updated_at = datetime.now(timezone.utc)
-                    await db.commit()
-                    logger.info(
-                        "[ENGINE] Startup recovery: reset %d orphaned in_progress task(s) to not_started",
-                        len(orphaned),
+                # 2. Clear stale worker_status (since no workers survive restart)
+                try:
+                    from app.models import AgentStatus
+                    agent_result = await db.execute(
+                        select(AgentStatus).where(AgentStatus.status != "idle")
                     )
+                    for agent_status in agent_result.scalars().all():
+                        agent_status.status = "idle"
+                        agent_status.activity = None
+                        agent_status.current_task_id = None
+                    await db.commit()
+                    logger.info("[ENGINE] Startup recovery: cleared stale worker_status")
+                except Exception:
+                    pass  # AgentStatus table might not exist yet
 
-                # 3. Cancel stale workflow runs (no workers alive after restart)
+                # Don't reset in_progress tasks — the workflow engine will re-spawn
+                # workers for them on the next tick. Aggressively resetting causes
+                # tasks to be re-queued and lose progress.
+
+                # 3. Cancel truly stale workflow runs (running for > 2 hours with no update)
+                # Don't cancel recent runs — they may have been mid-execution before restart
                 from app.models import WorkflowRun
+                stale_threshold = datetime.now(timezone.utc) - timedelta(hours=2)
                 wf_result = await db.execute(
-                    select(WorkflowRun).where(WorkflowRun.status == "running")
+                    select(WorkflowRun).where(
+                        WorkflowRun.status == "running",
+                        WorkflowRun.updated_at < stale_threshold,
+                    )
                 )
                 stale_runs = wf_result.scalars().all()
                 if stale_runs:
                     for wf_run in stale_runs:
                         wf_run.status = "failed"
-                        wf_run.error = "Stale: cancelled during startup recovery"
+                        wf_run.error = "Stale: cancelled during startup recovery (>2h without update)"
                         wf_run.finished_at = datetime.now(timezone.utc)
                         wf_run.updated_at = datetime.now(timezone.utc)
                     await db.commit()
                     logger.info(
-                        "[ENGINE] Startup recovery: cancelled %d stale workflow run(s)",
+                        "[ENGINE] Startup recovery: cancelled %d stale workflow run(s) (>2h old)",
                         len(stale_runs),
                     )
+                # Reset pending workflow runs back to ready state
+                pending_result = await db.execute(
+                    select(WorkflowRun).where(
+                        WorkflowRun.status == "pending",
+                        WorkflowRun.updated_at < stale_threshold,
+                    )
+                )
+                stale_pending = pending_result.scalars().all()
+                if stale_pending:
+                    for wf_run in stale_pending:
+                        wf_run.status = "failed"
+                        wf_run.error = "Stale: cancelled during startup recovery (>2h pending)"
+                        wf_run.finished_at = datetime.now(timezone.utc)
+                    await db.commit()
 
                 # 4. Unblock tasks that were blocked due to transient errors
                 blocked_result = await db.execute(
@@ -324,6 +349,14 @@ class OrchestratorEngine:
         Returns True if there was activity.
         """
         activity = False
+        import time as _time
+        _step_t0 = _time.monotonic()
+        def _step(label):
+            nonlocal _step_t0
+            elapsed = _time.monotonic() - _step_t0
+            if elapsed > 5:
+                logger.warning("[ENGINE] Step '%s' took %.1fs", label, elapsed)
+            _step_t0 = _time.monotonic()
 
         async with self._session_factory() as db:
             scanner = Scanner(db)
@@ -462,15 +495,20 @@ class OrchestratorEngine:
             # 2. Inbox processing now handled by inbox-processing workflow (every minute)
 
             # 2a. Daily Ops Brief — fires once daily at _brief_hour_et (ET)
+            # Guarded by startup grace period: BriefService uses synchronous googleapiclient
+            # which can block the event loop. Don't fire until the server has been up 60s.
             ET_ZONE = ZoneInfo("America/New_York")
             now_et = datetime.now(ET_ZONE)
             today_key_et = now_et.strftime("%Y-%m-%d")
+            startup_elapsed = _time.time() - (self._startup_time or 0)
             if (
                 self._last_brief_date_et != today_key_et
                 and now_et.hour >= self._brief_hour_et
+                and startup_elapsed >= self._startup_grace_seconds
             ):
                 self._last_brief_date_et = today_key_et
-                await self._run_daily_brief(db, today_key_et)
+                # Run in background task to avoid blocking the engine loop
+                asyncio.create_task(self._run_daily_brief_bg(today_key_et))
 
             # 3. Capability registry sync (hourly)
             if current_time - self._last_capability_sync >= self._capability_sync_interval:
@@ -493,7 +531,16 @@ class OrchestratorEngine:
 
             # 5. Check active workers
             initial_active = len(worker_manager.active_workers)
-            await worker_manager.check_workers()
+            try:
+                await asyncio.wait_for(worker_manager.check_workers(), timeout=30)
+            except asyncio.TimeoutError:
+                logger.error("[ENGINE] check_workers timed out after 30s")
+            except Exception as e:
+                logger.error("[ENGINE] check_workers failed: %s", e, exc_info=True)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
             if len(worker_manager.active_workers) != initial_active:
                 activity = True
 
@@ -502,9 +549,16 @@ class OrchestratorEngine:
                 workflow_executor = WorkflowExecutor(db, worker_manager=worker_manager)
                 active_runs = await workflow_executor.get_active_runs()
                 for wf_run in active_runs:
-                    advanced = await workflow_executor.advance(wf_run)
-                    if advanced:
-                        activity = True
+                    try:
+                        advanced = await workflow_executor.advance(wf_run)
+                        if advanced:
+                            activity = True
+                    except Exception as e:
+                        logger.error("[ENGINE] advance(%s) failed: %s", wf_run.id[:8], e, exc_info=True)
+                        try:
+                            await db.rollback()
+                        except Exception:
+                            pass
                 # Process pending workflow events
                 events_started = await workflow_executor.process_events(limit=10)
                 if events_started > 0:
@@ -515,10 +569,14 @@ class OrchestratorEngine:
                     activity = True
             except Exception as e:
                 logger.error("[ENGINE] Workflow executor error: %s", e, exc_info=True)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
             # 7. Enhanced monitoring (includes auto-unblock, failure detection, etc.)
             try:
-                monitor_result = await monitor_enhanced.run_full_check()
+                monitor_result = await asyncio.wait_for(monitor_enhanced.run_full_check(), timeout=30)
                 if monitor_result.get("issues_found", 0) > 0:
                     activity = True
                     logger.info(
@@ -527,8 +585,14 @@ class OrchestratorEngine:
                         f"unblocked={monitor_result.get('unblocked_tasks', 0)}, "
                         f"patterns={monitor_result.get('failure_patterns', 0)}"
                     )
+            except asyncio.TimeoutError:
+                logger.error("[ENGINE] monitor_enhanced timed out after 30s")
             except Exception as e:
                 logger.error(f"[ENGINE] Enhanced monitor check failed: {e}", exc_info=True)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
             # 8. Skip work assignment if paused or OpenClaw unavailable
             if self._paused:
@@ -682,6 +746,14 @@ class OrchestratorEngine:
         # Brief last-run marker (persisted date string, e.g. "2026-02-25")
         raw_brief_last = rows.get(SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET, "")
         self._last_brief_date_et = str(raw_brief_last) if raw_brief_last else ""
+
+    async def _run_daily_brief_bg(self, today_key_et: str) -> None:
+        """Background wrapper for _run_daily_brief — creates its own DB session."""
+        try:
+            async with self._session_factory() as db:
+                await self._run_daily_brief(db, today_key_et)
+        except Exception as e:
+            logger.error("[BRIEF] Background brief task failed: %s", e)
 
     async def _run_daily_brief(self, db: Any, today_key_et: str) -> None:
         """Generate and post the Daily Ops Brief to chat. Never raises."""

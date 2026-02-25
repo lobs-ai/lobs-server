@@ -83,6 +83,23 @@ class GoogleCalendarService:
             self._svc = _get_calendar_service()
         return self._svc
 
+    async def _api_async(self):
+        """Get the Calendar API service without blocking the event loop.
+
+        The Google client library uses synchronous HTTP (httplib2) to fetch
+        the API discovery document and refresh OAuth tokens. Running this in a
+        thread executor prevents it from stalling the asyncio event loop.
+        """
+        if not self._svc:
+            import asyncio
+            self._svc = await asyncio.to_thread(_get_calendar_service)
+        return self._svc
+
+    async def _run(self, fn):
+        """Run a synchronous Google API call (.execute()) in a thread executor."""
+        import asyncio
+        return await asyncio.to_thread(fn)
+
     def is_configured(self) -> bool:
         return os.path.exists(os.path.abspath(TOKEN_FILE)) or os.path.exists(os.path.abspath(CREDENTIALS_FILE))
 
@@ -97,15 +114,15 @@ class GoogleCalendarService:
     async def get_rafe_free_busy(self, start: datetime, end: datetime) -> list[dict]:
         if not RAFE_CALENDAR_ID:
             return []
-        svc = self._api()
+        svc = await self._api_async()
         if not svc:
             return []
         try:
-            result = svc.freebusy().query(body={
+            result = await self._run(svc.freebusy().query(body={
                 "timeMin": start.isoformat(), "timeMax": end.isoformat(),
                 "timeZone": "America/New_York",
                 "items": [{"id": RAFE_CALENDAR_ID}],
-            }).execute()
+            }).execute)
             return result.get("calendars", {}).get(RAFE_CALENDAR_ID, {}).get("busy", [])
         except Exception as e:
             logger.error("[GCAL] Free/busy failed: %s", e)
@@ -121,7 +138,7 @@ class GoogleCalendarService:
         description: str = "", location: str = "",
         all_day: bool = False, invite_rafe: bool = True,
     ) -> dict | None:
-        svc = self._api()
+        svc = await self._api_async()
         if not svc:
             return None
         if not end:
@@ -139,10 +156,10 @@ class GoogleCalendarService:
             body["attendees"] = [{"email": RAFE_EMAIL}]
 
         try:
-            created = svc.events().insert(
+            created = await self._run(svc.events().insert(
                 calendarId=LOBS_CALENDAR_ID, body=body,
                 sendUpdates="all" if invite_rafe and RAFE_EMAIL else "none",
-            ).execute()
+            ).execute)
             logger.info("[GCAL] Created: %s (invited_rafe=%s)", title, invite_rafe and bool(RAFE_EMAIL))
             return _norm(created)
         except Exception as e:
@@ -150,11 +167,11 @@ class GoogleCalendarService:
             return None
 
     async def update_event(self, event_id: str, **fields) -> dict | None:
-        svc = self._api()
+        svc = await self._api_async()
         if not svc:
             return None
         try:
-            ev = svc.events().get(calendarId=LOBS_CALENDAR_ID, eventId=event_id).execute()
+            ev = await self._run(svc.events().get(calendarId=LOBS_CALENDAR_ID, eventId=event_id).execute)
             if "title" in fields and fields["title"]:
                 ev["summary"] = fields["title"]
             if "description" in fields:
@@ -163,20 +180,20 @@ class GoogleCalendarService:
                 ev["start"] = {"dateTime": fields["start"].isoformat(), "timeZone": "America/New_York"}
             if "end" in fields and fields["end"]:
                 ev["end"] = {"dateTime": fields["end"].isoformat(), "timeZone": "America/New_York"}
-            updated = svc.events().update(
+            updated = await self._run(svc.events().update(
                 calendarId=LOBS_CALENDAR_ID, eventId=event_id, body=ev, sendUpdates="all"
-            ).execute()
+            ).execute)
             return _norm(updated)
         except Exception as e:
             logger.error("[GCAL] Update failed: %s", e)
             return None
 
     async def delete_event(self, event_id: str) -> bool:
-        svc = self._api()
+        svc = await self._api_async()
         if not svc:
             return False
         try:
-            svc.events().delete(calendarId=LOBS_CALENDAR_ID, eventId=event_id, sendUpdates="all").execute()
+            await self._run(svc.events().delete(calendarId=LOBS_CALENDAR_ID, eventId=event_id, sendUpdates="all").execute)
             return True
         except Exception as e:
             logger.error("[GCAL] Delete failed: %s", e)
@@ -236,16 +253,16 @@ class GoogleCalendarService:
     # ── Internal ─────────────────────────────────────────────────────
 
     async def _list_events(self, calendar_id: str, days: int, max_results: int) -> list[dict]:
-        svc = self._api()
+        svc = await self._api_async()
         if not svc:
             return []
         now = datetime.now(timezone.utc).isoformat()
         end = (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
         try:
-            result = svc.events().list(
+            result = await self._run(svc.events().list(
                 calendarId=calendar_id, timeMin=now, timeMax=end,
                 maxResults=max_results, singleEvents=True, orderBy="startTime",
-            ).execute()
+            ).execute)
             return [_norm(e) for e in result.get("items", [])]
         except Exception as e:
             logger.error("[GCAL] List events failed for %s: %s", calendar_id, e)

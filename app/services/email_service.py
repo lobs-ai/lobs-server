@@ -152,14 +152,26 @@ class EmailService:
             self._gmail = _get_gmail_service()
         return self._gmail
 
+    async def _get_gmail_async(self):
+        """Get the Gmail service without blocking the event loop."""
+        if self._gmail is None:
+            import asyncio
+            self._gmail = await asyncio.to_thread(_get_gmail_service)
+        return self._gmail
+
+    async def _run(self, fn):
+        """Run a synchronous Google API call in a thread executor."""
+        import asyncio
+        return await asyncio.to_thread(fn)
+
     async def _gmail_get_unread(self, max_results: int) -> list[dict[str, Any]]:
-        service = self._get_gmail()
+        service = await self._get_gmail_async()
         if not service:
             return []
         try:
-            results = service.users().messages().list(
+            results = await self._run(service.users().messages().list(
                 userId="me", q="is:unread", maxResults=max_results
-            ).execute()
+            ).execute)
             messages = results.get("messages", [])
             return [await self._gmail_get_message(m["id"]) for m in messages]
         except Exception as e:
@@ -167,13 +179,13 @@ class EmailService:
             return []
 
     async def _gmail_search(self, query: str, max_results: int) -> list[dict[str, Any]]:
-        service = self._get_gmail()
+        service = await self._get_gmail_async()
         if not service:
             return []
         try:
-            results = service.users().messages().list(
+            results = await self._run(service.users().messages().list(
                 userId="me", q=query, maxResults=max_results
-            ).execute()
+            ).execute)
             messages = results.get("messages", [])
             return [await self._gmail_get_message(m["id"]) for m in messages]
         except Exception as e:
@@ -181,13 +193,13 @@ class EmailService:
             return []
 
     async def _gmail_get_message(self, msg_id: str) -> dict[str, Any]:
-        service = self._get_gmail()
+        service = await self._get_gmail_async()
         if not service:
             return {}
         try:
-            msg = service.users().messages().get(
+            msg = await self._run(service.users().messages().get(
                 userId="me", id=msg_id, format="full"
-            ).execute()
+            ).execute)
             headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
             body = self._extract_gmail_body(msg.get("payload", {}))
             return {
@@ -206,7 +218,7 @@ class EmailService:
             return {"id": msg_id, "error": str(e)}
 
     async def _gmail_send(self, to, subject, body, html, cc, bcc) -> dict[str, Any] | None:
-        service = self._get_gmail()
+        service = await self._get_gmail_async()
         if not service:
             return None
         try:
@@ -223,9 +235,9 @@ class EmailService:
                 msg["bcc"] = bcc
 
             raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-            result = service.users().messages().send(
+            result = await self._run(service.users().messages().send(
                 userId="me", body={"raw": raw}
-            ).execute()
+            ).execute)
             logger.info("[EMAIL] Sent email to %s: %s", to, subject)
             return {"id": result.get("id"), "status": "sent"}
         except Exception as e:
@@ -233,13 +245,13 @@ class EmailService:
             return None
 
     async def _gmail_mark_read(self, msg_id: str) -> bool:
-        service = self._get_gmail()
+        service = await self._get_gmail_async()
         if not service:
             return False
         try:
-            service.users().messages().modify(
+            await self._run(service.users().messages().modify(
                 userId="me", id=msg_id, body={"removeLabelIds": ["UNREAD"]}
-            ).execute()
+            ).execute)
             return True
         except Exception as e:
             logger.error("[EMAIL] Gmail mark read failed: %s", e)

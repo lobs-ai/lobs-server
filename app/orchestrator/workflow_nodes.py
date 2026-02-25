@@ -478,7 +478,9 @@ async def _exec_tool_call(config, context, run, *, db, worker_manager):
         return NodeResult(status="failed", error="Empty command")
 
     try:
-        result = subprocess.run(
+        import asyncio
+        result = await asyncio.to_thread(
+            subprocess.run,
             command, shell=True, capture_output=True, text=True, timeout=timeout_seconds,
         )
         output = {

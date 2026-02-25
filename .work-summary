@@ -1,1 +1,1 @@
-Designed First-Failure Evidence Bundle system. New failure_bundles table (UNIQUE on task_id), FailureBundleBuilder service, worker hook, diagnostic prompt injection, FailureExplainer integration. 5 programmer handoffs in docs/handoffs/failure-evidence-bundle-handoffs.json. Design at docs/failure-evidence-bundle-design.md.
+Research-to-Roadmap Bridge complete. Decision memo schema + 48h gate mechanism + weekly pruning review design written to research-findings.md and docs/research-to-roadmap-bridge.md. Ready for architect/programmer handoff.

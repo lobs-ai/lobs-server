@@ -21,6 +21,14 @@ class GitHubSyncService:
     def __init__(self, db: AsyncSession):
         self.db = db
 
+    @staticmethod
+    async def _run_gh(cmd: list[str], timeout: int = 45) -> subprocess.CompletedProcess:
+        """Run a subprocess command in a thread to avoid blocking the event loop."""
+        import asyncio
+        return await asyncio.to_thread(
+            subprocess.run, cmd, capture_output=True, text=True, timeout=timeout
+        )
+
     async def sync_project(self, project: ProjectModel, *, push: bool = False) -> dict[str, Any]:
         if project.tracking != "github" or not project.github_repo:
             raise HTTPException(status_code=400, detail="Project is not configured for GitHub tracking")
@@ -33,7 +41,7 @@ class GitHubSyncService:
                 "--limit", "200",
                 "--json", "number,title,state,updatedAt,labels,assignees,url",
             ]
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            proc = await self._run_gh(cmd, timeout=45)
             if proc.returncode != 0:
                 raise HTTPException(status_code=500, detail=f"GitHub CLI error: {proc.stderr}")
 
@@ -41,7 +49,7 @@ class GitHubSyncService:
             label_filter = self._normalize_label_filter(project.github_label_filter)
 
             imported, updated, conflicts, pushed = 0, 0, 0, 0
-            me_login = self._gh_login()
+            me_login = await self._gh_login()
 
             existing_tasks_q = await self.db.execute(
                 select(TaskModel).where(
@@ -143,7 +151,7 @@ class GitHubSyncService:
             "--title", title,
             "--body", body_text,
         ]
-        proc = subprocess.run(create_cmd, capture_output=True, text=True, timeout=45)
+        proc = await self._run_gh(create_cmd, timeout=45)
         if proc.returncode != 0:
             raise HTTPException(status_code=500, detail=f"GitHub issue create failed: {proc.stderr.strip()}")
 
@@ -153,7 +161,7 @@ class GitHubSyncService:
             "--repo", project.github_repo,
             "--json", "number,state,url,updatedAt",
         ]
-        view_proc = subprocess.run(view_cmd, capture_output=True, text=True, timeout=30)
+        view_proc = await self._run_gh(view_cmd, timeout=30)
         if view_proc.returncode != 0:
             raise HTTPException(status_code=500, detail=f"GitHub issue view failed: {view_proc.stderr.strip()}")
 
@@ -182,11 +190,11 @@ class GitHubSyncService:
             ]
             state_cmd = ["gh", "issue", new_state, str(task.github_issue_number), "--repo", project.github_repo]
 
-            edit_proc = subprocess.run(edit_cmd, capture_output=True, text=True, timeout=30)
+            edit_proc = await self._run_gh(edit_cmd, timeout=30)
             if edit_proc.returncode != 0:
                 continue
 
-            subprocess.run(state_cmd, capture_output=True, text=True, timeout=30)
+            await self._run_gh(state_cmd, timeout=30)
             task.sync_state = "synced"
             task.external_updated_at = datetime.now(timezone.utc)
             pushed += 1
@@ -198,8 +206,8 @@ class GitHubSyncService:
         if not project.github_repo or not task.github_issue_number:
             return False, "missing_repo_or_issue"
 
-        issue = self._fetch_issue(project.github_repo, task.github_issue_number)
-        me_login = self._gh_login()
+        issue = await self._fetch_issue(project.github_repo, task.github_issue_number)
+        me_login = await self._gh_login()
         meta = self._issue_meta(issue, me_login=me_login)
 
         if not meta["eligible_for_claim"] and not meta["claimed_by_lobs"]:
@@ -214,7 +222,7 @@ class GitHubSyncService:
             "--add-label", "lobs:claimed",
             "--add-assignee", me_login,
         ]
-        proc = subprocess.run(edit_cmd, capture_output=True, text=True, timeout=30)
+        proc = await self._run_gh(edit_cmd, timeout=30)
         if proc.returncode != 0:
             return False, f"claim_failed:{proc.stderr.strip()}"
 
@@ -238,20 +246,20 @@ class GitHubSyncService:
         names = {str((l or {}).get("name", "")).strip().lower() for l in labels}
         return bool(names & label_filter)
 
-    def _fetch_issue(self, repo: str, issue_number: int) -> dict[str, Any]:
+    async def _fetch_issue(self, repo: str, issue_number: int) -> dict[str, Any]:
         cmd = [
             "gh", "issue", "view", str(issue_number),
             "--repo", repo,
             "--json", "number,title,state,updatedAt,labels,assignees,url",
         ]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = await self._run_gh(cmd, timeout=30)
         if proc.returncode != 0:
             raise HTTPException(status_code=500, detail=f"GitHub issue view failed: {proc.stderr.strip()}")
         return json.loads(proc.stdout)
 
-    def _gh_login(self) -> str:
+    async def _gh_login(self) -> str:
         cmd = ["gh", "api", "user", "--jq", ".login"]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        proc = await self._run_gh(cmd, timeout=20)
         if proc.returncode != 0:
             raise HTTPException(status_code=500, detail=f"GitHub auth not ready: {proc.stderr.strip()}")
         login = (proc.stdout or "").strip()

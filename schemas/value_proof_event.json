@@ -1,0 +1,252 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://lobs-server/schemas/value_proof_event.json",
+  "title": "ValueProofEvent",
+  "description": "A daily (or per-period) summary of value delivered by PAW agents. Powers the 'What did my agents save me today?' dashboard card.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "period_start",
+    "period_end",
+    "minutes_saved",
+    "tasks_completed",
+    "decisions_required",
+    "risk_prevented"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Unique identifier for this value proof event."
+    },
+    "period_start": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 start of the period this event summarizes (inclusive)."
+    },
+    "period_end": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 end of the period this event summarizes (inclusive)."
+    },
+
+    "minutes_saved": {
+      "type": "object",
+      "description": "Estimated time saved by agent automation during this period.",
+      "required": ["total", "breakdown"],
+      "properties": {
+        "total": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total minutes saved across all agent actions."
+        },
+        "breakdown": {
+          "type": "array",
+          "description": "Per-category savings breakdown for drill-down display.",
+          "items": {
+            "type": "object",
+            "required": ["category", "minutes"],
+            "properties": {
+              "category": {
+                "type": "string",
+                "enum": [
+                  "writing",
+                  "research",
+                  "code_review",
+                  "scheduling",
+                  "triage",
+                  "communication",
+                  "planning",
+                  "other"
+                ],
+                "description": "Agent work category."
+              },
+              "minutes": {
+                "type": "number",
+                "minimum": 0
+              }
+            }
+          }
+        },
+        "estimation_method": {
+          "type": "string",
+          "enum": ["task_baseline", "model_estimate", "manual"],
+          "description": "How time savings were calculated. 'task_baseline' uses per-task-type averages; 'model_estimate' uses LLM-derived estimates; 'manual' is user-entered.",
+          "default": "task_baseline"
+        }
+      }
+    },
+
+    "tasks_completed": {
+      "type": "object",
+      "description": "Tasks fully completed by agents during this period (no further human action needed).",
+      "required": ["count"],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of tasks completed."
+        },
+        "task_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional list of task UUIDs for deep-linking to task details."
+        },
+        "by_agent": {
+          "type": "object",
+          "additionalProperties": { "type": "integer" },
+          "description": "Map of agent name → completed task count (e.g. {\"writer\": 3, \"programmer\": 2})."
+        }
+      }
+    },
+
+    "decisions_required": {
+      "type": "object",
+      "description": "Decisions that required (or still require) human input during this period.",
+      "required": ["count"],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of human decisions requested."
+        },
+        "pending": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decisions still awaiting response. Contributes to the 'action needed' badge.",
+          "default": 0
+        },
+        "resolved": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Decisions already resolved (approved, rejected, or dismissed).",
+          "default": 0
+        },
+        "inbox_item_ids": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Optional list of inbox item IDs backing the decisions."
+        }
+      }
+    },
+
+    "risk_prevented": {
+      "type": "object",
+      "description": "Risks that were flagged and prevented (or mitigated) by agent oversight during this period.",
+      "required": ["count"],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Number of distinct risk events prevented."
+        },
+        "examples": {
+          "type": "array",
+          "maxItems": 5,
+          "description": "Up to 5 short human-readable descriptions for dashboard tooltips.",
+          "items": {
+            "type": "object",
+            "required": ["label"],
+            "properties": {
+              "label": {
+                "type": "string",
+                "maxLength": 120,
+                "description": "Short description shown in tooltip or list (e.g. 'Budget cap prevented $40 model overspend')."
+              },
+              "risk_type": {
+                "type": "string",
+                "enum": [
+                  "budget_overrun",
+                  "task_failure_cascade",
+                  "missed_deadline",
+                  "data_loss",
+                  "security",
+                  "quality",
+                  "other"
+                ]
+              },
+              "severity": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "default": "medium"
+              }
+            }
+          }
+        }
+      }
+    },
+
+    "headline": {
+      "type": "string",
+      "maxLength": 160,
+      "description": "Optional pre-rendered headline copy for the dashboard card (e.g. 'Your agents saved you 2h 15m today'). If omitted, the UI renders from metrics."
+    },
+
+    "generated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when this event record was generated."
+    },
+
+    "source_events": {
+      "type": "array",
+      "description": "Raw telemetry event IDs that contributed to this summary (for auditability).",
+      "items": {
+        "type": "object",
+        "required": ["event_type", "event_id"],
+        "properties": {
+          "event_type": {
+            "type": "string",
+            "description": "e.g. 'task.completed', 'worker_run.finished', 'inbox_item.resolved'"
+          },
+          "event_id": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+
+  "examples": [
+    {
+      "event_id": "c3e2a1b0-0000-4000-8000-000000000001",
+      "period_start": "2026-02-25T00:00:00-05:00",
+      "period_end": "2026-02-25T23:59:59-05:00",
+      "minutes_saved": {
+        "total": 135,
+        "breakdown": [
+          { "category": "writing", "minutes": 60 },
+          { "category": "research", "minutes": 45 },
+          { "category": "triage", "minutes": 30 }
+        ],
+        "estimation_method": "task_baseline"
+      },
+      "tasks_completed": {
+        "count": 7,
+        "by_agent": { "writer": 3, "programmer": 2, "researcher": 2 }
+      },
+      "decisions_required": {
+        "count": 3,
+        "pending": 1,
+        "resolved": 2
+      },
+      "risk_prevented": {
+        "count": 2,
+        "examples": [
+          {
+            "label": "Budget cap prevented $38 model overspend",
+            "risk_type": "budget_overrun",
+            "severity": "medium"
+          },
+          {
+            "label": "Failure cascade guardrail stopped 4 dependent tasks from spawning after worker timeout",
+            "risk_type": "task_failure_cascade",
+            "severity": "high"
+          }
+        ]
+      },
+      "headline": "Your agents saved you 2h 15m today",
+      "generated_at": "2026-02-26T00:05:00-05:00"
+    }
+  ]
+}

@@ -140,8 +140,11 @@ class AgentTracker:
             logger.debug(f"[AGENT_TRACKER] {agent_type} -> idle")
 
         except Exception as e:
-            logger.error(f"Failed to mark idle: {e}", exc_info=True)
-            await self.db.rollback()
+            logger.error(f"Failed to mark idle: {e}")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass  # Session may already be in an unrecoverable state
 
     async def get_status(self, agent_type: str) -> Optional[dict[str, Any]]:
         """Get status for a specific agent type."""

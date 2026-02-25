@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models import Task as TaskModel, Project as ProjectModel, ControlLoopEvent
+from app.models import AgentInitiative as AgentInitiativeModel, ResearchMemo as ResearchMemoModel, Task as TaskModel, Project as ProjectModel, ControlLoopEvent
 from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate, TaskStatusCounts
 from app.config import settings
 from app.services.github_sync import GitHubSyncService

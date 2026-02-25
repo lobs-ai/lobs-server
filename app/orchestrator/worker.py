@@ -1794,6 +1794,103 @@ class WorkerManager:
 
         return {"raw": candidate}
 
+    @staticmethod
+    def _git_commit_and_push_sync(
+        *,
+        repo_path: Path,
+        project_id: str,
+        task_id: str,
+        agent_type: str,
+        task_title: str = "",
+    ) -> tuple[Optional[str], Optional[list[str]]]:
+        """Synchronous git commit+push. Designed to run in asyncio.to_thread."""
+        commit_sha = None
+        files_modified = None
+
+        def run_git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
+            return subprocess.run(
+                ["git", "-C", str(repo_path), *args],
+                capture_output=True,
+                text=True,
+                check=check,
+            )
+
+        inside = run_git("rev-parse", "--is-inside-work-tree")
+        if inside.returncode != 0 or inside.stdout.strip() != "true":
+            return None, None
+
+        dirty = run_git("status", "--porcelain")
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            changed_lines = [
+                line[3:].strip() for line in dirty.stdout.strip().split("\n")
+                if line.strip()
+            ]
+            files_modified = changed_lines
+            run_git("add", "-A")
+
+            short_title = (task_title or task_id[:8])[:72]
+            commit_msg = (
+                f"agent({agent_type}): {short_title}\n\n"
+                f"Task: {task_id}\n"
+                f"Agent: {agent_type}\n"
+                f"Auto-committed by orchestrator after task completion."
+            )
+
+            commit_result = run_git(
+                "commit", "-m", commit_msg,
+                "--author", f"lobs-{agent_type} <thelobsbot@gmail.com>",
+            )
+            if commit_result.returncode != 0:
+                logger.warning(
+                    "[WORKER] Auto-commit failed for project %s: %s",
+                    project_id, commit_result.stderr.strip(),
+                )
+                return None, files_modified
+            else:
+                logger.info(
+                    "[WORKER] Auto-committed %d changed files for task %s",
+                    len(files_modified), task_id[:8],
+                )
+
+        sha_result = run_git("rev-parse", "HEAD")
+        if sha_result.returncode == 0:
+            commit_sha = sha_result.stdout.strip()
+
+        upstream = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+        if upstream.returncode != 0:
+            return commit_sha, files_modified
+
+        run_git("fetch", "--prune", "origin")
+
+        counts = run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
+        if counts.returncode != 0:
+            return commit_sha, files_modified
+
+        behind_str, ahead_str = (counts.stdout.strip().split() + ["0", "0"])[:2]
+        behind = int(behind_str)
+        ahead = int(ahead_str)
+
+        if ahead <= 0 and behind <= 0:
+            return commit_sha, files_modified
+
+        if behind > 0:
+            pull = run_git("pull", "--rebase")
+            if pull.returncode != 0:
+                raise RuntimeError(pull.stderr.strip() or pull.stdout.strip() or "git pull --rebase failed")
+
+        push = run_git("push")
+        if push.returncode != 0:
+            raise RuntimeError(push.stderr.strip() or push.stdout.strip() or "git push failed")
+
+        logger.info(
+            "[WORKER] Auto-pushed repo after completion (project=%s task=%s ahead=%s)",
+            project_id,
+            task_id[:8],
+            ahead,
+        )
+
+        return commit_sha, files_modified
+
     async def _push_project_repo_if_needed(
         self,
         *,
@@ -1825,95 +1922,15 @@ class WorkerManager:
             if not repo_path.exists():
                 return None, None
 
-            def run_git(*args: str, check: bool = False) -> subprocess.CompletedProcess:
-                return subprocess.run(
-                    ["git", "-C", str(repo_path), *args],
-                    capture_output=True,
-                    text=True,
-                    check=check,
-                )
-
-            inside = run_git("rev-parse", "--is-inside-work-tree")
-            if inside.returncode != 0 or inside.stdout.strip() != "true":
-                return None, None
-
-            # Check for uncommitted changes and auto-commit them.
-            dirty = run_git("status", "--porcelain")
-            if dirty.returncode == 0 and dirty.stdout.strip():
-                # Collect list of changed files
-                changed_lines = [
-                    line[3:].strip() for line in dirty.stdout.strip().split("\n")
-                    if line.strip()
-                ]
-                files_modified = changed_lines
-
-                # Stage all changes
-                run_git("add", "-A")
-
-                # Build commit message
-                short_title = (task_title or task_id[:8])[:72]
-                commit_msg = (
-                    f"agent({agent_type}): {short_title}\n\n"
-                    f"Task: {task_id}\n"
-                    f"Agent: {agent_type}\n"
-                    f"Auto-committed by orchestrator after task completion."
-                )
-
-                commit_result = run_git(
-                    "commit", "-m", commit_msg,
-                    "--author", f"lobs-{agent_type} <thelobsbot@gmail.com>",
-                )
-                if commit_result.returncode != 0:
-                    logger.warning(
-                        "[WORKER] Auto-commit failed for project %s: %s",
-                        project_id, commit_result.stderr.strip(),
-                    )
-                    return None, files_modified
-                else:
-                    logger.info(
-                        "[WORKER] Auto-committed %d changed files for task %s",
-                        len(files_modified), task_id[:8],
-                    )
-
-            # Get current commit SHA (whether we just committed or it was already committed)
-            sha_result = run_git("rev-parse", "HEAD")
-            if sha_result.returncode == 0:
-                commit_sha = sha_result.stdout.strip()
-
-            # If no files were modified and no commits ahead, nothing to push
-            # Ensure upstream exists; if not, skip push.
-            upstream = run_git("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
-            if upstream.returncode != 0:
-                return commit_sha, files_modified
-
-            run_git("fetch", "--prune", "origin")
-
-            counts = run_git("rev-list", "--left-right", "--count", "@{u}...HEAD")
-            if counts.returncode != 0:
-                return commit_sha, files_modified
-
-            behind_str, ahead_str = (counts.stdout.strip().split() + ["0", "0"])[:2]
-            behind = int(behind_str)
-            ahead = int(ahead_str)
-
-            if ahead <= 0 and behind <= 0:
-                return commit_sha, files_modified
-
-            # If we're behind, try to rebase first.
-            if behind > 0:
-                pull = run_git("pull", "--rebase")
-                if pull.returncode != 0:
-                    raise RuntimeError(pull.stderr.strip() or pull.stdout.strip() or "git pull --rebase failed")
-
-            push = run_git("push")
-            if push.returncode != 0:
-                raise RuntimeError(push.stderr.strip() or push.stdout.strip() or "git push failed")
-
-            logger.info(
-                "[WORKER] Auto-pushed repo after completion (project=%s task=%s ahead=%s)",
-                project_id,
-                task_id[:8],
-                ahead,
+            # Run all git operations in a thread to avoid blocking the event loop
+            import asyncio
+            commit_sha, files_modified = await asyncio.to_thread(
+                self._git_commit_and_push_sync,
+                repo_path=repo_path,
+                project_id=project_id,
+                task_id=task_id,
+                agent_type=agent_type,
+                task_title=task_title,
             )
 
             return commit_sha, files_modified

@@ -1190,3 +1190,82 @@ class WebhookDelivery(WebhookDeliveryBase):
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
+
+
+# ============================================================================
+# AgentInitiative schemas
+# ============================================================================
+
+class AgentInitiative(BaseModel):
+    """Pydantic representation of an agent initiative."""
+    id: str
+    proposed_by_agent: str
+    source_reflection_id: Optional[str] = None
+    owner_agent: Optional[str] = None
+    title: str
+    description: Optional[str] = None
+    category: str
+    risk_tier: str
+    policy_lane: str
+    policy_reason: Optional[str] = None
+    status: str
+    score: Optional[float] = None
+    rationale: Optional[str] = None
+    approved_by: Optional[str] = None
+    selected_agent: Optional[str] = None
+    selected_project_id: Optional[str] = None
+    task_id: Optional[str] = None
+    decision_summary: Optional[str] = None
+    learning_feedback: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ============================================================================
+# ResearchMemo schemas
+# ============================================================================
+
+class ResearchMemoCreate(BaseModel):
+    """Payload to create a build/no-build decision memo for a research initiative."""
+    problem: str
+    user_segment: str
+    spec_touchpoints: list[str] = Field(default_factory=list)
+    mvp_scope: str
+    owner: str
+    decision: str  # "build" or "no_build"
+    rationale: str
+    task_id: Optional[str] = None
+
+
+class ResearchMemoUpdate(BaseModel):
+    """Partial update payload for a research memo."""
+    problem: Optional[str] = None
+    user_segment: Optional[str] = None
+    spec_touchpoints: Optional[list[str]] = None
+    mvp_scope: Optional[str] = None
+    owner: Optional[str] = None
+    decision: Optional[str] = None
+    rationale: Optional[str] = None
+    task_id: Optional[str] = None
+    stale_flagged: Optional[bool] = None
+
+
+class ResearchMemo(BaseModel):
+    """Pydantic representation of a research memo."""
+    id: str
+    initiative_id: str
+    task_id: Optional[str] = None
+    problem: str
+    user_segment: str
+    spec_touchpoints: list[str]
+    mvp_scope: str
+    owner: str
+    decision: str
+    rationale: str
+    stale_flagged: bool
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

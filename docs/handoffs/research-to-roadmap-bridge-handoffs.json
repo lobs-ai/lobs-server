@@ -1,0 +1,23 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "research-to-roadmap-bridge",
+    "title": "Phase 1: Decision Memo schema + gate (Task.source_initiative_id + Task.decision_memo + PATCH gate)",
+    "context": "Research complete. See docs/research-to-roadmap-bridge.md for full spec and research-findings.md for summary. The gate must enforce: researcher tasks with source_initiative_id cannot close without a decision_memo after 48h. Schema changes: add Task.source_initiative_id (FK → agent_initiatives.id, nullable, indexed) and Task.decision_memo (JSON, nullable). API change: PATCH /api/tasks/{id} validates memo presence on initiative-linked researcher task completion. Also update initiative_decisions.py to set source_initiative_id at spawn time.",
+    "acceptance": "1. Alembic migration adds Task.source_initiative_id and Task.decision_memo columns. 2. DecisionMemoPayload Pydantic model in app/schemas.py. 3. PATCH /api/tasks/{id} returns 422 (no memo, >48h) or 200+warnings (<48h) for initiative-linked researcher tasks without memo. 4. initiative_decisions.py sets Task.source_initiative_id when spawning tasks from AgentInitiative. 5. Tests cover gate logic (memo present / missing / grace period).",
+    "files": [
+      "docs/research-to-roadmap-bridge.md",
+      "research-findings.md"
+    ]
+  },
+  {
+    "to": "programmer",
+    "initiative": "research-to-roadmap-bridge",
+    "title": "Phase 2: Weekly initiative pruning service",
+    "context": "After Phase 1 ships. See docs/research-to-roadmap-bridge.md Section 5 for full pruning spec. Three sweep queries (orphan initiatives, memo-missing completions, stale proposals). Weekly Monday 8am ET timer using same orchestrator engine pattern as _brief_hour_et. Output: inbox item of type suggestion with pruning report. Auto-reject proposals > 60 days old.",
+    "acceptance": "1. InitiativePruningService (or BriefService method) implements three sweep queries. 2. Orchestrator engine runs pruning weekly on Monday 8am ET. 3. Creates inbox item with grouped report. 4. Auto-rejection of proposals > 60 days with reason 'Pruned: no activity for 60 days'.",
+    "files": [
+      "docs/research-to-roadmap-bridge.md"
+    ]
+  }
+]

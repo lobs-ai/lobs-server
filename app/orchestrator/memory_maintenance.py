@@ -459,7 +459,8 @@ async def run_memory_maintenance(routine=None) -> dict[str, Any]:
         results["memory_sync"] = {"error": str(e)}
 
     # Auto-commit shared memory repo
-    commit_report = auto_commit_shared_memory()
+    import asyncio
+    commit_report = await asyncio.to_thread(auto_commit_shared_memory)
     results["shared_memory_commit"] = commit_report
 
     results["summary"] = {

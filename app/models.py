@@ -963,3 +963,44 @@ class WorkflowSubscription(Base):
     filter_conditions = Column(JSON)           # additional payload filters
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=func.now(), nullable=False)
+
+
+class ResearchMemo(Base):
+    """Build/no-build decision memo required at the close of every research initiative.
+
+    Schema captures:
+    - problem: What problem this research addressed
+    - user_segment: Who benefits (engineer/Lobs/Rafe/external)
+    - spec_touchpoints: Which spec areas / implementation surfaces are touched
+    - mvp_scope: Smallest viable implementation
+    - owner: Who owns implementation if built
+    - decision: "build" or "no_build"
+    - rationale: Why this decision was made
+    - stale_flagged: True when weekly pruning marks this initiative as stale
+    """
+
+    __tablename__ = "research_memos"
+    __table_args__ = (
+        UniqueConstraint("initiative_id", name="uq_research_memo_initiative"),
+    )
+
+    id = Column(String, primary_key=True)
+    initiative_id = Column(String, ForeignKey("agent_initiatives.id"), nullable=False, index=True)
+    task_id = Column(String, ForeignKey("tasks.id"), index=True)
+
+    # Core memo fields
+    problem = Column(Text, nullable=False)
+    user_segment = Column(String, nullable=False)
+    spec_touchpoints = Column(JSON, nullable=False, default=list)  # list[str]
+    mvp_scope = Column(Text, nullable=False)
+    owner = Column(String, nullable=False)
+
+    # Decision
+    decision = Column(String, nullable=False)  # "build" or "no_build"
+    rationale = Column(Text, nullable=False)
+
+    # Pruning
+    stale_flagged = Column(Boolean, default=False, nullable=False, index=True)
+
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
