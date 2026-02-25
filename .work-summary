@@ -1,1 +1,1 @@
-Value Proof Dashboard spec (docs/product/value-proof-dashboard.md) and JSON schema (schemas/value_proof_event.json) already shipped on prior run — verified complete.
+Wrote schemas/value_proof_event.json (data contract) and docs/product/value-proof-dashboard.md (copy + rendering spec + programmer handoff) for the PAW One-Minute Value Proof dashboard. Updated ARCHITECTURE.md.
