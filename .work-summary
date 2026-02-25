@@ -1,1 +1,1 @@
-Verified schemas/value_proof_event.json + docs/product/value-proof-dashboard.md — both complete and intact
+Shipped PAW value proof dashboard: schemas/value_proof_event.json (JSON Schema data contract) + docs/product/value-proof-dashboard.md (copy blocks, metric definitions, rendering spec, programmer handoff)
