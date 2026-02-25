@@ -1,1 +1,1 @@
-Verified existing work: schemas/value_proof_event.json (JSON Schema draft-07, all 4 required fields + 1 full example) and docs/product/value-proof-dashboard.md (237 lines: copy blocks, metric definitions, detail drawer spec, API contract, programmer handoff notes).
+Value Proof Dashboard spec (docs/product/value-proof-dashboard.md) and JSON schema (schemas/value_proof_event.json) already shipped on prior run — verified complete.
