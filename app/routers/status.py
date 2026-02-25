@@ -30,6 +30,7 @@ from app.schemas import (
     CostPeriod,
     AgentCostBreakdown,
 )
+from app.services.task_status import get_task_status_counts
 
 router = APIRouter(prefix="/status", tags=["status"])
 
@@ -96,43 +97,22 @@ async def get_overview(
             "last_active": agent.last_active_at.isoformat() if agent.last_active_at else None
         })
     
-    # Tasks health
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    
-    active_result = await db.execute(
-        select(func.count()).select_from(Task).where(Task.status == "active")
-    )
-    active_tasks = active_result.scalar() or 0
-    
-    waiting_result = await db.execute(
-        select(func.count()).select_from(Task).where(Task.status == "waiting_on")
-    )
-    waiting_tasks = waiting_result.scalar() or 0
-    
-    blocked_result = await db.execute(
-        select(func.count()).select_from(Task).where(
-            and_(Task.blocked_by.isnot(None), Task.status != "completed")
-        )
-    )
-    blocked_tasks = blocked_result.scalar() or 0
-    
-    completed_today_result = await db.execute(
-        select(func.count()).select_from(Task).where(
-            and_(
-                Task.status == "completed",
-                Task.finished_at >= today_start
-            )
-        )
-    )
-    completed_today = completed_today_result.scalar() or 0
-    
+    # Tasks health — use canonical aggregation service to guarantee parity
+    # with /api/tasks/counts and any other endpoint that surfaces task counts.
+    task_counts = await get_task_status_counts(db)
     tasks = TasksHealth(
-        active=active_tasks,
-        waiting=waiting_tasks,
-        blocked=blocked_tasks,
-        completed_today=completed_today
+        active=task_counts.active,
+        waiting=task_counts.waiting,
+        blocked=task_counts.blocked,
+        completed_today=task_counts.completed_today,
+        inbox=task_counts.inbox,
+        cancelled=task_counts.cancelled,
+        rejected=task_counts.rejected,
+        archived=task_counts.archived,
+        total_open=task_counts.total_open,
+        total_terminal=task_counts.total_terminal,
     )
+    now = datetime.now(timezone.utc)  # still needed below for memories timestamp
     
     # Memories health
     total_memories_result = await db.execute(

@@ -379,16 +379,23 @@ class BriefService:
 
         # Run concurrently with timeout
         async def _with_timeout(coro, name: str) -> BriefSection:
+            icon_map = {"calendar": "📅", "email": "📨", "github": "🚧", "tasks": "🤖"}
             try:
                 return await asyncio.wait_for(coro, timeout=self.ADAPTER_TIMEOUT)
             except asyncio.TimeoutError:
                 logger.warning("[BRIEF] Adapter %s timed out after %.0fs", name, self.ADAPTER_TIMEOUT)
-                # Return a degraded section for the adapter that timed out
-                icon_map = {"calendar": "📅", "email": "📨", "github": "🚧", "tasks": "🤖"}
                 return BriefSection(
                     name=name.title(),
                     icon=icon_map.get(name, "❓"),
                     error=f"Timed out after {self.ADAPTER_TIMEOUT:.0f}s",
+                    available=False,
+                )
+            except Exception as exc:
+                logger.warning("[BRIEF] Adapter %s failed: %s", name, exc)
+                return BriefSection(
+                    name=name.title(),
+                    icon=icon_map.get(name, "❓"),
+                    error=str(exc),
                     available=False,
                 )
 

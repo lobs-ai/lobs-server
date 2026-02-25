@@ -748,12 +748,49 @@ class WorkersHealth(BaseModel):
     total_failed: int
 
 
+class TaskStatusCounts(BaseModel):
+    """Canonical task status counts — single source of truth for all surfaces.
+
+    Every API endpoint that exposes task counts (overview, brief, detail)
+    MUST return values derived from
+    ``app.services.task_status.get_task_status_counts``.  This schema is the
+    shared contract tested by ``tests/test_task_status_contract.py``.
+    """
+
+    # Open / in-flight
+    inbox: int
+    active: int
+    waiting: int          # status="waiting_on"
+
+    # Terminal
+    completed: int
+    cancelled: int
+    rejected: int
+    archived: int
+
+    # Cross-cutting / derived
+    blocked: int          # blocked_by set AND not terminal
+    completed_today: int  # completed with finished_at >= today 00:00 UTC
+    total_open: int       # inbox + active + waiting
+    total_terminal: int   # completed + cancelled + rejected + archived
+
+
 class TasksHealth(BaseModel):
-    """Tasks health status."""
+    """Tasks health status — mirrors :class:`TaskStatusCounts` for the overview endpoint."""
+
+    # Keep original fields for backwards-compatibility with Mission Control clients
     active: int
     waiting: int
     blocked: int
     completed_today: int
+
+    # Extended fields (new — clients should handle absence gracefully)
+    inbox: int = 0
+    cancelled: int = 0
+    rejected: int = 0
+    archived: int = 0
+    total_open: int = 0
+    total_terminal: int = 0
 
 
 class MemoriesHealth(BaseModel):
