@@ -144,6 +144,7 @@ async def discover_ollama_models() -> dict[str, list[str]]:
     return result
 
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
+from app.orchestrator.budget_guard import BudgetGuard
 from app.orchestrator.model_router import (
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
     MODEL_ROUTER_TIER_MICRO_KEY,
@@ -212,6 +213,21 @@ class ModelChooser:
         candidates = list(decision.models)
         candidates = self._apply_routing_policy(candidates=candidates, task=task, policy=cfg["routing_policy"])
         candidates = await self._apply_budget_guards(candidates=candidates, budgets=cfg["budgets"])
+
+        # --- Lane-based daily spend cap (budget guardrail) ---
+        tier_map: dict[str, list[str]] = {
+            tier: list(models or [])
+            for tier, models in (decision.audit.get("tier_models") or {}).items()
+        }
+        lane_guard_decision = await self._apply_lane_budget_guard(
+            candidates=candidates,
+            task=task,
+            agent_type=agent_type,
+            criticality=str(decision.criticality),
+            tier_map=tier_map,
+        )
+        candidates = lane_guard_decision["effective_candidates"]
+
         candidates = await self._rank_by_health_and_cost(
             candidates=candidates,
             routing_policy=cfg["routing_policy"],
@@ -241,6 +257,7 @@ class ModelChooser:
                 "degrade_on_quota": cfg["degrade_on_quota"],
                 "routing_policy_present": bool(cfg["routing_policy"]),
                 "budgets_present": bool(cfg["budgets"]),
+                "lane_guard": lane_guard_decision,
             },
         )
 
@@ -455,6 +472,50 @@ class ModelChooser:
         if allowed:
             return allowed
         return blocked or candidates
+
+    async def _apply_lane_budget_guard(
+        self,
+        *,
+        candidates: list[str],
+        task: dict[str, Any],
+        agent_type: str,
+        criticality: str,
+        tier_map: dict[str, list[str]],
+    ) -> dict[str, Any]:
+        """Apply daily lane-based spend cap via BudgetGuard.
+
+        Returns a dict with ``effective_candidates`` and audit metadata.
+        Never raises — failures fall back to original candidates.
+        """
+        try:
+            guard = BudgetGuard(self.db)
+            decision = await guard.apply(
+                task=task,
+                agent_type=agent_type,
+                criticality=criticality,
+                candidates=candidates,
+                tier_map=tier_map,
+            )
+            return {
+                "effective_candidates": decision.effective_candidates,
+                "lane": decision.lane,
+                "over_budget": decision.over_budget,
+                "downgraded": decision.downgraded,
+                "reason": decision.reason,
+                "cap_usd": decision.cap_usd,
+                "spent_usd": decision.spent_usd,
+            }
+        except Exception as exc:
+            logger.warning("[MODEL_CHOOSER] BudgetGuard failed (non-fatal): %s", exc)
+            return {
+                "effective_candidates": candidates,
+                "lane": "unknown",
+                "over_budget": False,
+                "downgraded": False,
+                "reason": f"guard_error: {exc}",
+                "cap_usd": None,
+                "spent_usd": 0.0,
+            }
 
     async def _latest_unit_price(
         self,

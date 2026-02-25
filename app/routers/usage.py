@@ -11,6 +11,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import ModelPricing as ModelPricingModel, ModelUsageEvent as ModelUsageEventModel, OrchestratorSetting
+from app.orchestrator.budget_guard import (
+    BudgetGuard,
+    BUDGET_GUARD_LANE_POLICY_KEY,
+    DEFAULT_LANE_POLICY,
+    ALL_LANES,
+    _effective_lane_policy,
+)
+from app.orchestrator.budget_guardrails import build_daily_report
 from app.schemas import (
     BudgetLimits,
     ModelPricing,
@@ -533,3 +541,114 @@ async def get_usage_dashboard(
         "by_model": by_model,
         "daily_series": daily_series,
     }
+
+
+# ---------------------------------------------------------------------------
+# Budget lane policy endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/budget-lanes")
+async def get_budget_lane_policy(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """Return the current per-lane daily spend cap policy.
+
+    Lanes: critical (no cap by default), standard ($8/day), background ($3/day).
+    """
+    row = await db.get(OrchestratorSetting, BUDGET_GUARD_LANE_POLICY_KEY)
+    raw = row.value if (row and isinstance(row.value, dict)) else None
+    policy = _effective_lane_policy(raw)
+
+    # Enrich with today's spend per lane for context
+    guard = BudgetGuard(db)
+    lane_spend = await guard.today_spend_all_lanes()
+
+    return {
+        "policy": policy,
+        "today_spend": {
+            lane: {
+                "spent_usd": round(lane_spend.get(lane, 0.0), 4),
+                "cap_usd": policy[lane].get("daily_cap_usd"),
+                "over_budget": (
+                    policy[lane].get("daily_cap_usd") is not None
+                    and lane_spend.get(lane, 0.0) >= (policy[lane].get("daily_cap_usd") or 0.0)
+                ),
+            }
+            for lane in ALL_LANES
+        },
+        "override_log_today": await guard.today_override_log(),
+    }
+
+
+@router.patch("/budget-lanes")
+async def patch_budget_lane_policy(
+    payload: dict[str, Any],
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Update per-lane daily spend caps.
+
+    Accepts a partial policy dict. Each lane entry may include:
+    - ``daily_cap_usd``: float or null (null = uncapped)
+    - ``downgrade_tier``: tier name or null (null = no downgrade)
+
+    Example::
+
+        {
+          "standard": {"daily_cap_usd": 10.0, "downgrade_tier": "medium"},
+          "background": {"daily_cap_usd": 5.0, "downgrade_tier": "small"}
+        }
+    """
+    # Validate lanes
+    for lane in payload:
+        if lane not in ALL_LANES:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=422, detail=f"Unknown lane: {lane!r}. Valid lanes: {ALL_LANES}")
+
+    row = await db.get(OrchestratorSetting, BUDGET_GUARD_LANE_POLICY_KEY)
+    current_raw = row.value if (row and isinstance(row.value, dict)) else {}
+
+    # Merge incoming payload into current stored policy
+    merged: dict[str, Any] = dict(current_raw)
+    for lane, lane_cfg in payload.items():
+        if not isinstance(lane_cfg, dict):
+            continue
+        existing = dict(merged.get(lane, {}))
+        if "daily_cap_usd" in lane_cfg:
+            existing["daily_cap_usd"] = lane_cfg["daily_cap_usd"]
+        if "downgrade_tier" in lane_cfg:
+            existing["downgrade_tier"] = lane_cfg["downgrade_tier"]
+        merged[lane] = existing
+
+    if row is None:
+        row = OrchestratorSetting(key=BUDGET_GUARD_LANE_POLICY_KEY, value=merged)
+        db.add(row)
+    else:
+        row.value = merged
+    await db.commit()
+
+    effective = _effective_lane_policy(merged)
+    return {"policy": effective, "stored": merged}
+
+
+@router.get("/daily-report")
+async def get_daily_report(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """Daily cost-vs-quality report.
+
+    Returns:
+    - Today's total spend vs daily hard cap
+    - Per-provider spend breakdown
+    - Per budget lane: spend, cap, utilisation, whether at-cap
+    - Recent override (auto-downgrade) events
+    - Budget alerts for high utilisation or cap breaches
+    """
+    raw_budgets = await _get_setting_json(db, BUDGETS_KEY)
+    budget_limits: dict[str, Any] = raw_budgets if isinstance(raw_budgets, dict) else DEFAULT_BUDGETS.model_dump()
+
+    report = await build_daily_report(db, budget_limits=budget_limits)
+
+    # Augment with live BudgetGuard override log for today
+    guard = BudgetGuard(db)
+    override_today = await guard.today_override_log()
+    report["budget_guard_overrides_today"] = override_today
+    report["budget_guard_override_count"] = len(override_today)
+
+    return report
