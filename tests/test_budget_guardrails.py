@@ -1158,3 +1158,282 @@ class TestDailyReportBudgetLaneAccuracy:
         assert crit_status["cap_usd"] is None
         assert crit_status["at_cap"] is False
         assert crit_status["utilization_pct"] is None
+
+
+# ---------------------------------------------------------------------------
+# Global daily hard cap enforcement in ModelChooser
+# ---------------------------------------------------------------------------
+
+
+class TestGlobalDailyHardCapInModelChooser:
+    """Tests for ModelChooser._apply_global_daily_cap() wired into choose()."""
+
+    @pytest.mark.asyncio
+    async def test_choose_includes_hard_cap_guard_in_audit(self, db_session, monkeypatch):
+        """ModelChooser.choose() includes hard_cap_guard in audit dict."""
+        import app.orchestrator.model_chooser as mc_module
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        task = {"id": "t-hcg", "title": "Write docs", "status": "active"}
+        choice = await chooser.choose(agent_type="writer", task=task)
+
+        # hard_cap_guard must be present in the audit
+        assert "hard_cap_guard" in choice.audit
+        hcg = choice.audit["hard_cap_guard"]
+        assert "effective_candidates" in hcg
+        assert "hard_cap_exceeded" in hcg
+        assert "downgraded" in hcg
+        assert "reason" in hcg
+
+    @pytest.mark.asyncio
+    async def test_choose_no_hard_cap_configured_passes_through(self, db_session, monkeypatch):
+        """With no daily_hard_cap_usd configured, hard_cap_guard shows no_hard_cap."""
+        import app.orchestrator.model_chooser as mc_module
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        task = {"id": "t-nohc", "title": "Normal task", "status": "active"}
+        choice = await chooser.choose(agent_type="programmer", task=task)
+
+        hcg = choice.audit["hard_cap_guard"]
+        # No cap configured → daily_hard_cap_usd defaults to 0.0 → "no_hard_cap"
+        assert hcg["reason"] == "no_hard_cap"
+        assert hcg["hard_cap_exceeded"] is False
+        assert hcg["downgraded"] is False
+        assert hcg["hard_cap_usd"] is None
+
+    @pytest.mark.asyncio
+    async def test_choose_downgrades_when_hard_cap_exceeded(self, db_session, monkeypatch):
+        """ModelChooser restricts to micro/small when global daily hard cap is exceeded."""
+        import app.orchestrator.model_chooser as mc_module
+        from app.models import ModelUsageEvent, OrchestratorSetting
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        # Set a very low global hard cap ($0.001) so any spend exceeds it
+        budget_row = OrchestratorSetting(
+            key="usage.budgets",
+            value={"daily_hard_cap_usd": 0.001},
+        )
+        db_session.add(budget_row)
+
+        # Log a usage event that exceeds the hard cap
+        event = ModelUsageEvent(
+            id="evt-hc-exceed",
+            source="orchestrator-worker",
+            model="openai/gpt-5",
+            provider="openai",
+            route_type="api",
+            task_type="programmer",
+            input_tokens=1000,
+            output_tokens=500,
+            requests=1,
+            status="success",
+            estimated_cost_usd=0.05,  # Over $0.001 hard cap
+            timestamp=datetime.now(timezone.utc),
+        )
+        db_session.add(event)
+        await db_session.commit()
+
+        # Wire micro/small tier models into DB so the hard cap downgrade has something to pick
+        micro_row = OrchestratorSetting(
+            key="model_router.tier.micro",
+            value=["test/micro-model"],
+        )
+        small_row = OrchestratorSetting(
+            key="model_router.tier.small",
+            value=["test/small-model"],
+        )
+        db_session.add(micro_row)
+        db_session.add(small_row)
+        await db_session.commit()
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        task = {"id": "t-hc-exc", "title": "Implement feature", "status": "active"}
+        choice = await chooser.choose(agent_type="programmer", task=task)
+
+        hcg = choice.audit["hard_cap_guard"]
+        assert hcg["hard_cap_exceeded"] is True
+        assert isinstance(hcg["daily_spend_usd"], float)
+        assert hcg["daily_spend_usd"] >= 0.05
+
+    @pytest.mark.asyncio
+    async def test_choose_hard_cap_within_budget_no_downgrade(self, db_session, monkeypatch):
+        """When daily spend is under hard cap, no downgrade occurs."""
+        import app.orchestrator.model_chooser as mc_module
+        from app.models import OrchestratorSetting
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        # Set a generous hard cap ($100/day) — no spend in DB → safe
+        budget_row = OrchestratorSetting(
+            key="usage.budgets",
+            value={"daily_hard_cap_usd": 100.0},
+        )
+        db_session.add(budget_row)
+        await db_session.commit()
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        task = {"id": "t-hc-safe", "title": "Normal task", "status": "active"}
+        choice = await chooser.choose(agent_type="researcher", task=task)
+
+        hcg = choice.audit["hard_cap_guard"]
+        assert hcg["hard_cap_exceeded"] is False
+        assert hcg["downgraded"] is False
+        assert hcg["hard_cap_usd"] == 100.0
+
+    @pytest.mark.asyncio
+    async def test_apply_global_daily_cap_method_no_cap(self, db_session, monkeypatch):
+        """_apply_global_daily_cap with 0.0 cap returns no_hard_cap reason."""
+        import app.orchestrator.model_chooser as mc_module
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        candidates = ["model/std-a", "model/strong-a"]
+        result = await chooser._apply_global_daily_cap(
+            candidates=candidates,
+            budgets={"daily_hard_cap_usd": 0.0},
+            tier_map=SAMPLE_TIER_MAP,
+            task={"id": "t1"},
+            agent_type="programmer",
+        )
+
+        assert result["effective_candidates"] == candidates
+        assert result["reason"] == "no_hard_cap"
+        assert result["hard_cap_usd"] is None
+        assert result["downgraded"] is False
+
+    @pytest.mark.asyncio
+    async def test_apply_global_daily_cap_method_within_cap(self, db_session, monkeypatch):
+        """_apply_global_daily_cap returns within_hard_cap when spend is safe."""
+        import app.orchestrator.model_chooser as mc_module
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        candidates = ["model/std-a", "model/strong-a"]
+        result = await chooser._apply_global_daily_cap(
+            candidates=candidates,
+            budgets={"daily_hard_cap_usd": 50.0},  # generous cap, no spend in DB
+            tier_map=SAMPLE_TIER_MAP,
+            task={"id": "t2"},
+            agent_type="programmer",
+        )
+
+        assert result["effective_candidates"] == candidates
+        assert result["hard_cap_exceeded"] is False
+        assert result["downgraded"] is False
+        assert result["hard_cap_usd"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_apply_global_daily_cap_method_exceeded(self, db_session, monkeypatch):
+        """_apply_global_daily_cap downgrades to micro/small when hard cap hit."""
+        import app.orchestrator.model_chooser as mc_module
+        from app.models import ModelUsageEvent
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        # Add spend that exceeds the hard cap
+        event = ModelUsageEvent(
+            id="evt-hcm-1",
+            source="test",
+            model="openai/gpt-5",
+            provider="openai",
+            route_type="api",
+            task_type="programmer",
+            requests=1,
+            status="success",
+            estimated_cost_usd=10.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        db_session.add(event)
+        await db_session.commit()
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        # All tiers in the sample map
+        candidates = [
+            "model/micro-a", "model/small-a", "model/medium-a",
+            "model/std-a", "model/strong-a",
+        ]
+        result = await chooser._apply_global_daily_cap(
+            candidates=candidates,
+            budgets={"daily_hard_cap_usd": 5.0},  # Under $10 spend
+            tier_map=SAMPLE_TIER_MAP,
+            task={"id": "t-hcm"},
+            agent_type="programmer",
+        )
+
+        assert result["hard_cap_exceeded"] is True
+        # Only micro and small should survive
+        effective = result["effective_candidates"]
+        assert "model/std-a" not in effective
+        assert "model/strong-a" not in effective
+        assert "model/medium-a" not in effective
+        assert "model/micro-a" in effective or "model/small-a" in effective
+
+    @pytest.mark.asyncio
+    async def test_apply_global_daily_cap_method_fallback_when_no_cheap_models(self, db_session, monkeypatch):
+        """Safety: falls back to original list when no micro/small models exist."""
+        import app.orchestrator.model_chooser as mc_module
+        from app.models import ModelUsageEvent
+
+        monkeypatch.setattr(mc_module, "discover_ollama_models", AsyncMock(return_value={}))
+
+        # Exceed hard cap
+        event = ModelUsageEvent(
+            id="evt-hcfb-1",
+            source="test",
+            model="openai/gpt-5",
+            provider="openai",
+            route_type="api",
+            task_type="programmer",
+            requests=1,
+            status="success",
+            estimated_cost_usd=10.0,
+            timestamp=datetime.now(timezone.utc),
+        )
+        db_session.add(event)
+        await db_session.commit()
+
+        from app.orchestrator.model_chooser import ModelChooser
+
+        chooser = ModelChooser(db_session)
+        candidates = ["model/std-a"]  # Only standard tier — no micro/small
+        tier_map_no_cheap: dict[str, list[str]] = {
+            "micro": [],
+            "small": [],
+            "medium": [],
+            "standard": ["model/std-a"],
+            "strong": [],
+        }
+        result = await chooser._apply_global_daily_cap(
+            candidates=candidates,
+            budgets={"daily_hard_cap_usd": 5.0},
+            tier_map=tier_map_no_cheap,
+            task={"id": "t-fb"},
+            agent_type="programmer",
+        )
+
+        # Safety fallback: original list returned since no micro/small available
+        assert result["effective_candidates"] == candidates
+        assert result["hard_cap_exceeded"] is True
+        # reason indicates no cheap fallback was available
+        assert result["reason"] is not None
