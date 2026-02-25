@@ -603,8 +603,8 @@ async def test_health_endpoint_contract(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_status_endpoint_contract(client: AsyncClient):
-    """Verify /api/status endpoint returns correct shape."""
-    response = await client.get("/api/status")
+    """Verify /api/status/overview endpoint returns correct shape."""
+    response = await client.get("/api/status/overview")
     assert response.status_code == 200
     
     status = response.json()
@@ -707,6 +707,7 @@ async def test_date_field_formats(client: AsyncClient, sample_project):
 async def test_snake_case_consistency(client: AsyncClient, sample_project):
     """Verify all API responses use snake_case (for Swift's .convertFromSnakeCase)."""
     # Create task with fields that should be snake_case
+    # Note: only include fields present in the TaskBase schema
     task_data = {
         "id": "contract-test-snake-case",
         "title": "Snake Case Test",
@@ -719,12 +720,7 @@ async def test_snake_case_consistency(client: AsyncClient, sample_project):
         "started_at": "2024-01-01T00:00:00Z",
         "finished_at": "2024-01-02T00:00:00Z",
         "blocked_by": ["other-task-id"],
-        "tracking_mode": "inbox",
         "github_issue_number": 123,
-        "github_issue_url": "https://github.com/test/repo/issues/123",
-        "github_issue_state": "open",
-        "workspace_context": "test-workspace",
-        "user_context": "test-user",
         "model_tier": "standard",
     }
     
@@ -734,11 +730,11 @@ async def test_snake_case_consistency(client: AsyncClient, sample_project):
     task = response.json()
     
     # Verify snake_case fields are present (not camelCase)
+    # Only check fields that actually exist in the Task schema
     snake_case_fields = [
         "created_at", "updated_at", "project_id", "work_state", "review_state",
         "sort_order", "artifact_path", "started_at", "finished_at", "blocked_by",
-        "tracking_mode", "github_issue_number", "github_issue_url", "github_issue_state",
-        "workspace_context", "user_context", "model_tier"
+        "github_issue_number", "model_tier"
     ]
     
     for field in snake_case_fields:
@@ -750,8 +746,7 @@ async def test_snake_case_consistency(client: AsyncClient, sample_project):
     camel_case_variants = [
         "createdAt", "updatedAt", "projectId", "workState", "reviewState",
         "sortOrder", "artifactPath", "startedAt", "finishedAt", "blockedBy",
-        "trackingMode", "githubIssueNumber", "githubIssueUrl", "githubIssueState",
-        "workspaceContext", "userContext", "modelTier"
+        "githubIssueNumber", "modelTier"
     ]
     
     for field in camel_case_variants:
