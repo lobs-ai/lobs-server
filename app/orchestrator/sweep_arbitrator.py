@@ -125,18 +125,9 @@ class SweepArbitrator:
             len(remaining)
         )
 
-        # --- Send lightweight notification to Lobs main session via Gateway API ---
-        try:
-            await self._notify_lobs_main_session_lightweight(remaining, sweep_id)
-            logger.info(
-                "[SWEEP] Notified Lobs main session of %d pending initiatives",
-                len(remaining)
-            )
-        except Exception as e:
-            logger.warning(
-                "[SWEEP] Failed to notify Lobs main session: %s — inbox items already created",
-                e
-            )
+        # Sweep notifications disabled — inbox items are created above and
+        # visible in Mission Control. Notifying the main session per-sweep
+        # caused floods (each worker completion triggers a mini-reflection → sweep).
 
         # --- Create high-risk inbox items for Rafe using PolicyEngine ---
         policy_engine = PolicyEngine()
