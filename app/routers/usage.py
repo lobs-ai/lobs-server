@@ -637,18 +637,77 @@ async def get_daily_report(db: AsyncSession = Depends(get_db)) -> dict[str, Any]
     Returns:
     - Today's total spend vs daily hard cap
     - Per-provider spend breakdown
-    - Per budget lane: spend, cap, utilisation, whether at-cap
-    - Recent override (auto-downgrade) events
+    - Per budget lane: spend, cap, utilisation, at-cap flag, downgrade tier
+    - Recent override (auto-downgrade) events from BudgetGuard
     - Budget alerts for high utilisation or cap breaches
+
+    Lane spend data uses the ``budget_lane`` column set at worker spawn time for
+    accuracy.  Legacy events without an explicit lane fall back to model-name
+    keyword heuristics inside BudgetGuard.today_lane_spend().
     """
     raw_budgets = await _get_setting_json(db, BUDGETS_KEY)
     budget_limits: dict[str, Any] = raw_budgets if isinstance(raw_budgets, dict) else DEFAULT_BUDGETS.model_dump()
 
     report = await build_daily_report(db, budget_limits=budget_limits)
 
-    # Augment with live BudgetGuard override log for today
+    # --- Use BudgetGuard for accurate per-lane spend and real lane policy ---
     guard = BudgetGuard(db)
+
+    # Actual lane policy (stored under budget_guard.lane_policy).
+    lane_policy_raw = await _get_setting_json(db, BUDGET_GUARD_LANE_POLICY_KEY)
+    lane_policy = _effective_lane_policy(lane_policy_raw)
+
+    # Accurate lane spend from budget_lane column (with heuristic fallback for
+    # legacy events that predate the budget_lane column).
+    lane_spend = await guard.today_spend_all_lanes()
+
+    # Override log from BudgetGuard (downgrade audit trail).
     override_today = await guard.today_override_log()
+
+    # Build authoritative lane_status, replacing the heuristic-based version
+    # returned by build_daily_report().
+    lane_status: dict[str, Any] = {}
+    alerts: list[str] = []
+
+    # Daily hard cap alert (computed before per-lane loop so it appears first).
+    daily_hard_cap = float(budget_limits.get("daily_hard_cap_usd") or 0.0)
+    total_spend = float(report.get("total_spend_usd") or 0.0)
+    if daily_hard_cap > 0:
+        hard_util = round(total_spend / daily_hard_cap * 100, 1)
+        if hard_util >= 90:
+            alerts.append(
+                f"Daily hard cap at {hard_util:.0f}% utilization "
+                f"(${total_spend:.2f}/${daily_hard_cap:.2f})"
+            )
+
+    for lane in ALL_LANES:
+        spend = lane_spend.get(lane, 0.0)
+        cap = lane_policy[lane].get("daily_cap_usd")
+        downgrade_tier = lane_policy[lane].get("downgrade_tier")
+        at_cap = cap is not None and spend >= cap
+        util = round(spend / cap * 100, 1) if cap and cap > 0 else None
+
+        lane_status[lane] = {
+            "spend_usd": round(spend, 4),
+            "cap_usd": cap,
+            "utilization_pct": util,
+            "at_cap": at_cap,
+            "downgrade_tier": downgrade_tier,
+        }
+
+        if at_cap:
+            alerts.append(
+                f"{lane} lane cap exceeded — auto-downgrade active"
+                + (f" (downgrade_tier={downgrade_tier})" if downgrade_tier else "")
+            )
+        elif util is not None and util >= 80:
+            alerts.append(
+                f"{lane} lane at {util:.0f}% of daily cap "
+                f"(${spend:.4f}/${cap:.2f})"
+            )
+
+    report["lane_status"] = lane_status
+    report["alerts"] = alerts
     report["budget_guard_overrides_today"] = override_today
     report["budget_guard_override_count"] = len(override_today)
 
