@@ -136,7 +136,7 @@ async def test_worker_spawn_uses_fallback_chain(db_session, monkeypatch, tmp_pat
 
     calls = {"n": 0}
 
-    async def fake_spawn_session(*, task_prompt: str, agent_id: str, model: str, label: str, routing_policy=None):
+    async def fake_spawn_session(*, task_prompt: str, agent_id: str, model: str, label: str, routing_policy=None, budget_lane: str | None = None):
         calls["n"] += 1
         # fail first (small-a), succeed second (small-b)
         if calls["n"] == 1:
