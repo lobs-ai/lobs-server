@@ -285,6 +285,7 @@ class WorkerManager:
                     model=candidate,
                     label=label,
                     routing_policy=choice.routing_policy or {},
+                    budget_lane=choice.budget_lane,
                 )
                 attempts.append(
                     {
@@ -442,6 +443,7 @@ class WorkerManager:
         model: str,
         label: str,
         routing_policy: dict[str, Any] | None = None,
+        budget_lane: str | None = None,
     ) -> tuple[Optional[dict[str, str]], Optional[str], str]:
         """
         Call Gateway API to spawn a new session.
@@ -486,6 +488,7 @@ class WorkerManager:
                         model=model,
                         route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                         task_type="inbox" if "inbox" in label else "task_execution",
+                        budget_lane=budget_lane,
                         status="error",
                         error_code="sessions_spawn_failed",
                         metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
@@ -509,6 +512,7 @@ class WorkerManager:
                         model=model,
                         route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                         task_type="inbox" if "inbox" in label else "task_execution",
+                        budget_lane=budget_lane,
                         status="error",
                         error_code="sessions_spawn_not_accepted",
                         metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
@@ -525,6 +529,7 @@ class WorkerManager:
                     model=model,
                     route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                     task_type="inbox" if "inbox" in label else "task_execution",
+                    budget_lane=budget_lane,
                     status="success",
                     metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
                 )
@@ -1349,6 +1354,10 @@ class WorkerManager:
                     cached_tokens = token_usage.cache_read_tokens if token_usage else 0
                     cost = token_usage.estimated_cost_usd if token_usage else 0.0
 
+                    # Extract budget_lane from model audit for accurate lane spend tracking
+                    _lane_guard = (model_audit or {}).get("lane_guard") or {}
+                    _budget_lane: str | None = _lane_guard.get("lane") if isinstance(_lane_guard, dict) else None
+
                     await _safe_log_usage_event(
                         db,
                         source="orchestrator-worker",
@@ -1356,6 +1365,7 @@ class WorkerManager:
                         provider=token_usage.provider if token_usage and token_usage.provider else None,
                         route_type=route_type,
                         task_type="task_execution",
+                        budget_lane=_budget_lane,
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                         cached_tokens=cached_tokens,

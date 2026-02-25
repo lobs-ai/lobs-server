@@ -120,6 +120,7 @@ async def create_usage_event(payload: ModelUsageEventCreate, db: AsyncSession = 
         provider=payload.provider,
         route_type=payload.route_type,
         task_type=payload.task_type,
+        budget_lane=payload.budget_lane,
         input_tokens=payload.input_tokens,
         output_tokens=payload.output_tokens,
         cached_tokens=payload.cached_tokens,

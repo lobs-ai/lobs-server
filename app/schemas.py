@@ -976,6 +976,9 @@ class ModelUsageEventCreate(BaseModel):
     model: str
     route_type: str = "api"  # api|subscription
     task_type: str = "other"
+    # budget_lane: explicit spend lane (critical|standard|background).
+    # When provided, enables accurate per-lane spend tracking without keyword heuristics.
+    budget_lane: Optional[str] = None
     input_tokens: int = 0
     output_tokens: int = 0
     cached_tokens: int = 0
