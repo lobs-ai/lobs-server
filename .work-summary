@@ -1,1 +1,1 @@
-Verified PAW Value Proof Dashboard docs are complete: schemas/value_proof_event.json (JSON Schema draft-07, 252 lines) + docs/product/value-proof-dashboard.md (237 lines, full copy + rendering spec + programmer handoff)
+Created schemas/value_proof_event.json (JSON Schema draft-07) and docs/product/value-proof-dashboard.md (copy blocks + metric defs + programmer handoff). Both ready for implementation.
