@@ -1,1 +1,1 @@
-PAW Value Proof Dashboard: schema at schemas/value_proof_event.json and rendering spec at docs/product/value-proof-dashboard.md — both complete with copy blocks, metric definitions, and programmer handoff notes.
+Shipped PAW Value Proof Dashboard: schemas/value_proof_event.json (JSON Schema draft-07, 4 required fields) + docs/product/value-proof-dashboard.md (copy blocks, metric defs, programmer handoff)
