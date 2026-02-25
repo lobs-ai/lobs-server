@@ -1,1 +1,1 @@
-Created schemas/value_proof_event.json (JSON Schema draft-07, 4 required fields + worked example) and docs/product/value-proof-dashboard.md (copy blocks, metric definitions, programmer telemetry handoff, API spec for GET /api/value-proof/today).
+Verified: schemas/value_proof_event.json and docs/product/value-proof-dashboard.md both complete — JSON schema (draft-07) with 4 required fields + full rendering spec, copy blocks, metric definitions, and programmer telemetry-mapping handoff.
