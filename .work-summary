@@ -1,1 +1,1 @@
-Verified and confirmed PAW Value Proof Dashboard artifacts: schemas/value_proof_event.json (JSON Schema draft-07) + docs/product/value-proof-dashboard.md (copy blocks, metric defs, programmer handoff)
+Deliverables already shipped in prior run: schemas/value_proof_event.json (JSON Schema draft-07) and docs/product/value-proof-dashboard.md (rendering spec + copy blocks). Both verified complete — no changes needed.
