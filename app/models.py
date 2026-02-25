@@ -251,6 +251,7 @@ class WorkerRun(Base):
     succeeded = Column(Boolean)
     source = Column(String)
     summary = Column(String)  # Work summary from .work-summary file
+    validity_result = Column(JSON)  # RunValidityContract check result (v1)
 
 
 class OrchestratorSetting(Base):
