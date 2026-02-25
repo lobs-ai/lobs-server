@@ -38,6 +38,8 @@ from sqlalchemy import select
 from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     SETTINGS_KEY_OPENCLAW_MODEL_SYNC_INTERVAL_SECONDS,
+    SETTINGS_KEY_DAILY_BRIEF_HOUR_ET,
+    SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET,
 )
 
 logger = logging.getLogger(__name__)

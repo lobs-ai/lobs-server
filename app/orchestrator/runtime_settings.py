@@ -13,6 +13,10 @@ SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET = "orchestrator.daily_compression.hour_et
 # Persisted marker so restarts don't cause repeated daily runs and so status can report last run.
 SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET = "orchestrator.daily_compression.last_date_et"
 
+# Daily Ops Brief — posted to chat at _brief_hour_et (default 8am ET)
+SETTINGS_KEY_DAILY_BRIEF_HOUR_ET = "orchestrator.daily_brief.hour_et"
+SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET = "orchestrator.daily_brief.last_date_et"
+
 # Reactive diagnostic trigger thresholds/policy
 SETTINGS_KEY_DIAG_STALL_HOURS = "orchestrator.diagnostics.stalled_task.hours"
 SETTINGS_KEY_DIAG_FAILURE_RETRY_COUNT = "orchestrator.diagnostics.repeated_failure.retry_count"
@@ -37,6 +41,8 @@ DEFAULT_RUNTIME_SETTINGS: dict[str, object] = {
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_UTC: 3,
     SETTINGS_KEY_DAILY_COMPRESSION_HOUR_ET: 3,
     SETTINGS_KEY_DAILY_COMPRESSION_LAST_DATE_ET: "",
+    SETTINGS_KEY_DAILY_BRIEF_HOUR_ET: 8,
+    SETTINGS_KEY_DAILY_BRIEF_LAST_DATE_ET: "",
     SETTINGS_KEY_DIAG_STALL_HOURS: 2,
     SETTINGS_KEY_DIAG_FAILURE_RETRY_COUNT: 2,
     SETTINGS_KEY_DIAG_PR_REJECTION_HOURS: 24,
