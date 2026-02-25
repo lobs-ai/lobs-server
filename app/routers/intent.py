@@ -137,13 +137,13 @@ _TEMPORAL_RE = re.compile(
 def _agent_for_task(text: str) -> str:
     """Suggest an agent for a task based on keyword signals."""
     t = text.lower()
-    if any(k in t for k in ["research", "investigate", "compare", "analyze", "analyse", "look into"]):
+    if _keyword_matches(["research", "investigate", "compare", "analyze", "analyse", "look into"], t):
         return "researcher"
-    if any(k in t for k in ["write", "draft", "document", "blog", "post", "copy", "content"]):
+    if _keyword_matches(["write", "draft", "document", "blog", "post", "copy", "content"], t):
         return "writer"
-    if any(k in t for k in ["review", "qa", "test", "validate", "audit"]):
+    if _keyword_matches(["review", "qa", "test", "validate", "audit"], t):
         return "reviewer"
-    if any(k in t for k in ["design", "architecture", "refactor plan", "system design"]):
+    if _keyword_matches(["design", "architecture", "refactor plan", "system design"], t):
         return "architect"
     return "programmer"
 
@@ -164,6 +164,16 @@ def _summarize_title(text: str, max_len: int = 80) -> str:
     return first[:max_len] + ("…" if len(first) > max_len else "")
 
 
+def _keyword_matches(keywords: list[str], text: str) -> bool:
+    """Return True if any keyword is found as a whole-word match in text."""
+    for kw in keywords:
+        # Use word boundaries so "change" doesn't match "changes" or "exchange"
+        pattern = r"\b" + re.escape(kw) + r"\b"
+        if re.search(pattern, text):
+            return True
+    return False
+
+
 def _score_intents(text: str) -> list[CaptureIntent]:
     """Classify *text* into a ranked list of CaptureIntents (deterministic, no LLM)."""
     low = text.lower()
@@ -179,21 +189,22 @@ def _score_intents(text: str) -> list[CaptureIntent]:
         "reply_needed": 0.38,
     }
 
-    # Apply keyword tables
+    # Apply keyword tables (whole-word matching to avoid false positives like
+    # "change" matching "changes" or "api changes")
     for kw_list, delta in _TASK_KEYWORDS:
-        if any(k in low for k in kw_list):
+        if _keyword_matches(kw_list, low):
             scores["task"] = max(scores["task"], delta)
 
     for kw_list, delta in _REMINDER_KEYWORDS:
-        if any(k in low for k in kw_list):
+        if _keyword_matches(kw_list, low):
             scores["reminder"] = max(scores["reminder"], delta)
 
     for kw_list, delta in _RESEARCH_KEYWORDS:
-        if any(k in low for k in kw_list):
+        if _keyword_matches(kw_list, low):
             scores["research"] = max(scores["research"], delta)
 
     for kw_list, delta in _REPLY_KEYWORDS:
-        if any(k in low for k in kw_list):
+        if _keyword_matches(kw_list, low):
             scores["reply_needed"] = max(scores["reply_needed"], delta)
 
     # Heuristic boosts

@@ -1,411 +1,147 @@
-# Diagnostic Review: Cascading Failure Analysis
+# Diagnostic Review: Task bc10aeab — Daily Ops Brief Failure
 
-**Task ID:** `diag_diag_diag_diag_498C8166-D5AA-4BF1-BFCD-54CE726F2707_1771898507_1771899760_1771901561_1771905228`  
-**Reviewer:** reviewer  
-**Date:** 2026-02-24  
-**Status:** 🔴 **CRITICAL** — System stuck in infinite diagnostic loop
-
----
-
-## Executive Summary
-
-This task has entered a **catastrophic failure cascade**—a diagnostic task spawned to analyze a failure, which itself failed, spawning another diagnostic, ad infinitum. We're now **4 levels deep** in nested diagnostics, all failing with the same error: **"Session not found"**.
-
-**Root Cause:** OpenClaw worker sessions are terminating immediately or failing to start, preventing any agent from executing. The orchestrator's diagnostic system is spawning new reviewers to diagnose the failures, but reviewers themselves cannot execute, creating an infinite loop.
-
-**Impact:**
-- Original task (Phase 1.3: Prompt Enhancement) is blocked
-- 4+ diagnostic tasks spawned, all failing identically
-- System resources consumed by pointless retry loops
-- Database under load (locking errors observed)
-
----
-
-## Failure Timeline
-
-```
-Original Task: 498C8166-D5AA-4BF1-BFCD-54CE726F2707
-   "Phase 1.3: Prompt Enhancement & Learning Injection"
-   ↓ (failed with programmer 3x)
-   ↓ (switched to architect)
-   ↓ (failed with architect 3x)
-
-Diagnostic #1: diag_498C8166..._1771898507
-   "Diagnose failure: Phase 1.3..."
-   ↓ (failed with reviewer 3x)
-   ↓ (switched to architect)
-
-Diagnostic #2: diag_diag_498C8166..._1771899760
-   "Diagnose failure: Diagnose failure: Phase 1.3..."
-   ↓ (failed with reviewer 3x)
-   ↓ (switched to architect)
-
-Diagnostic #3: diag_diag_diag_498C8166..._1771901561
-   "Diagnose failure: Diagnose failure: Diagnose failure..."
-   ↓ (failed with reviewer 3x)
-   ↓ (switched to architect)
-
-Diagnostic #4: diag_diag_diag_diag_498C8166..._1771905228  ← YOU ARE HERE
-   "Diagnose failure: Diagnose failure: Diagnose failure: Diagnose failu"
-   ↓ (currently failing with reviewer)
-```
+**Date:** 2026-02-25  
+**Reviewer:** reviewer-agent  
+**Task ID:** bc10aeab-75e0-4ac8-9df3-e78bffcc1b77  
+**Reported Error:** `Session not found`
 
 ---
 
 ## Root Cause Analysis
 
-### 1. Immediate Cause: "Session not found"
+The task failed due to a **cascade of 3 compounding failures**, not a single issue:
 
-**What it means:**  
-From `app/orchestrator/worker.py:_check_session_status()`:
+### Failure 1 (Primary): SQLite DB Lock — Paralyzed the Orchestrator (Feb 24, ~19:49–20:10 UTC)
 
-```python
-# Method 3: Check age-based fallback
-if spawn_time is not None:
-    age_minutes = (time.time() - spawn_time) / 60
-    if age_minutes < 5:
-        return {"completed": False, "success": False, "error": ""}
-    return {"completed": True, "success": False, "error": "Session not found"}
-return {"completed": True, "success": False, "error": "Session not found"}
+The orchestrator engine's control loop was crashing **every ~90 seconds** with:
+
+```
+sqlite3.OperationalError: database is locked
+INSERT INTO agent_reflections ...
 ```
 
-This error triggers when:
-1. No transcript file found on disk (`.jsonl` or `.deleted.*`)
-2. OpenClaw Gateway `sessions_history` API returns empty/None
-3. Session is >5 minutes old OR spawn_time is None
+**Stack trace root:** `engine.py → _run_reflection() → reflection_cycle.py → model_chooser.py → _load_runtime_config()` triggers an autoflush of a pending `agent_reflections` INSERT, which conflicts with another DB writer. This locked up the entire control loop for ~20 minutes.
 
-**Interpretation:**  
-The OpenClaw session is either:
-- Never starting (spawn fails silently)
-- Starting but terminating immediately (<15 seconds)
-- Starting but not writing any output to transcript
+**Impact:** During this window, no tasks could be dispatched, no sessions could be spawned. The architect task for bc10aeab was queued during this outage period.
 
-### 2. Why Sessions Aren't Completing
+### Failure 2: Architect Workflow Missing — Tasks Blocked (`legacy spawn disabled`)
 
-Likely causes (in order of probability):
-
-#### A. **OpenClaw Gateway is down or unreachable**
-- Worker spawns via `POST /tools/invoke` with `tool: sessions_spawn`
-- If Gateway is offline, spawn may appear to succeed but session never runs
-- Server logs show successful spawn: `"Spawned worker worker_1771907360_diag_dia... runId=22958af3..."`
-- But no transcript is ever written → indicates session died immediately
-
-#### B. **Model/provider failures**
-- Task uses `anthropic/claude-sonnet-4-5`
-- If Anthropic API is rate-limiting or rejecting requests, session terminates early
-- No error propagates back to orchestrator (Gateway just stops session)
-- Logs show `"Session not found"` consistently, suggesting systematic issue
-
-#### C. **Prompt or task configuration issue**
-- All diagnostic tasks use same reviewer agent prompt
-- If prompt contains malformed instructions or missing context, agent might exit immediately
-- Less likely (would expect error message in transcript)
-
-#### D. **OpenClaw workspace/permission issue**
-- Sessions may fail to write transcripts due to disk permissions
-- Less likely (we'd see errors in OpenClaw logs)
-
-### 3. Why This Became an Infinite Loop
-
-**Escalation system design flaw:**
-
-From the task notes history:
+At 20:18 UTC, when the control loop recovered, it logged:
 ```
-Auto-retry #1 → Auto-retry #2 → Agent Switch → Diagnostic Spawned
+[ENGINE] Task bc10aeab (agent=architect) has no matching workflow; blocking task (legacy spawn disabled)
 ```
 
-The escalation system (`app/orchestrator/escalation_enhanced.py`) spawns diagnostic tasks when agents fail repeatedly. But:
+Six architect tasks hit this at once — meaning the workflow registry didn't have a matching workflow for architect-type tasks at that moment. This is likely a timing issue (workflow seeds not re-loaded after DB lock recovery) or a missing workflow definition for this agent type.
 
-1. **Diagnostic tasks are also tasks** → they can fail too
-2. **No circuit breaker for diagnostics** → diagnostic failures spawn more diagnostics
-3. **No depth limit** → infinite nesting is possible
-4. **Same root cause affects all agents** → if infrastructure is broken, diagnostics fail identically
+### Failure 3: Session Spawn Failed — Both Model Attempts Rejected
 
-**Database locking as secondary symptom:**
-
-Error log shows:
-```
-[ENGINE] Diagnostic triggers failed: (sqlite3.OperationalError) database is locked
-```
-
-High retry volume is causing SQLite write contention. Not the root cause, but a symptom of the loop.
-
----
-
-## Evidence
-
-### From Server Logs
-
-**Successful spawn:**
-```
-[2026-02-23 23:29:24] [WORKER] Spawned worker worker_1771907360_diag_dia 
-for task diag_dia (project=lobs-server, agent=reviewer, 
-model=anthropic/claude-sonnet-4-5, runId=22958af3-deb...)
-```
-
-**But no completion:**  
-No matching `[WORKER] Worker worker_1771907360_diag_dia completed` message in logs.
-
-**Database lock under load:**
-```
-(sqlite3.OperationalError) database is locked
-[SQL: INSERT INTO diagnostic_trigger_events ...]
-```
-
-### From Code Analysis
-
-**Worker status check logic** (`worker.py:735-790`):
-- Tries 3 methods: disk transcript, Gateway API, age-based fallback
-- All 3 failing → no transcript exists, Gateway can't find session
-
-**No safety limit on diagnostic depth:**  
-Searched `app/orchestrator/escalation_enhanced.py` — no check for task ID prefix `diag_diag_diag_...`
-
----
-
-## Recommendations
-
-### 🔴 Immediate Actions
-
-#### 1. **STOP THE LOOP**
-- **Manually cancel all diagnostic tasks** with IDs starting with `diag_`
-- SQL: `UPDATE tasks SET status='cancelled', work_state='cancelled' WHERE id LIKE 'diag_%'`
-- Prevents further cascading
-
-#### 2. **Check OpenClaw Gateway health**
-```bash
-curl -H "Authorization: Bearer $GATEWAY_TOKEN" \
-     http://localhost:8000/api/health
-```
-- If Gateway is down/unresponsive, restart it
-- Check OpenClaw logs for session spawn failures
-
-#### 3. **Verify Anthropic API access**
-```bash
-# Test direct API call
-curl https://api.anthropic.com/v1/messages \
-  -H "x-api-key: $ANTHROPIC_API_KEY" \
-  -H "content-type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-sonnet-4-5","max_tokens":1024,"messages":[{"role":"user","content":"test"}]}'
-```
-- Check for rate limits, quota exhaustion, key issues
-
-#### 4. **Cancel the original task**
-- Task `498C8166-D5AA-4BF1-BFCD-54CE726F2707` cannot be completed until infrastructure is fixed
-- Mark as `blocked` with blocker: `"OpenClaw infrastructure failure - sessions not starting"`
-
----
-
-### 🟡 Short-term Fixes
-
-#### 1. **Add diagnostic depth limit**
-
-**File:** `app/orchestrator/escalation_enhanced.py`
-
-Add check before spawning diagnostic:
-```python
-def _get_diagnostic_depth(task_id: str) -> int:
-    """Count how many times 'diag_' appears in task ID."""
-    return task_id.count("diag_")
-
-async def _spawn_diagnostic_task(...):
-    depth = _get_diagnostic_depth(task_id)
-    if depth >= 2:  # Max 2 levels: diag_diag_<original>
-        logger.error(
-            f"[ESCALATION] Diagnostic depth limit reached ({depth}) "
-            f"for task {task_id}. Creating alert instead."
-        )
-        await self.create_simple_alert(
-            task_id=task_id,
-            project_id=project_id,
-            error_log=f"Diagnostic cascade blocked at depth {depth}",
-            severity="critical"
-        )
-        return None
-    # ... existing spawn logic
-```
-
-**Acceptance:** Diagnostic tasks fail no more than 2 levels deep.
-
-#### 2. **Add infrastructure health check before spawning**
-
-**File:** `app/orchestrator/worker.py`
-
-Before `_spawn_session()`, add:
-```python
-async def _check_gateway_health(self) -> bool:
-    """Quick health check before spawning expensive sessions."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            resp = await session.get(
-                f"{GATEWAY_URL}/health",
-                timeout=aiohttp.ClientTimeout(total=5)
-            )
-            return resp.status == 200
-    except:
-        return False
-
-async def spawn_worker(...):
-    if not await self._check_gateway_health():
-        logger.error("[WORKER] Gateway health check failed, aborting spawn")
-        return False
-    # ... existing spawn logic
-```
-
-**Acceptance:** Workers don't spawn when Gateway is unreachable.
-
-#### 3. **Better error propagation from OpenClaw**
-
-**Issue:** "Session not found" is too vague.
-
-**Fix:** Enhance `_check_session_status()` to distinguish:
-- Gateway unreachable (connection error)
-- Session never created (spawn returned error)
-- Session created but died immediately (transcript exists but empty)
-- Session still running (age <5 min)
-
-Return structured error:
-```python
+At 20:33 UTC, the worker finally tried to spawn a session:
+```json
 {
-    "completed": True,
-    "success": False,
-    "error": "session_not_created",  # or "gateway_unreachable", "session_died_early"
-    "error_details": "..."
+  "attempts": [
+    {"model": "anthropic/claude-sonnet-4-6", "ok": false, "error_type": "unknown"},
+    {"model": "anthropic/claude-opus-4-6",  "ok": false, "error_type": "unknown"}
+  ]
 }
 ```
 
-**Acceptance:** Error messages are actionable.
-
----
-
-### 🔵 Long-term Improvements
-
-#### 1. **Diagnostic task circuit breaker**
-- Track diagnostic task failure rate
-- If >50% of diagnostics fail within 1 hour → stop spawning, alert human
-- **Priority:** High (prevents future cascades)
-
-#### 2. **OpenClaw session monitoring**
-- Add `/api/orchestrator/sessions` endpoint showing active sessions
-- Include: spawn time, last heartbeat, transcript path, session state
-- Helps debug "Session not found" issues faster
-- **Priority:** Medium
-
-#### 3. **Separate diagnostic task queue**
-- Don't count diagnostic tasks against `MAX_WORKERS`
-- Prevents diagnostics from blocking real work
-- **Priority:** Low
-
----
-
-## Testing Gaps
-
-### Missing Tests
-
-1. **No tests for diagnostic depth limits**  
-   → Add: `test_diagnostic_cascade_stops_at_depth_2()`
-
-2. **No tests for worker spawn when Gateway is down**  
-   → Add: `test_spawn_fails_gracefully_when_gateway_offline()`
-
-3. **No tests for "Session not found" error handling**  
-   → Add: `test_worker_handles_missing_session_gracefully()`
-
-4. **No integration test for escalation loop**  
-   → Add: `test_escalation_does_not_infinite_loop()`
-
----
-
-## Security & Data Integrity
-
-### No Critical Issues Identified
-
-- ✅ No secrets leaked in error logs
-- ✅ No SQL injection vectors
-- ✅ Database locking is concurrency issue, not corruption
-- ⚠️ High retry volume could lead to cost issues if provider charges per failed request
-
----
-
-## Actionable Handoffs
-
-### 🔴 Critical: Stop the Loop (Human Intervention Required)
-
-**Action:** Manual DB update or API call to cancel diagnostic tasks
-
-```bash
-# Option 1: Direct SQL
-sqlite3 lobs.db "UPDATE tasks SET status='cancelled', work_state='cancelled', 
-                 updated_at=CURRENT_TIMESTAMP 
-                 WHERE id LIKE 'diag_%' AND status != 'completed';"
-
-# Option 2: Via API (if endpoint exists)
-curl -X PATCH http://localhost:8000/api/tasks/bulk-cancel \
-     -H "Authorization: Bearer $TOKEN" \
-     -d '{"id_prefix": "diag_"}'
+Both fallback models failed. Earlier (20:28), we also see:
+```
+model not allowed: openai-codex/gpt-4
+model not allowed: openai-codex/gpt-4-sub
 ```
 
-**Verify:** `SELECT COUNT(*) FROM tasks WHERE id LIKE 'diag_%' AND status='active';` returns 0
+The model allowlist rejected certain models, and the fallback chain exhausted without success. The worker's age-based fallback then returned `"Session not found"` — this is the error surfaced to the task system.
 
----
+### Failure 4 (Current, Active Bug): MissingGreenlet in workflow_executor.py
 
-### 🟡 Important: Fix Diagnostic Depth Limit (Programmer)
-
-**Title:** Add 2-level depth limit for diagnostic task spawning  
-**Files:** `app/orchestrator/escalation_enhanced.py`  
-**Context:** See "Short-term Fixes #1" above  
-**Acceptance:**
-- ✅ Diagnostic tasks fail no more than 2 levels deep
-- ✅ Alert created when depth limit hit
-- ✅ Unit test `test_diagnostic_depth_limit()` passes
-
----
-
-### 🟡 Important: Improve Error Messages (Programmer)
-
-**Title:** Distinguish types of "Session not found" errors  
-**Files:** `app/orchestrator/worker.py:_check_session_status()`  
-**Context:** See "Short-term Fixes #3" above  
-**Acceptance:**
-- ✅ Error field contains specific code: `session_not_created`, `gateway_unreachable`, `session_died_early`, `session_timeout`
-- ✅ Logs include actionable next steps
-- ✅ Unit test `test_session_error_types()` passes
-
----
-
-### 🔵 Nice-to-have: Add Gateway Health Check (Programmer)
-
-**Title:** Pre-flight health check before spawning workers  
-**Files:** `app/orchestrator/worker.py`  
-**Context:** See "Short-term Fixes #2" above  
-**Acceptance:**
-- ✅ Workers don't spawn when Gateway `/health` returns non-200
-- ✅ Error logged: `"Gateway health check failed, aborting spawn"`
-- ✅ Circuit breaker records infrastructure failure
-
----
-
-## Conclusion
-
-**This is a systems failure, not a code defect in the original task.**
-
-The Phase 1.3 implementation task is fine. The orchestrator's escalation system has a **design flaw**: diagnostic tasks are treated as normal tasks, which can themselves fail and spawn more diagnostics, creating an infinite loop.
-
-**Immediate priority:**
-1. Stop the diagnostic cascade (human action)
-2. Fix Gateway/Anthropic connectivity issue (if any)
-3. Add depth limit to diagnostic spawning (code fix)
-
-**Do NOT retry the original task** until infrastructure is verified healthy and depth limit is in place.
-
----
-
-## Work Summary
-
+As of today (08:25 ET), a new error is recurring:
 ```
-CRITICAL: Diagnostic cascade detected (4 levels deep). Root cause: OpenClaw sessions 
-failing immediately with "Session not found". Escalation system lacks depth limit. 
-Requires immediate manual intervention to cancel all diag_* tasks and fix 
-escalation logic. Original task (Phase 1.3) is innocent bystander.
+[WORKFLOW] Node spawn_architect execution error: greenlet_spawn has not been called
 ```
+
+At `workflow_executor.py:348`:
+```python
+ctx = dict(run.context or {})
+```
+
+This is a **lazy-load of an ORM attribute outside an async greenlet context**. SQLAlchemy async sessions can't do lazy loads synchronously. `run.context` is being accessed after the session's greenlet context has exited.
+
+---
+
+## Priority Breakdown
+
+### 🔴 Critical: MissingGreenlet bug (active, blocking all spawn_architect attempts)
+
+**File:** `app/orchestrator/workflow_executor.py` around line 348  
+**Fix:** Eagerly load `run.context` when the WorkerRun is fetched (using `selectinload` or `options(load_only(...))` in the DB query that populates `run`), or use `with db.no_autoflush:` / `await db.refresh(run)` before accessing it. The attribute must be loaded while still in an async context.
+
+### 🔴 Critical: SQLite lock in reflection cycle (systemic)
+
+**File:** `app/orchestrator/reflection_cycle.py` / `model_chooser.py`  
+**Fix:** The `agent_reflections` INSERT is being staged in the session before `model_chooser._load_runtime_config()` runs a SELECT, triggering autoflush. Options:
+1. Add `with db.no_autoflush:` block around the DB query in `_load_runtime_config()`
+2. Commit or expire the pending INSERT before the SELECT
+3. More broadly: review the reflection cycle's session lifecycle — it may need a separate session
+
+### 🟡 Important: "No matching workflow" for architect tasks
+
+**File:** `app/orchestrator/engine.py` / workflow registry  
+**Fix:** Confirm there's a workflow definition registered for `agent=architect`. The 6-task block suggests the workflow registry was empty or stale post-recovery. Add logging to show registered workflows at startup and after reload.
+
+### 🟡 Important: Model allowlist blocking fallback
+
+**Logs show:** `model not allowed: openai-codex/gpt-4` and `gpt-4-sub`  
+These appear to be stale model IDs the router is attempting. The model tier config may have leftover entries for deprecated model identifiers. The allowlist check is working correctly — but the model chooser is trying invalid models.
+
+---
+
+## What Should Happen With This Task
+
+**Recommendation: Modify + Retry**
+
+The task itself (Daily Ops Brief) is valid. The infrastructure was the failure point, not the task's design. However:
+
+1. **Do NOT retry with `architect` agent** — architect tasks are currently blocked by the MissingGreenlet bug in workflow_executor.py (see Failure 4). They'll keep failing until that's fixed.
+
+2. **Retry with `programmer` agent** — this is the right move (already in progress per the task's history). The handoffs in `docs/handoffs/daily-ops-brief-handoffs.json` are detailed and correct. A programmer can implement without architecture input since the design doc exists.
+
+3. **Fix the infrastructure first** — the MissingGreenlet bug needs a programmer fix or it will block the next attempt too.
+
+---
+
+## Handoffs
+
+### Handoff 1: MissingGreenlet in workflow_executor.py
+
+```json
+{
+  "to": "programmer",
+  "initiative": "infra-bugfix",
+  "title": "Fix MissingGreenlet: workflow_executor.py lazy-loads ORM attribute outside async context",
+  "context": "workflow_executor.py line 348: `ctx = dict(run.context or {})` triggers SQLAlchemy lazy load of WorkerRun.context outside the async greenlet. Logs show this error recurring every time spawn_architect is retried. Fix: eagerly load run.context when the WorkerRun is fetched from DB (e.g., add options(selectinload(WorkerRun.context)) or load_only). See logs/error.log timestamps 2026-02-25T02:04 and T12:46.",
+  "acceptance": "spawn_architect workflow node executes without MissingGreenlet error. WorkerRun.context is loaded eagerly in the query that fetches run.",
+  "files": ["app/orchestrator/workflow_executor.py"]
+}
+```
+
+### Handoff 2: SQLite DB Lock in Reflection Cycle
+
+```json
+{
+  "to": "programmer",
+  "initiative": "infra-bugfix",
+  "title": "Fix SQLite lock: agent_reflections autoflush conflicts during reflection cycle",
+  "context": "engine.py reflection cycle stages an INSERT into agent_reflections, then model_chooser._load_runtime_config() does a SELECT which triggers autoflush, causing sqlite3.OperationalError: database is locked. This crashed the control loop every ~90 seconds for 20+ minutes (see error.log 2026-02-24T19:49–20:10). Fix: wrap the SELECT in model_chooser._load_runtime_config() with `async with db.no_autoflush:` or commit/expire the pending INSERT before the SELECT runs.",
+  "acceptance": "No more 'database is locked' errors from the reflection cycle. Control loop runs stably for 30+ minutes under reflection load.",
+  "files": ["app/orchestrator/model_chooser.py", "app/orchestrator/reflection_cycle.py"]
+}
+```
+
+---
+
+## Additional Notes
+
+- The `brief_service.py` file already exists in `app/services/` — Task 1 of the daily-ops-brief handoffs is complete or partially complete. The programmer retrying this task should check what's already implemented before re-doing work.
+- The workflow_executor is seeing recurring `spawn_architect` retry attempts today (08:27–08:28 ET) — this is an active loop that will consume resources. The MissingGreenlet fix is urgent.
+- The "Session not found" error message in the task failure log is misleading — the actual root cause is infrastructure failure, not a missing session per se.

@@ -1,0 +1,181 @@
+[
+  {
+    "id": "H1",
+    "to": "programmer",
+    "initiative": "failure-evidence-bundle",
+    "title": "Schema: failure_bundles table + Task.failure_bundle_id migration",
+    "context": "Part of the First-Failure Evidence Bundle system. See design: docs/failure-evidence-bundle-design.md. The system captures a structured failure packet once per failed task to eliminate repeated diagnostic re-derivation. This handoff handles the data layer.",
+    "spec": {
+      "migration_file": "migrations/create_failure_bundle_table.py",
+      "follow_existing_pattern": "See migrations/task_improvements_foundation.py for the add_column_if_missing pattern and CREATE TABLE IF NOT EXISTS pattern.",
+      "migration_steps": [
+        "CREATE TABLE IF NOT EXISTS failure_bundles with columns: id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id), worker_run_id INTEGER REFERENCES worker_runs(id), created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, state_timeline JSON NOT NULL, triggering_exception TEXT, first_failing_command TEXT, cancellation_reason TEXT, error_type TEXT, escalation_tier_at_failure INTEGER, retry_count_at_failure INTEGER, model_used TEXT, duration_seconds REAL, exit_code INTEGER",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_failure_bundles_task_id ON failure_bundles(task_id)",
+        "CREATE INDEX IF NOT EXISTS ix_failure_bundles_task_id ON failure_bundles(task_id)",
+        "add_column_if_missing(cur, 'tasks', 'failure_bundle_id', 'failure_bundle_id TEXT REFERENCES failure_bundles(id)')"
+      ],
+      "sqlalchemy_model": {
+        "file": "app/models.py",
+        "class_name": "FailureBundle",
+        "tablename": "failure_bundles",
+        "columns": {
+          "id": "String, primary_key=True",
+          "task_id": "String, ForeignKey('tasks.id'), nullable=False, index=True, unique=True",
+          "worker_run_id": "Integer, ForeignKey('worker_runs.id'), nullable=True",
+          "created_at": "DateTime, default=func.now(), nullable=False",
+          "state_timeline": "JSON, nullable=False",
+          "triggering_exception": "Text, nullable=True",
+          "first_failing_command": "Text, nullable=True",
+          "cancellation_reason": "Text, nullable=True",
+          "error_type": "String, nullable=True",
+          "escalation_tier_at_failure": "Integer, nullable=True",
+          "retry_count_at_failure": "Integer, nullable=True",
+          "model_used": "String, nullable=True",
+          "duration_seconds": "Float, nullable=True",
+          "exit_code": "Integer, nullable=True"
+        },
+        "also_add_to_Task": "failure_bundle_id = Column(String, ForeignKey('failure_bundles.id'), nullable=True)"
+      }
+    },
+    "acceptance": "Migration script runs idempotently (safe to run twice). SQLAlchemy model exists in app/models.py. Task model has failure_bundle_id column. pytest passes.",
+    "files": ["docs/failure-evidence-bundle-design.md", "migrations/task_improvements_foundation.py"]
+  },
+  {
+    "id": "H2",
+    "to": "programmer",
+    "initiative": "failure-evidence-bundle",
+    "title": "Implement FailureBundleBuilder service",
+    "context": "Part of the First-Failure Evidence Bundle system. See design: docs/failure-evidence-bundle-design.md. H1 must be merged first (the DB table must exist). This handoff implements the core service that captures and persists failure bundles.",
+    "spec": {
+      "file": "app/services/failure_bundle.py",
+      "class": "FailureBundleBuilder",
+      "method": "async def capture(self, task_id: str, worker_run_id: int | None, error_log: str, exit_code: int, model: str | None, duration_seconds: float, session_key: str | None = None) -> str",
+      "return_value": "bundle ID (str, uuid4)",
+      "idempotency": "SELECT FROM failure_bundles WHERE task_id=? before inserting. If row exists, return existing id without modification. This is the enforcement mechanism for first-failure-only semantics.",
+      "state_timeline_build": [
+        "Load Task row (task_id)",
+        "Load all WorkerRun rows WHERE task_id=? ORDER BY started_at ASC",
+        "Build events list:",
+        "  - {ts: task.created_at, event: 'task_created', to_state: task.status}",
+        "  - {ts: task.started_at, event: 'task_started', from_state: 'not_started', to_state: 'in_progress'} if task.started_at",
+        "  - For each prior WorkerRun (succeeded=False, excluding current): {ts: run.started_at, event: 'prior_failure', worker_id: run.worker_id, model: run.model, error_type: run.timeout_reason or 'unknown', duration_seconds: (run.ended_at - run.started_at).total_seconds()}",
+        "  - {ts: current_run.started_at, event: 'worker_spawned', worker_id: current_run.worker_id, model: model}",
+        "  - {ts: now, event: 'worker_failed', from_state: 'in_progress', to_state: 'not_started', error_type: error_type, escalation_tier: task.escalation_tier}"
+      ],
+      "cancellation_reason_mapping": {
+        "session_timeout": "Worker timed out",
+        "timeout_*": "Worker timed out (exit code)",
+        "budget_exhausted": "Model budget/quota exceeded",
+        "quota_exceeded": "Model budget/quota exceeded",
+        "sessions_spawn_failed": "Failed to spawn agent session",
+        "sessions_spawn_not_accepted": "Agent session rejected by gateway",
+        "validity_contract": "Run validity contract violated",
+        "no_file_changes": "Worker produced no file changes",
+        "_default": "Worker exited with error: {error_type}"
+      },
+      "first_failing_command": "OPTIONAL, best-effort. If session_key is provided and a transcript file can be located (reuse the existing _find_transcript_file approach from worker.py), scan assistant messages for the first tool_use block with a non-zero exit_code in stderr/stdout. Return the command string or None. Wrap in try/except — must not raise.",
+      "triggering_exception": "error_log[:2000] — truncate to 2000 chars",
+      "error_type": "Call classify_error_type(error_log) from app/orchestrator/worker_errors.py (or worker.py — find it)",
+      "after_persist": "UPDATE tasks SET failure_bundle_id=? WHERE id=? via db.execute() or db.get(Task, task_id); commit",
+      "independent_session": "Use the same _get_independent_session pattern as _record_worker_run in worker.py to avoid session conflicts — pass db session from constructor or accept db as param"
+    },
+    "acceptance": [
+      "FailureBundleBuilder.capture() creates exactly one row per task_id (UNIQUE constraint enforces this)",
+      "Second call returns existing bundle ID, does not modify the row",
+      "state_timeline is a list of dicts with 'ts', 'event' keys, in chronological order",
+      "Task.failure_bundle_id is set after capture()",
+      "triggering_exception is truncated to 2000 chars",
+      "first_failing_command is None if transcript unavailable (does not raise)",
+      "Unit tests pass: see testing strategy in design doc"
+    ],
+    "files": ["docs/failure-evidence-bundle-design.md", "app/orchestrator/worker.py", "app/orchestrator/worker_errors.py"]
+  },
+  {
+    "id": "H3",
+    "to": "programmer",
+    "initiative": "failure-evidence-bundle",
+    "title": "Hook FailureBundleBuilder into worker._handle_completion() failure path",
+    "context": "Part of the First-Failure Evidence Bundle system. See design: docs/failure-evidence-bundle-design.md. H1 and H2 must be merged first. This handoff connects the capture service to the actual failure lifecycle in the orchestrator.",
+    "spec": {
+      "file": "app/orchestrator/worker.py",
+      "location": "In _handle_completion() — the `else` branch (failure path, around line 1086)",
+      "what_to_add": [
+        "After the task is marked failed and committed (after AgentTracker.mark_failed, CircuitBreaker.record_failure, etc.):",
+        "Instantiate FailureBundleBuilder(db=self.db)",
+        "Call await builder.capture(task_id=task_id, worker_run_id=<the run ID from _record_worker_run>, error_log=error_log, exit_code=exit_code, model=worker_info.model, duration_seconds=duration, session_key=worker_info.child_session_key)",
+        "Store returned bundle_id in a local var: failure_bundle_id",
+        "Pass failure_bundle_id through to escalation: include in the 'notes' context when escalation spawns retry/diagnostic tasks"
+      ],
+      "worker_run_id_availability": "The WorkerRun is recorded by _record_worker_run() which is called separately. Look at when/where it's called relative to _handle_completion() — you may need to return the run ID from _record_worker_run() or query for the most recent WorkerRun for this task after it's committed.",
+      "passing_to_escalation": "In the escalation call (circuit_breaker.record_failure or wherever retry tasks are spawned), include failure_bundle_id in a context dict or in the task notes field: 'failure_bundle_id: {failure_bundle_id}'. The specific pattern depends on how retry tasks are created in this codebase — check escalation.py and circuit_breaker.py.",
+      "graceful_degradation": "Wrap the capture() call in try/except. If it fails, log a warning and continue — bundle capture must not block the main failure handling path."
+    },
+    "acceptance": [
+      "After a worker fails, a FailureBundle row exists in the DB for that task",
+      "Task.failure_bundle_id is set",
+      "A second failure on the same task does NOT create a duplicate bundle",
+      "If FailureBundleBuilder raises, the failure handling continues normally (logged as warning)",
+      "Integration test in tests/test_worker.py passes"
+    ],
+    "files": ["docs/failure-evidence-bundle-design.md", "app/orchestrator/worker.py", "app/orchestrator/escalation.py", "app/orchestrator/circuit_breaker.py"]
+  },
+  {
+    "id": "H4",
+    "to": "programmer",
+    "initiative": "failure-evidence-bundle",
+    "title": "Inject failure bundle into diagnostic prompts",
+    "context": "Part of the First-Failure Evidence Bundle system. See design: docs/failure-evidence-bundle-design.md. H1-H3 must be merged first. This handoff makes diagnostic agents consume the bundle instead of re-deriving context.",
+    "spec": {
+      "file": "app/orchestrator/diagnostic_triggers.py",
+      "method": "_build_prompt() and _spawn_diagnostic()",
+      "what_to_add": [
+        "In _spawn_diagnostic(), after loading the context_packet, load the FailureBundle for the triggering task: bundle = await db.execute(select(FailureBundle).where(FailureBundle.task_id == trigger.get('task_id'))).scalar_one_or_none()",
+        "Pass bundle (or None) to _build_prompt()",
+        "In _build_prompt(), if bundle is not None, prepend this section to the prompt:"
+      ],
+      "bundle_prompt_section": "## Failure Evidence Bundle\n\nThis is a pre-computed failure artifact from the first failure of this task. Use it directly — do not re-derive this context.\n\n**Task ID:** {bundle.task_id}\n**Captured:** {bundle.created_at}\n**Error Type:** {bundle.error_type}\n**Cancellation Reason:** {bundle.cancellation_reason}\n**Model Used:** {bundle.model_used}\n**Duration:** {bundle.duration_seconds:.1f}s\n\n**State Timeline:**\n```json\n{json.dumps(bundle.state_timeline, indent=2)}\n```\n\n**Triggering Exception:**\n```\n{bundle.triggering_exception or 'Not captured'}\n```\n\n**First Failing Command:** {bundle.first_failing_command or 'Not captured'}\n\n---\n",
+      "graceful_degradation": "If no bundle exists for this task (bundle is None), omit the section. Prompt still works without it."
+    },
+    "acceptance": [
+      "When a diagnostic is spawned for a task with a failure bundle, the prompt contains '## Failure Evidence Bundle' section with populated fields",
+      "When no bundle exists, the prompt is unchanged from current behavior",
+      "state_timeline is rendered as formatted JSON in the prompt",
+      "Test: mock a FailureBundle row, call _build_prompt(), assert section present and well-formed"
+    ],
+    "files": ["docs/failure-evidence-bundle-design.md", "app/orchestrator/diagnostic_triggers.py"]
+  },
+  {
+    "id": "H5",
+    "to": "programmer",
+    "initiative": "failure-evidence-bundle",
+    "title": "Integrate failure bundle into FailureExplainerService",
+    "context": "Part of the First-Failure Evidence Bundle system. See design: docs/failure-evidence-bundle-design.md. This handoff is dependent on the FailureExplainerService being implemented (see failure-explainer-handoffs.json). H1-H3 must also be merged. If FailureExplainerService does not yet exist, implement this as a stub that will be wired in when the service is built.",
+    "spec": {
+      "file": "app/services/failure_explainer.py",
+      "where": "In the main evaluation method that builds FailureExplanation",
+      "what_to_add": [
+        "Load FailureBundle for task_id: bundle = await db.execute(select(FailureBundle).where(FailureBundle.task_id == task_id)).scalar_one_or_none()",
+        "If bundle exists, include in supporting_data:",
+        "  supporting_data['failure_bundle'] = {",
+        "    'id': bundle.id,",
+        "    'state_timeline': bundle.state_timeline,",
+        "    'triggering_exception': bundle.triggering_exception,",
+        "    'first_failing_command': bundle.first_failing_command,",
+        "    'cancellation_reason': bundle.cancellation_reason,",
+        "    'error_type': bundle.error_type,",
+        "    'escalation_tier_at_failure': bundle.escalation_tier_at_failure,",
+        "    'retry_count_at_failure': bundle.retry_count_at_failure",
+        "  }",
+        "Use bundle.error_type to fast-path certain rule checks — if error_type is already known, you can skip DB queries for those rules and set the failure code directly"
+      ],
+      "fast_path_examples": "If bundle.error_type == 'session_timeout': the timeout_exceeded rule fires without needing to check WorkerRun.timeout_reason separately. If bundle.retry_count_at_failure >= 3: the repeated_failure rule fires without counting WorkerRun rows."
+    },
+    "acceptance": [
+      "GET /api/intelligence/tasks/{task_id}/failure-explanation includes 'failure_bundle' in supporting_data when a bundle exists",
+      "failure_bundle.state_timeline is present and is a list",
+      "When no bundle exists, supporting_data['failure_bundle'] is absent or null — no error",
+      "At least one rule check uses bundle data for fast-path (documented in code comment)"
+    ],
+    "files": ["docs/failure-evidence-bundle-design.md", "docs/failure-explainer-design.md", "app/services/failure_explainer.py"]
+  }
+]
