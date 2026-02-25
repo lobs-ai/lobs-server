@@ -172,8 +172,6 @@ class TestAPIContract:
         for message in messages:
             validate_chat_message_schema(message)
     
-            pytest.fail(f"Invalid datetime format: {e}")
-    
     # ============================================================================
     # MEMORY
     # ============================================================================
