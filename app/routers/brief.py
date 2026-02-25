@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.services.brief_service import BriefFormatter, BriefService
+from app.services.chat_manager import manager
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,6 @@ async def get_brief_today(
         session_key = os.getenv("BRIEF_CHAT_SESSION_KEY", "main")
         try:
             from app.routers.chat import store_message
-            from app.services.chat_manager import manager
 
             msg = await store_message(
                 session_key=session_key,

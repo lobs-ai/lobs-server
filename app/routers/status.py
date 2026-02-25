@@ -113,6 +113,7 @@ async def get_overview(
         total_terminal=task_counts.total_terminal,
     )
     now = datetime.now(timezone.utc)  # still needed below for memories timestamp
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
     # Memories health
     total_memories_result = await db.execute(

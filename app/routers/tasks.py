@@ -12,9 +12,10 @@ from pydantic import BaseModel
 
 from app.database import get_db
 from app.models import Task as TaskModel, Project as ProjectModel, ControlLoopEvent
-from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate
+from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWorkStateUpdate, TaskReviewStateUpdate, TaskStatusCounts
 from app.config import settings
 from app.services.github_sync import GitHubSyncService
+from app.services.task_status import get_task_status_counts
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -53,6 +54,35 @@ async def list_tasks(
     result = await db.execute(query)
     tasks = result.scalars().all()
     return [Task.model_validate(t) for t in tasks]
+
+
+@router.get("/counts", response_model=TaskStatusCounts)
+async def get_task_counts(
+    project_id: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+) -> TaskStatusCounts:
+    """Return canonical task status counts.
+
+    This is the **single source of truth** for task status counts across all
+    Mission Control UI surfaces (Home, Overview, Task list, Detail views).
+    All other count-providing endpoints (e.g. ``GET /api/status/overview``)
+    MUST derive their task numbers from this service call.
+
+    Counts returned:
+    - ``inbox`` — tasks awaiting triage / assignment
+    - ``active`` — tasks actively being worked
+    - ``waiting`` — tasks waiting on external input (status=``waiting_on``)
+    - ``completed`` — tasks that are done
+    - ``cancelled`` — tasks that were cancelled
+    - ``rejected`` — tasks that were rejected
+    - ``archived`` — tasks that were archived
+    - ``blocked`` — tasks with ``blocked_by`` set and not in a terminal state
+    - ``completed_today`` — completed tasks with ``finished_at`` >= today 00:00 UTC
+    - ``total_open`` — sum of inbox + active + waiting
+    - ``total_terminal`` — sum of completed + cancelled + rejected + archived
+    """
+    counts = await get_task_status_counts(db, project_id=project_id)
+    return TaskStatusCounts(**counts.as_dict())
 
 
 @router.post("")
