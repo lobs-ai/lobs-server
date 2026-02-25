@@ -1,1 +1,1 @@
-Already complete (auto-retry): schemas/value_proof_event.json (JSON Schema draft-07, 7.9KB) and docs/product/value-proof-dashboard.md (rendering spec + programmer handoff, 9.9KB) both exist from original run on Feb 25.
+Delivered: schemas/value_proof_event.json (JSON Schema draft-07, 252 lines) + docs/product/value-proof-dashboard.md (rendering spec, copy blocks, metric defs, programmer handoff, 237 lines). Both complete and ready for programmer implementation.
