@@ -3,11 +3,21 @@
 Centralizes model selection using:
 - task difficulty/criticality (via model_router policy)
 - routing policy chain (subscription/API/provider preferences)
-- provider budget caps
+- per-provider monthly budget caps (usage.budgets.per_provider_monthly_usd)
+- per-lane daily spend caps with auto-downgrade (budget_guard.lane_policy):
+    critical / standard / background lanes — enforced by BudgetGuard
+- global daily hard cap (usage.budgets.daily_hard_cap_usd):
+    last-resort guardrail restricting to micro/small when total daily spend exceeded
 - provider health tracking (cooldowns, error rates, availability)
 - recent provider error rates
 - model pricing (when available)
 - local model availability (Ollama health check with TTL cache)
+
+Budget enforcement order in choose():
+  1. Per-provider monthly caps (_apply_budget_guards)
+  2. Per-lane daily caps (_apply_lane_budget_guard via BudgetGuard)
+  3. Global daily hard cap (_apply_global_daily_cap via apply_daily_hard_cap)
+  4. Health + cost ranking (_rank_by_health_and_cost)
 """
 
 from __future__ import annotations
@@ -145,6 +155,11 @@ async def discover_ollama_models() -> dict[str, list[str]]:
 
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
 from app.orchestrator.budget_guard import BudgetGuard
+from app.orchestrator.budget_guardrails import (
+    apply_daily_hard_cap,
+    get_today_total_spend,
+    append_override_log,
+)
 from app.orchestrator.model_router import (
     MODEL_ROUTER_AVAILABLE_MODELS_KEY,
     MODEL_ROUTER_TIER_MICRO_KEY,
@@ -232,6 +247,16 @@ class ModelChooser:
         )
         candidates = lane_guard_decision["effective_candidates"]
 
+        # --- Global daily hard cap (last-resort guardrail across all lanes) ---
+        hard_cap_decision = await self._apply_global_daily_cap(
+            candidates=candidates,
+            budgets=cfg["budgets"],
+            tier_map=tier_map,
+            task=task,
+            agent_type=agent_type,
+        )
+        candidates = hard_cap_decision["effective_candidates"]
+
         candidates = await self._rank_by_health_and_cost(
             candidates=candidates,
             routing_policy=cfg["routing_policy"],
@@ -265,6 +290,7 @@ class ModelChooser:
                 "routing_policy_present": bool(cfg["routing_policy"]),
                 "budgets_present": bool(cfg["budgets"]),
                 "lane_guard": lane_guard_decision,
+                "hard_cap_guard": hard_cap_decision,
             },
         )
 
@@ -522,6 +548,91 @@ class ModelChooser:
                 "reason": f"guard_error: {exc}",
                 "cap_usd": None,
                 "spent_usd": 0.0,
+            }
+
+    async def _apply_global_daily_cap(
+        self,
+        *,
+        candidates: list[str],
+        budgets: dict[str, Any],
+        tier_map: dict[str, list[str]],
+        task: dict[str, Any],
+        agent_type: str,
+    ) -> dict[str, Any]:
+        """Enforce the global daily hard cap across all lanes.
+
+        This is a last-resort guardrail: when the total daily spend across *all*
+        lanes reaches ``daily_hard_cap_usd`` (from usage.budgets), all candidates
+        are restricted to micro/small tier models.  Per-lane caps (handled by
+        ``_apply_lane_budget_guard``) run first; this cap runs second.
+
+        Returns a dict with ``effective_candidates`` and audit metadata.
+        Never raises — failures fall back to original candidates.
+        """
+        try:
+            daily_hard_cap = float(budgets.get("daily_hard_cap_usd") or 0.0)
+            if daily_hard_cap <= 0.0:
+                # Hard cap not configured — pass through
+                return {
+                    "effective_candidates": candidates,
+                    "hard_cap_usd": None,
+                    "daily_spend_usd": 0.0,
+                    "hard_cap_exceeded": False,
+                    "downgraded": False,
+                    "reason": "no_hard_cap",
+                }
+
+            daily_spend = await get_today_total_spend(self.db)
+            filtered, reason = apply_daily_hard_cap(
+                candidates,
+                daily_spend=daily_spend,
+                daily_hard_cap=daily_hard_cap,
+                tier_map=tier_map,
+            )
+            downgraded = reason is not None and filtered != candidates
+
+            if downgraded:
+                logger.warning(
+                    "[MODEL_CHOOSER] Global daily hard cap exceeded: "
+                    "spend=%.4f cap=%.2f task=%s agent=%s",
+                    daily_spend,
+                    daily_hard_cap,
+                    task.get("id"),
+                    agent_type,
+                )
+                # Append to guardrails override log for audit trail
+                try:
+                    await append_override_log(
+                        self.db,
+                        lane=None,  # global cap, not lane-specific
+                        reason=reason or "daily_hard_cap_exceeded",
+                        original_model=candidates[0] if candidates else None,
+                        downgraded_model=filtered[0] if filtered else None,
+                        task_id=task.get("id"),
+                        agent_type=agent_type,
+                    )
+                except Exception as log_exc:
+                    logger.debug(
+                        "[MODEL_CHOOSER] Failed to append hard-cap override log: %s", log_exc
+                    )
+
+            return {
+                "effective_candidates": filtered,
+                "hard_cap_usd": daily_hard_cap,
+                "daily_spend_usd": round(daily_spend, 4),
+                "hard_cap_exceeded": daily_spend >= daily_hard_cap,
+                "downgraded": downgraded,
+                "reason": reason or "within_hard_cap",
+            }
+        except Exception as exc:
+            logger.warning("[MODEL_CHOOSER] Global daily hard cap check failed (non-fatal): %s", exc)
+            return {
+                "effective_candidates": candidates,
+                "hard_cap_usd": None,
+                "daily_spend_usd": 0.0,
+                "hard_cap_exceeded": False,
+                "downgraded": False,
+                "reason": f"hard_cap_guard_error: {exc}",
             }
 
     async def _latest_unit_price(
