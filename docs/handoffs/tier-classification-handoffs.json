@@ -1,0 +1,34 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "tier-classification-at-creation",
+    "title": "Create app/services/tier_classifier.py — tier classification service",
+    "context": "Tasks need model_tier set before the first workflow node runs. Currently it is never set at creation, so spawn_agent gets no tier and falls back to defaults. Design doc: docs/tier-classification-session-cleanup-design.md. Use llm_direct.py (already exists at app/orchestrator/llm_direct.py) to call local qwen for classification — it handles LM Studio unavailability gracefully.",
+    "spec": {
+      "file": "app/services/tier_classifier.py",
+      "exports": ["classify_task_tier"],
+      "logic": "See design doc. Three-step: (1) caller override passthrough, (2) project minimum floor, (3) LLM via llm_direct, (4) default standard.",
+      "project_minimums": ["lobs-server", "lobs-mission-control", "lobs-mobile"],
+      "valid_tiers": ["small", "standard", "strong"],
+      "llm_prompt": "Classify model tier. Title: {title}, Project: {project_id}, Agent: {agent}, Notes: {notes[:400]}. small=boilerplate/docs/scripts/simple fixes, standard=production features/real bugs/integrations, strong=architecture/security/system design. Respond JSON: {\"tier\": \"small|standard|strong\", \"reason\": \"one sentence\"}",
+      "error_handling": "Never raise. Any LLM failure or invalid response → return None from inner function → caller defaults to standard",
+      "uses_llm_direct": true
+    },
+    "acceptance": "classify_task_tier never raises; LM Studio unavailable → 'standard'; lobs-server project + LLM returns 'small' → 'standard'; caller passes 'strong' → 'strong'; invalid LLM response → 'standard'. Unit tests in tests/test_tier_classifier.py.",
+    "files": ["docs/tier-classification-session-cleanup-design.md", "app/orchestrator/llm_direct.py"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "tier-classification-at-creation",
+    "title": "Wire tier classification into app/routers/tasks.py create_task()",
+    "context": "After the tier_classifier service exists (previous handoff), wire it into task creation. Design doc: docs/tier-classification-session-cleanup-design.md.",
+    "spec": {
+      "file": "app/routers/tasks.py",
+      "location": "In create_task(), after db.add(db_task) and before db.flush()",
+      "code": "if not db_task.model_tier:\n    try:\n        from app.services.tier_classifier import classify_task_tier\n        db_task.model_tier = await classify_task_tier(db, payload)\n    except Exception as exc:\n        logger.warning('[create_task] Tier classification failed: %s', exc)\n        db_task.model_tier = 'standard'",
+      "schema_check": "Verify TaskCreate in app/schemas.py has model_tier: Optional[str] = None. If missing, add it."
+    },
+    "acceptance": "POST /api/tasks with no model_tier returns task with non-null model_tier. POST with explicit model_tier='strong' preserves it. lobs-server project tasks get at least 'standard'. Integration test added to tests/test_tasks.py.",
+    "files": ["docs/tier-classification-session-cleanup-design.md", "app/services/tier_classifier.py", "app/routers/tasks.py", "app/schemas.py"]
+  }
+]
