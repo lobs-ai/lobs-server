@@ -1517,7 +1517,7 @@ async def _pcall_learning(func_name: str, db, worker_manager, context, **kw):
 # ══════════════════════════════════════════════════════════════════════
 
 @register_node("classify_model_tier")
-async def _node_classify_model_tier(node_id: str, config: dict, context: dict, db) -> NodeResult:
+async def _node_classify_model_tier(config: dict, context: dict, run, *, db, worker_manager=None) -> NodeResult:
     """Classify a task's model tier using deterministic rules + LLM fallback.
 
     Sets task.model_tier for downstream spawn_agent nodes to use.
