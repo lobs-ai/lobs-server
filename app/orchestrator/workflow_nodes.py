@@ -345,8 +345,15 @@ async def _check_spawn_agent(node_def, run, *, db, worker_manager):
         if not worker_manager:
             return NodeResult(status="failed", error="No worker_manager available")
 
+        # Ensure model_tier from classify_tier is propagated
+        task_for_retry = dict(task_ctx)
+        if not task_for_retry.get("model_tier"):
+            classify_output = (run.context or {}).get("classify_tier", {})
+            if isinstance(classify_output, dict) and classify_output.get("classified_tier"):
+                task_for_retry["model_tier"] = classify_output["classified_tier"]
+
         spawned = await worker_manager.spawn_worker(
-            task=task_ctx,
+            task=task_for_retry,
             project_id=project_id,
             agent_type=node_def.get("config", {}).get("agent_type", "programmer"),
         )
