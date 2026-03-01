@@ -58,8 +58,9 @@ _LMSTUDIO_PARAM_HINTS: dict[str, float] = {
     "0.5b": 0.5, "1b": 1, "1.5b": 1.5, "3b": 3, "4b": 4, "7b": 7, "8b": 8,
     "13b": 13, "14b": 14, "22b": 22, "30b": 30, "32b": 32, "35b": 35,
     "70b": 70, "72b": 72, "110b": 110, "405b": 405,
-    # MoE active param hints (classify by active params, not total)
-    "a3b": 3, "a14b": 14, "a22b": 22, "a35b": 35,
+    # MoE active param hints — classify by effective quality, not raw active count.
+    # e.g. Qwen 35B-A3B performs like a ~20B dense model, not a 3B.
+    "a3b": 20, "a14b": 30, "a22b": 35, "a35b": 40,
 }
 
 # Parameter size → tier mapping.
