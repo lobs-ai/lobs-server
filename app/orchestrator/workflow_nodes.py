@@ -1645,18 +1645,25 @@ async def _node_classify_model_tier(node_id: str, config: dict, context: dict, d
         model_id = list(lm_models.values())[0][0]
         raw_model = model_id.replace("lmstudio/", "", 1)
 
-        prompt = f"""Classify this task to determine what AI model tier should execute it.
+        prompt = f"""Classify the MODEL TIER for this task based on its complexity and stakes.
 
 Task: {task.get('title', 'Unknown')}
 Agent: {agent_type}
 Project: {project_id}
 Description: {(task.get('notes') or '')[:500]}
 
-Tiers:
-- small: Simple coding, boilerplate, scaffolding, experimental projects, drafts
-- medium: Moderate complexity, non-critical features, standard implementation
-- standard: Production code, important features, complex implementation
-- strong: Architecture decisions, critical systems, complex reasoning
+TIER GUIDELINES:
+- small: Scaffolding, boilerplate, simple CRUD, config files, basic UI views, draft docs, data entry scripts, simple bug fixes with obvious solutions
+- medium: Multi-file features, API endpoints with validation, moderate refactors, research summaries, non-critical integrations
+- standard: Production features, complex business logic, multi-service changes, security-sensitive code, database migrations, important bug fixes
+- strong: Architecture decisions, system design, performance-critical paths, security audits, complex debugging
+
+KEY FACTORS:
+- Experimental/trial/prototype projects → lean toward small unless task is complex
+- Production systems → lean toward standard unless task is trivial
+- Number of files/systems touched → more = higher tier
+- Reversibility → easy to undo = lower tier, hard to undo = higher tier
+- Domain knowledge needed → more = higher tier
 
 Respond with ONLY the tier name: small, medium, standard, or strong"""
 
