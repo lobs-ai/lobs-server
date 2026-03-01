@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models import (
     WorkflowDefinition,
@@ -348,6 +349,7 @@ class WorkflowExecutor:
                 ctx = dict(run.context or {})
                 ctx[node_id] = result.output
                 run.context = ctx
+                flag_modified(run, "context")
             if result.error:
                 ns["error"] = result.error
                 ns["error_type"] = result.error_type
@@ -385,6 +387,7 @@ class WorkflowExecutor:
                 ctx = dict(run.context or {})
                 ctx[node_id] = result.output
                 run.context = ctx
+                flag_modified(run, "context")
             if result.error:
                 ns["error"] = result.error
             ns["finished_at"] = datetime.now(timezone.utc).isoformat()
