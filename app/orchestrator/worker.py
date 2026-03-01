@@ -373,6 +373,27 @@ class WorkerManager:
             self.active_workers[worker_id] = worker_info
             self.project_locks[project_id] = task_id
 
+            # Persist session key immediately so restart recovery can find it
+            # (crash-safe: written before any work starts)
+            try:
+                async with self._get_independent_session() as _persist_db:
+                    _run_stub = WorkerRun(
+                        worker_id=worker_id,
+                        task_id=task_id,
+                        started_at=datetime.fromtimestamp(start_time, tz=timezone.utc),
+                        source="orchestrator-gateway",
+                        model=chosen_model,
+                        child_session_key=child_session_key,
+                        agent_type=agent_type,
+                        tasks_completed=0,
+                        succeeded=None,
+                    )
+                    _persist_db.add(_run_stub)
+                    await _persist_db.commit()
+                    logger.debug("[WORKER] Persisted session key %s for task %s", child_session_key[:16], task_id_short)
+            except Exception as _e:
+                logger.warning("[WORKER] Failed to persist session key (non-fatal): %s", _e)
+
             # Update DB: worker status
             await self._update_worker_status(
                 active=True,
@@ -564,6 +585,29 @@ class WorkerManager:
                 exc_info=True,
             )
             return None, error_msg, error_type
+
+    async def check_session_alive(self, session_key: str) -> bool:
+        """Check if an OpenClaw session is still alive via sessions_history."""
+        try:
+            async with aiohttp.ClientSession() as http:
+                resp = await http.post(
+                    f"{GATEWAY_URL}/tools/invoke",
+                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                    json={
+                        "tool": "sessions_history",
+                        "sessionKey": f"{GATEWAY_SESSION_KEY}-check-{uuid.uuid4().hex[:6]}",
+                        "args": {"sessionKey": session_key, "limit": 1},
+                    },
+                    timeout=aiohttp.ClientTimeout(total=10),
+                )
+                data = await resp.json()
+                if not data.get("ok"):
+                    return False
+                result = data.get("result", {})
+                return isinstance(result, (list, dict))
+        except Exception as e:
+            logger.debug("[WORKER] check_session_alive failed for %s: %s", session_key[:20], e)
+            return False
 
     def register_external_worker(
         self,

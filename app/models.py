@@ -252,6 +252,8 @@ class WorkerRun(Base):
     source = Column(String)
     summary = Column(String)  # Work summary from .work-summary file
     validity_result = Column(JSON)  # RunValidityContract check result (v1)
+    child_session_key = Column(String, nullable=True, index=True)  # OpenClaw session key for restart recovery
+    agent_type = Column(String, nullable=True)  # agent type for restart recovery
 
 
 class OrchestratorSetting(Base):

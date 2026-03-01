@@ -263,6 +263,71 @@ class OrchestratorEngine:
                     await db.commit()
                     logger.info("[ENGINE] Startup recovery: cleared stale worker_status")
 
+                # 7. Re-attach or cancel persisted worker sessions
+                # For each in-progress task with a persisted session key, check if the
+                # OpenClaw session is still alive. If yes: re-register with WorkerManager.
+                # If no: cancel the stuck workflow run so a fresh spawn happens.
+                try:
+                    from app.models import WorkerRun
+                    cutoff = datetime.now(timezone.utc) - timedelta(hours=8)
+                    recent_runs_result = await db.execute(
+                        select(WorkerRun).where(
+                            WorkerRun.child_session_key.isnot(None),
+                            WorkerRun.succeeded.is_(None),  # still "in flight" (stub)
+                            WorkerRun.started_at >= cutoff,
+                        )
+                    )
+                    recent_runs = recent_runs_result.scalars().all()
+                    logger.info("[ENGINE] Startup recovery: checking %d persisted worker sessions", len(recent_runs))
+
+                    for run in recent_runs:
+                        task = await db.get(Task, run.task_id) if run.task_id else None
+                        if not task or task.status == "completed":
+                            continue  # task done, ignore
+                        
+                        # Check if OpenClaw session is still alive
+                        session_alive = await self._worker_manager.check_session_alive(run.child_session_key)
+                        
+                        if session_alive:
+                            # Re-register so we don't spawn a duplicate
+                            self._worker_manager.register_external_worker(
+                                {
+                                    "runId": run.worker_id,
+                                    "childSessionKey": run.child_session_key,
+                                },
+                                agent_type=run.agent_type or "programmer",
+                                model=run.model or "",
+                                label=f"task-{run.task_id}",
+                            )
+                            logger.info(
+                                "[ENGINE] Startup recovery: re-attached live session %s for task %s",
+                                run.child_session_key[:20], run.task_id,
+                            )
+                        else:
+                            # Session dead — cancel any stuck workflow run at a spawn node
+                            stuck_runs_result = await db.execute(
+                                select(WorkflowRun).where(
+                                    WorkflowRun.task_id == run.task_id,
+                                    WorkflowRun.status == "running",
+                                    WorkflowRun.current_node.like("spawn_%"),
+                                )
+                            )
+                            stuck_runs = stuck_runs_result.scalars().all()
+                            for wr in stuck_runs:
+                                wr.status = "cancelled"
+                                wr.error = "Startup recovery: session dead after restart, re-queuing task"
+                            if stuck_runs:
+                                # Reset task so it re-queues
+                                task.work_state = "not_started"
+                                task.status = "active"
+                                await db.commit()
+                                logger.info(
+                                    "[ENGINE] Startup recovery: session dead for task %s, cancelled %d stuck runs, re-queuing",
+                                    run.task_id, len(stuck_runs),
+                                )
+                except Exception as _e:
+                    logger.warning("[ENGINE] Startup recovery: session reattach failed (non-fatal): %s", _e)
+
         except Exception as e:
             logger.error("[ENGINE] Startup recovery failed: %s", e, exc_info=True)
 
