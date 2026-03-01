@@ -46,6 +46,22 @@ _ollama_cache_time: float = 0.0
 _OLLAMA_CACHE_TTL = 60.0
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
+# --- LM Studio auto-detection cache ---
+_lmstudio_models_cache: dict[str, list[str]] | None = None
+_lmstudio_cache_time: float = 0.0
+_LMSTUDIO_CACHE_TTL = 60.0
+_LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
+
+# Name-based parameter size hints for LM Studio models (no metadata from API).
+# Map substring → estimated billions of parameters.
+_LMSTUDIO_PARAM_HINTS: dict[str, float] = {
+    "0.5b": 0.5, "1b": 1, "1.5b": 1.5, "3b": 3, "4b": 4, "7b": 7, "8b": 8,
+    "13b": 13, "14b": 14, "22b": 22, "30b": 30, "32b": 32, "35b": 35,
+    "70b": 70, "72b": 72, "110b": 110, "405b": 405,
+    # MoE active param hints (classify by active params, not total)
+    "a3b": 3, "a14b": 14, "a22b": 22, "a35b": 35,
+}
+
 # Parameter size → tier mapping.
 # Models are inserted at the FRONT of their tier (preferred because free).
 _PARAM_TIER_THRESHOLDS: list[tuple[float, str]] = [
@@ -153,6 +169,80 @@ async def discover_ollama_models() -> dict[str, list[str]]:
     _ollama_cache_time = now
     return result
 
+
+def _estimate_lmstudio_param_billions(model_id: str) -> float | None:
+    """Estimate parameter count from model ID string."""
+    lower = model_id.lower().replace("-", "").replace("_", "")
+    # Check specific patterns (longer matches first to avoid e.g. '3b' matching in '35b')
+    for hint, billions in sorted(_LMSTUDIO_PARAM_HINTS.items(), key=lambda x: -len(x[0])):
+        if hint in lower:
+            return billions
+    return None
+
+
+async def discover_lmstudio_models() -> dict[str, list[str]]:
+    """Discover LM Studio models and classify into tiers.
+
+    Returns dict like {"small": ["lmstudio/qwen3.5-35b-a3b"]}.
+    Returns empty dict when LM Studio is unreachable.
+    Cached for 60s.
+    """
+    global _lmstudio_models_cache, _lmstudio_cache_time
+
+    now = time.monotonic()
+    if _lmstudio_models_cache is not None and (now - _lmstudio_cache_time) < _LMSTUDIO_CACHE_TTL:
+        return _lmstudio_models_cache
+
+    result: dict[str, list[str]] = {}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{_LMSTUDIO_BASE_URL}/v1/models",
+                timeout=aiohttp.ClientTimeout(total=3),
+            ) as resp:
+                if resp.status != 200:
+                    _lmstudio_models_cache = {}
+                    _lmstudio_cache_time = now
+                    return {}
+
+                data = await resp.json()
+    except Exception:
+        logger.debug("[MODEL_CHOOSER] LM Studio not reachable — no local models")
+        _lmstudio_models_cache = {}
+        _lmstudio_cache_time = now
+        return {}
+
+    models = data.get("data", [])
+    for m in models:
+        model_id = m.get("id", "")
+        if not model_id:
+            continue
+        # Skip embedding models
+        if "embed" in model_id.lower():
+            continue
+
+        billions = _estimate_lmstudio_param_billions(model_id)
+        if billions is not None:
+            for threshold, tier in _PARAM_TIER_THRESHOLDS:
+                if billions <= threshold:
+                    break
+        else:
+            tier = "small"  # Conservative default
+
+        lmstudio_model_id = f"lmstudio/{model_id}"
+        result.setdefault(tier, []).append(lmstudio_model_id)
+
+    if result:
+        logger.info(
+            "[MODEL_CHOOSER] Discovered LM Studio models: %s",
+            {k: v for k, v in result.items()},
+        )
+
+    _lmstudio_models_cache = result
+    _lmstudio_cache_time = now
+    return result
+
 from app.models import ModelPricing, ModelUsageEvent, OrchestratorSetting
 from app.orchestrator.budget_guard import BudgetGuard
 from app.orchestrator.budget_guardrails import (
@@ -214,12 +304,13 @@ class ModelChooser:
         
         # Auto-discover Ollama models and inject into tiers.
         # Local models are prepended (preferred because free/fast).
-        ollama_tiers = await discover_ollama_models()
-        if ollama_tiers:
-            for tier_name, ollama_models in ollama_tiers.items():
-                existing = list(tiers.get(tier_name) or [])
-                # Prepend Ollama models (free → preferred)
-                tiers[tier_name] = ollama_models + [m for m in existing if m not in ollama_models]
+        # Auto-discover local models (Ollama + LM Studio) and prepend (free → preferred)
+        for discover_fn in (discover_ollama_models, discover_lmstudio_models):
+            local_tiers = await discover_fn()
+            if local_tiers:
+                for tier_name, local_models in local_tiers.items():
+                    existing = list(tiers.get(tier_name) or [])
+                    tiers[tier_name] = local_models + [m for m in existing if m not in local_models]
         
         decision = decide_models(
             agent_type,
