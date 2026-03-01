@@ -1119,19 +1119,35 @@ class WorkerManager:
             if not commit_sha and not modified_files and not is_internal_task:
                 # Check if it's a non-code task (writer/researcher docs go to shared memory)
                 if agent_type not in ("writer", "researcher", "reviewer", "architect"):
-                    logger.warning(
-                        "[WORKER] Worker %s completed but produced no file changes "
-                        "(task=%s). Marking as failed.",
-                        worker_id, task_id_short,
-                    )
-                    # Revert task to todo so it can be retried
-                    if db_task_for_title:
-                        db_task_for_title.work_state = "not_started"
-                        db_task_for_title.status = "active"
-                        db_task_for_title.finished_at = None
-                        db_task_for_title.updated_at = datetime.now(timezone.utc)
-                        db_task_for_title.failure_reason = "No file changes produced"
-                        await self.db.commit()
+                    retry_count = getattr(db_task_for_title, 'retry_count', 0) or 0
+                    max_retries = 2
+                    if retry_count >= max_retries:
+                        logger.warning(
+                            "[WORKER] Worker %s completed but produced no file changes "
+                            "(task=%s, retry_count=%d). Max retries reached — marking blocked.",
+                            worker_id, task_id_short, retry_count,
+                        )
+                        if db_task_for_title:
+                            db_task_for_title.work_state = "blocked"
+                            db_task_for_title.status = "active"
+                            db_task_for_title.finished_at = None
+                            db_task_for_title.updated_at = datetime.now(timezone.utc)
+                            db_task_for_title.failure_reason = f"No file changes after {retry_count} retries"
+                            await self.db.commit()
+                    else:
+                        logger.warning(
+                            "[WORKER] Worker %s completed but produced no file changes "
+                            "(task=%s, retry=%d/%d). Queuing retry.",
+                            worker_id, task_id_short, retry_count + 1, max_retries,
+                        )
+                        if db_task_for_title:
+                            db_task_for_title.work_state = "not_started"
+                            db_task_for_title.status = "active"
+                            db_task_for_title.finished_at = None
+                            db_task_for_title.updated_at = datetime.now(timezone.utc)
+                            db_task_for_title.failure_reason = "No file changes produced"
+                            db_task_for_title.retry_count = retry_count + 1
+                            await self.db.commit()
                     succeeded = False
 
             # ── Run Validity Contract check ───────────────────────────────────────
