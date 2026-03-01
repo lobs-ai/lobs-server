@@ -49,7 +49,7 @@ COOLDOWN_POLICIES: dict[ErrorType, tuple[float, float, float]] = {
     "rate_limit": (60.0, 900.0, 2.0),  # 1min -> 15min
     "auth_error": (86400.0, 86400.0, 1.0),  # 24h (manual reset required)
     "quota_exceeded": (86400.0, 86400.0, 1.0),  # 24h
-    "timeout": (30.0, 300.0, 1.5),  # 30s -> 5min
+    "timeout": (600.0, 3600.0, 1.5),  # 10min -> 1hr (ensures retries use cloud)
     "server_error": (120.0, 1800.0, 2.0),  # 2min -> 30min
     "unknown": (60.0, 600.0, 1.5),  # 1min -> 10min
 }

@@ -239,6 +239,25 @@ class WorkerMonitor:
                 from app.orchestrator.worker_models import classify_error_type
                 provider = infer_provider(worker_info.model)
                 error_type = classify_error_type(error_log)
+                # Local model sessions killed by runTimeoutSeconds produce
+                # "no assistant response" / "session stale" errors — these
+                # look like "unknown" to classify_error_type but are actually
+                # timeouts.  Detect this case explicitly so the cooldown fires.
+                _local_prefixes = ("lmstudio/", "ollama/")
+                _is_local = worker_info.model.startswith(_local_prefixes)
+                _timeout_stale_msgs = (
+                    "no assistant response",
+                    "session stale",
+                    "session not found",
+                    "deleted transcript",
+                )
+                _looks_like_timeout = any(m in error_log.lower() for m in _timeout_stale_msgs)
+                if _is_local and _looks_like_timeout and error_type == "unknown":
+                    error_type = "timeout"
+                    logger.info(
+                        "[WORKER] Local model %s classified as timeout (stale/deleted session)",
+                        worker_info.model,
+                    )
                 self.provider_health.record_outcome(
                     provider=provider,
                     model=worker_info.model,
