@@ -173,8 +173,13 @@ async def discover_ollama_models() -> dict[str, list[str]]:
 def _estimate_lmstudio_param_billions(model_id: str) -> float | None:
     """Estimate parameter count from model ID string."""
     lower = model_id.lower().replace("-", "").replace("_", "")
-    # Check specific patterns (longer matches first to avoid e.g. '3b' matching in '35b')
-    for hint, billions in sorted(_LMSTUDIO_PARAM_HINTS.items(), key=lambda x: -len(x[0])):
+    # Check MoE active-param patterns first (aXb), then total params by length
+    moe_hints = {k: v for k, v in _LMSTUDIO_PARAM_HINTS.items() if k.startswith("a")}
+    other_hints = {k: v for k, v in _LMSTUDIO_PARAM_HINTS.items() if not k.startswith("a")}
+    for hint, billions in sorted(moe_hints.items(), key=lambda x: -len(x[0])):
+        if hint in lower:
+            return billions
+    for hint, billions in sorted(other_hints.items(), key=lambda x: -len(x[0])):
         if hint in lower:
             return billions
     return None
