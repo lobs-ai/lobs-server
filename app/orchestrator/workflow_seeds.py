@@ -96,23 +96,17 @@ DEFAULT_WORKFLOWS = [
                 "type": "classify_model_tier",
                 "config": {
                     "deterministic_rules": [
+                        # Always cloud — these need strong reasoning
                         {"match": "agent:architect", "tier": "strong"},
                         {"match": "title_contains:reflection", "tier": "standard"},
-                        {"match": "title_contains:architecture", "tier": "strong"},
                         {"match": "title_contains:security", "tier": "standard"},
                         {"match": "title_contains:migration", "tier": "standard"},
-                        {"match": "project_tag:experimental", "tier": "small"},
-                        {"match": "project_tag:trial", "tier": "small"},
-                        {"match": "project:grandmas-stories", "tier": "small"},
-                        {"match": "project:flock", "tier": "small"},
-                        {"match": "project:prairielearn", "tier": "small"},
-                        {"match": "project:lobs-server", "tier": "standard"},
-                        {"match": "project:lobs-mission-control", "tier": "standard"},
-                        {"match": "project:lobs-mobile", "tier": "standard"},
+                        # Everything else defaults to local (small)
+                        # The model can punt via ESCALATE if the task is too complex
+                        {"match": "always", "tier": "small"},
                     ],
-                    "llm_fallback": True,
-                    "llm_model_tier": "micro",
-                    "default_tier": "standard",
+                    "llm_fallback": False,
+                    "default_tier": "small",
                     "on_classified": "preflight",
                 },
             },

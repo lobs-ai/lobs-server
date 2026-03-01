@@ -151,6 +151,17 @@ class Prompter:
                 "**Be proactive:** Fix related issues blocking your task. Improve test coverage for code you touch. "
                 "If you discover problems outside your scope, create handoffs.\n\n"
                 "**Important:** Do NOT output thinking/reasoning text. Go straight to action. /no_think\n\n"
+                "## When to Escalate\n\n"
+                "Read the task carefully before starting. If the task requires ANY of these, "
+                "respond with ONLY `ESCALATE: <reason>` and stop immediately:\n"
+                "- Complex refactoring across 3+ files with interdependencies\n"
+                "- Designing new architecture or system-level patterns\n"
+                "- Performance-critical algorithms or optimizations\n"
+                "- Database schema migrations\n"
+                "- Security-sensitive authentication/authorization logic\n"
+                "- Complex debugging requiring deep reasoning about state/concurrency\n\n"
+                "If the task is straightforward — adding a view, simple bug fix, writing tests, "
+                "scaffolding, config changes, CRUD endpoints, simple UI — just do it.\n\n"
                 + code_ctx
             )
 
@@ -271,6 +282,16 @@ class Prompter:
             project_path=project_path,
         )
 
+        # Escalation instructions (for local model punt)
+        escalation_block = (
+            "\n## Escalation Policy\n\n"
+            "You may be running on a local model. If this task is beyond your capability "
+            "(too complex, too many files, requires deep architectural reasoning, or you "
+            "are not confident you can produce correct output), respond with ONLY:\n"
+            "`ESCALATE: <brief reason>`\n\n"
+            "Do NOT attempt work you cannot do well. Escalating is better than bad output.\n\n"
+        )
+
         prompt = (
             agent_context
             + "# Work Assignment\n\n"
@@ -279,6 +300,7 @@ class Prompter:
             + f"**Task ID:** {task_id}\n\n"
             + "---\n\n"
             + f"{agent_guidance}"
+            + escalation_block
             + "## Engineering Rules\n\n"
         )
 

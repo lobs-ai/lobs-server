@@ -658,6 +658,18 @@ class WorkerManager:
                 transcript_hint=worker_info.transcript_path
             )
             
+            # Check if the model requested escalation (local model punt)
+            escalate_reason = self._detect_escalation(
+                result_summary, worker_info, worker_id
+            )
+            if escalate_reason:
+                await self._handle_escalation(
+                    worker_id=worker_id,
+                    worker_info=worker_info,
+                    reason=escalate_reason,
+                )
+                return
+            
             await self._handle_worker_completion(
                 worker_id=worker_id,
                 worker_info=worker_info,
@@ -931,6 +943,91 @@ class WorkerManager:
             logger.debug("[WORKER] Gateway sessions_history failed: %s", e)
 
         return None
+
+    def _detect_escalation(
+        self, result_summary: Optional[str], worker_info: WorkerInfo, worker_id: str
+    ) -> Optional[str]:
+        """Check if the model requested escalation via ESCALATE: signal.
+        
+        Returns the reason string if escalation detected, None otherwise.
+        Local models can punt on complex tasks by outputting:
+            ESCALATE: <reason>
+        """
+        if not result_summary:
+            return None
+        
+        # Check first few hundred chars — ESCALATE should be early in output
+        check_text = result_summary[:1000].strip()
+        
+        # Look for ESCALATE: pattern (case-insensitive, may have markdown backticks)
+        import re
+        match = re.search(r'ESCALATE:\s*(.+)', check_text, re.IGNORECASE)
+        if match:
+            reason = match.group(1).strip()
+            logger.info(
+                "[WORKER] Model requested escalation for %s: %s (model=%s)",
+                worker_info.task_id[:8], reason, worker_info.model
+            )
+            return reason
+        
+        return None
+
+    async def _handle_escalation(
+        self,
+        worker_id: str,
+        worker_info: WorkerInfo,
+        reason: str,
+    ) -> None:
+        """Handle model escalation — respawn task on a higher-tier model.
+        
+        When a local model determines a task is too complex, it punts via ESCALATE.
+        We mark the task for retry with model_tier bumped to 'standard'.
+        """
+        task_id = worker_info.task_id
+        project_id = worker_info.project_id
+        duration = time.time() - worker_info.start_time
+        
+        # Remove from tracking
+        self.active_workers.pop(worker_id, None)
+        self.project_locks.pop(project_id, None)
+        
+        logger.info(
+            "[WORKER] Escalating %s from %s to standard tier (reason: %s, punt_time=%.0fs)",
+            task_id[:8], worker_info.model, reason, duration
+        )
+        
+        # Update task: reset to not_started with standard tier
+        db_task = await self.db.get(Task, task_id)
+        if db_task:
+            db_task.work_state = "not_started"
+            db_task.status = "active"
+            db_task.model_tier = "standard"
+            db_task.failure_reason = f"Escalated by local model: {reason}"
+            db_task.updated_at = datetime.now(timezone.utc)
+            await self.db.commit()
+        
+        # Record the escalation in worker_runs
+        await self._record_worker_run(
+            task_id=task_id,
+            worker_id=worker_id,
+            model=worker_info.model,
+            agent_type=worker_info.agent_type,
+            succeeded=False,
+            duration_seconds=duration,
+            error_log=f"ESCALATED: {reason}",
+            result_summary=f"Model punted to higher tier: {reason}",
+        )
+        
+        # Cancel the workflow run so it restarts with new tier
+        from sqlalchemy import text as sa_text
+        now = datetime.now(timezone.utc).isoformat()
+        await self.db.execute(
+            sa_text("UPDATE workflow_runs SET status = 'cancelled', finished_at = :now WHERE task_id = :tid AND status IN ('running', 'pending')"),
+            {"now": now, "tid": task_id}
+        )
+        await self.db.commit()
+        
+        logger.info("[WORKER] Task %s ready for re-pickup at standard tier", task_id[:8])
 
     async def _handle_worker_completion(
         self,
