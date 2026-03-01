@@ -1,43 +1,42 @@
 """Auto-assign agents to unassigned active tasks.
 
-Rationale:
-- We require an explicit agent assignment for execution.
-- Some task creation paths (clients, imports) may create tasks with agent=NULL.
-- This routine detects those tasks and uses an LLM classification pass to choose
-  an agent (programmer/writer/reviewer/researcher/architect).
-
-Design:
-- Runs periodically from the orchestrator engine.
-- Uses OpenClaw Gateway tools/invoke:
-  - sessions_spawn (agentTurn) to run a short classification prompt
-  - sessions_history to retrieve the result
-- Updates Task.agent in DB for tasks it can classify confidently.
-
-Note: This is best-effort; failures should not block the orchestrator loop.
+Uses llm_direct for classification — direct API call, no agent spawn,
+no workspace context, no tools. Much faster and cheaper than session-based approach.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Optional
 
-import aiohttp
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Task
-from app.orchestrator.config import GATEWAY_SESSION_KEY, GATEWAY_TOKEN, GATEWAY_URL
-from app.orchestrator.model_chooser import ModelChooser
+from app.orchestrator.llm_direct import complete
 
 logger = logging.getLogger(__name__)
 
-
 ALLOWED_AGENTS = {"programmer", "writer", "reviewer", "researcher", "architect"}
+
+SYSTEM_PROMPT = """You are an agent router for a multi-agent AI system. Given a task, output the correct agent as JSON. Output only JSON, no explanation outside the object.
+
+Agents:
+- programmer: Code, bugs, features, tests, refactors
+- researcher: Research, analysis, investigation, information gathering
+- writer: Docs, summaries, reports, written content
+- architect: System design, technical strategy, architecture
+- reviewer: Code review, quality checks, feedback"""
+
+USER_TEMPLATE = """Task:
+Title: {title}
+Notes: {notes}
+Project: {project_id}
+
+JSON only: {{"agent": "<type>", "reason": "<brief>"}}"""
 
 
 @dataclass
@@ -67,12 +66,12 @@ class TaskAutoAssigner:
 
         for task in tasks:
             try:
-                chosen = await self._choose_agent_llm(task)
+                chosen = await self._choose_agent(task)
                 if chosen is None:
                     result.skipped += 1
                     continue
                 if chosen not in ALLOWED_AGENTS:
-                    logger.warning("[AUTO_ASSIGN] Invalid agent choice %s for task %s", chosen, task.id)
+                    logger.warning("[AUTO_ASSIGN] Invalid agent %s for task %s", chosen, task.id)
                     result.failed += 1
                     continue
 
@@ -88,163 +87,42 @@ class TaskAutoAssigner:
 
         return result
 
-    async def _choose_agent_llm(self, task: Task) -> Optional[str]:
-        """Return the chosen agent type or None."""
-
-        prompt = self._build_prompt(task)
-
-        # Use a non-programming agent persona for classification; we only need a short JSON.
-        agent_id = "reviewer"
-        chooser = ModelChooser(self.db)
-        choice = await chooser.choose(
-            agent_type=agent_id,
-            task={"id": task.id, "title": task.title, "notes": task.notes, "status": "inbox"},
-            purpose="classification",
-        )
-        model = choice.model
-        label = f"auto-assign-{task.id[:8].lower()}"
-
-        spawn = await _gateway_invoke(
-            tool="sessions_spawn",
-            session_key=f"{GATEWAY_SESSION_KEY}-autoassign-{uuid.uuid4().hex[:8]}",
-            args={
-                "task": prompt,
-                "agentId": agent_id,
-                "model": model,
-                "runTimeoutSeconds": 60,
-                # Important: give Gateway more time than the default 10s so we reliably
-                # receive the accepted response, especially on cold starts.
-                "timeoutSeconds": 30,
-                "cleanup": "delete",
-                "label": label,
-            },
+    async def _choose_agent(self, task: Task) -> Optional[str]:
+        user_msg = USER_TEMPLATE.format(
+            title=task.title or "Untitled",
+            notes=(task.notes or "")[:800],
+            project_id=task.project_id or "unknown",
         )
 
-        # If Gateway timed out but still returned a childSessionKey, we can still
-        # recover by reading history from that child session.
-        child_session_key = (spawn or {}).get("childSessionKey")
-        if not child_session_key:
-            logger.warning("[AUTO_ASSIGN] sessions_spawn missing childSessionKey for task=%s: %s", task.id, spawn)
-            return None
-        if not child_session_key:
+        output = await complete(
+            system=SYSTEM_PROMPT,
+            user=user_msg,
+            max_tokens=100,
+            temperature=0.0,
+            timeout=20.0,
+        )
+
+        if not output:
+            logger.warning("[AUTO_ASSIGN] No LLM response for task %s", task.id[:8])
             return None
 
-        # Poll the session history briefly for the model output.
-        # Keep this short so the orchestrator loop stays responsive.
-        for _ in range(8):
-            await asyncio.sleep(1)
-            hist = await _gateway_invoke(
-                tool="sessions_history",
-                session_key=f"{GATEWAY_SESSION_KEY}-autoassign-hist-{uuid.uuid4().hex[:8]}",
-                args={
-                    "sessionKey": child_session_key,
-                    "limit": 20,
-                    "includeTools": False,
-                    "timeoutSeconds": 20,
-                },
-            )
-            chosen = _extract_choice_from_history(hist)
-            if chosen:
-                return chosen
+        return _parse_agent(output)
 
+
+def _parse_agent(text: str) -> Optional[str]:
+    if not text:
         return None
-
-    @staticmethod
-    def _build_prompt(task: Task) -> str:
-        title = (task.title or "").strip()
-        notes = (task.notes or "").strip()
-        project = (task.project_id or "").strip()
-
-        return (
-            "You are a routing classifier for a multi-agent system.\n\n"
-            "Choose exactly ONE agent type from: programmer, writer, reviewer, researcher, architect.\n"
-            "Return STRICT JSON only, no prose.\n\n"
-            "Decision rules (high level):\n"
-            "- programmer: code changes, debugging, tests, build failures, performance fixes\n"
-            "- writer: docs, summaries, handoffs, user-facing writeups\n"
-            "- reviewer: code review, risk assessment, QA plans, verification strategy\n"
-            "- researcher: external research, comparisons, investigations, options analysis\n"
-            "- architect: system design, refactors, API design, data model design\n\n"
-            "Task context:\n"
-            f"- project_id: {project}\n"
-            f"- title: {title}\n"
-            f"- notes: {notes}\n\n"
-            "JSON schema:\n"
-            "{\n"
-            "  \"agent\": \"programmer|writer|reviewer|researcher|architect\",\n"
-            "  \"confidence\": 0.0,\n"
-            "  \"reason\": \"short\"\n"
-            "}\n"
-        )
-
-
-async def _gateway_invoke(tool: str, session_key: str, args: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Invoke an OpenClaw tool via the Gateway HTTP API.
-
-    Returns the tool details dict when ok, else None.
-    """
-
-    if not GATEWAY_URL or not GATEWAY_TOKEN:
-        return None
-
     try:
-        async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                f"{GATEWAY_URL}/tools/invoke",
-                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                json={"tool": tool, "sessionKey": session_key, "args": args},
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-            data = await resp.json()
-            if not data.get("ok"):
-                return None
-            result = data.get("result", {})
-            # Gateway wraps tool results in {content, details}
-            return result.get("details", result)
-    except Exception:
-        logger.exception("[AUTO_ASSIGN] gateway invoke failed tool=%s", tool)
-        return None
-
-
-def _extract_choice_from_history(history_details: Optional[dict[str, Any]]) -> Optional[str]:
-    """Parse sessions_history output and return agent if present."""
-    if not history_details:
-        return None
-
-    # sessions_history returns: {messages:[{role,content,...}, ...]}
-    messages = history_details.get("messages") if isinstance(history_details, dict) else None
-    if not isinstance(messages, list):
-        return None
-
-    for msg in reversed(messages):
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") != "assistant":
-            continue
-        content = msg.get("content")
-        if not isinstance(content, str) or not content.strip():
-            continue
-
-        text = content.strip()
-        # Attempt to parse JSON.
-        try:
-            payload = json.loads(text)
-        except Exception:
-            # Some models may wrap in ```json ...```
-            if "```" in text:
-                cleaned = text
-                cleaned = cleaned.replace("```json", "```")
-                if cleaned.startswith("```") and cleaned.endswith("```"):
-                    cleaned = cleaned.strip("`").strip()
-                try:
-                    payload = json.loads(cleaned)
-                except Exception:
-                    continue
-            else:
-                continue
-
-        agent = payload.get("agent") if isinstance(payload, dict) else None
-        if isinstance(agent, str) and agent.strip():
-            return agent.strip()
-
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            parsed = json.loads(text[start:end])
+            agent = parsed.get("agent", "").strip().lower()
+            if agent in ALLOWED_AGENTS:
+                return agent
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    for agent in ALLOWED_AGENTS:
+        if agent in text.lower():
+            return agent
     return None

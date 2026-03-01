@@ -3,6 +3,8 @@
 Two callables:
   - assignment.scan_unassigned: finds tasks without agents, emits events
   - assignment.assign_agent: uses LLM to pick the right agent for a task
+
+Uses llm_direct for classification — no full agent spawn, no workspace context.
 """
 
 import json
@@ -11,39 +13,32 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-import aiohttp
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Task, WorkflowEvent, OrchestratorSetting
-from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_KEY
+from app.models import Task, WorkflowEvent
+from app.orchestrator.llm_direct import complete
 
 logger = logging.getLogger(__name__)
 
-# Valid agent types that can be assigned
 VALID_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]
-
-# Agents eligible for task assignment (inbox-responder is excluded —
-# it is only for internal inbox triage, not general task execution).
 ASSIGNABLE_AGENTS = ["programmer", "researcher", "writer", "architect", "reviewer"]
 
-ASSIGNMENT_PROMPT = """You are an agent router for a multi-agent system. Given a task, determine which specialist agent should handle it.
+ASSIGNMENT_SYSTEM = """You are an agent router for a multi-agent AI system. Given a task title and notes, return the correct agent type as JSON. Be concise — only output the JSON object, nothing else.
 
 Available agents:
-- **programmer**: Write code, fix bugs, implement features, run tests, refactor. Use for anything that involves writing or modifying code.
-- **researcher**: Investigate topics, compare options, analyze information, synthesize findings. Use for research, analysis, and information gathering.
-- **writer**: Create documentation, write-ups, summaries, reports, content. Use for prose, docs, and written deliverables.
-- **architect**: System design, technical strategy, design docs, architecture planning. Use for high-level design decisions and technical planning.
-- **reviewer**: Code review, quality checks, feedback on existing work. Use for reviewing PRs, code quality, and providing feedback.
+- programmer: Write/fix/refactor code, implement features, run tests. Use for anything requiring code changes.
+- researcher: Investigate topics, compare options, analyze, synthesize findings.
+- writer: Documentation, summaries, reports, written content.
+- architect: System design, technical strategy, architecture planning.
+- reviewer: Code review, quality checks, feedback on existing work."""
 
-Task to assign:
-- Title: {title}
-- Notes: {notes}
-- Project: {project_id}
+ASSIGNMENT_USER_TEMPLATE = """Task to assign:
+Title: {title}
+Notes: {notes}
+Project: {project_id}
 
-Respond with ONLY a JSON object:
-{{"agent": "<agent_type>", "reasoning": "<brief explanation>"}}
-"""
+Respond ONLY with JSON: {{"agent": "<agent_type>", "reasoning": "<one sentence>"}}"""
 
 
 async def scan_unassigned(db: AsyncSession, worker_manager: Any, context: dict, **kw) -> dict:
@@ -57,7 +52,6 @@ async def scan_unassigned(db: AsyncSession, worker_manager: Any, context: dict, 
     )
     tasks = result.scalars().all()
 
-    # Pre-fetch all pending assignment events to avoid N+1 queries
     existing = await db.execute(
         select(WorkflowEvent).where(
             WorkflowEvent.event_type == "task.needs_assignment",
@@ -73,7 +67,6 @@ async def scan_unassigned(db: AsyncSession, worker_manager: Any, context: dict, 
     for task in tasks:
         if task.id in pending_task_ids:
             continue
-
         db.add(WorkflowEvent(
             id=str(uuid.uuid4()),
             event_type="task.needs_assignment",
@@ -89,16 +82,16 @@ async def scan_unassigned(db: AsyncSession, worker_manager: Any, context: dict, 
 
     if emitted:
         await db.commit()
-        logger.info("[ASSIGNMENT] Emitted %d assignment events for unassigned tasks", emitted)
+        logger.info("[ASSIGNMENT] Emitted %d assignment events", emitted)
 
     return {"scanned": len(tasks), "emitted": emitted}
 
 
 async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **kw) -> dict:
-    """Use an LLM to assign the correct agent to a task."""
+    """Use a direct LLM call to assign the correct agent to a task."""
     task_id = kw.get("task_id") or context.get("trigger", {}).get("task_id")
     if not task_id:
-        return {"assigned": False, "reason": "no task_id provided", "task_title": "unknown"}
+        return {"assigned": False, "reason": "no task_id", "task_title": "unknown"}
 
     task = await db.get(Task, task_id)
     if not task:
@@ -107,141 +100,47 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
     if task.agent:
         return {"assigned": True, "agent": task.agent, "reason": "already assigned", "task_title": task.title}
 
-    # Build the prompt
-    prompt = ASSIGNMENT_PROMPT.format(
+    user_msg = ASSIGNMENT_USER_TEMPLATE.format(
         title=task.title or "Untitled",
-        notes=(task.notes or "")[:2000],
+        notes=(task.notes or "")[:1000],
         project_id=task.project_id or "unknown",
     )
 
-    # Call LLM via Gateway: spawn session, poll history for response
-    import asyncio as _asyncio
     try:
-        label = f"assign-{task.id[:8].lower()}"
-        parent_key = f"{GATEWAY_SESSION_KEY}-assign-{uuid.uuid4().hex[:6]}"
-
-        # 1. Spawn a short-lived session
-        spawn_data = await _gateway_invoke(
-            "sessions_spawn",
-            parent_key,
-            {
-                "task": prompt,
-                "agentId": "reviewer",  # lightweight persona for classification
-                "model": "haiku",  # Cheap + fast for routing decisions
-                "runTimeoutSeconds": 60,
-                "timeoutSeconds": 30,
-                "cleanup": "keep",  # Keep session alive so we can read history
-                "label": label,
-            },
+        output = await complete(
+            system=ASSIGNMENT_SYSTEM,
+            user=user_msg,
+            max_tokens=128,
+            temperature=0.0,
+            timeout=25.0,
         )
-
-        child_key = (spawn_data or {}).get("childSessionKey")
-        if not child_key:
-            logger.warning("[ASSIGNMENT] Spawn missing childSessionKey: %s", spawn_data)
-            return {"assigned": False, "reason": "spawn failed — no child session", "task_title": task.title}
-
-        # 2. Poll history for the LLM response (up to ~30 seconds)
-        output = None
-        for _ in range(10):
-            await _asyncio.sleep(3)
-            hist = await _gateway_invoke(
-                "sessions_history",
-                f"{GATEWAY_SESSION_KEY}-assign-hist-{uuid.uuid4().hex[:6]}",
-                {"sessionKey": child_key, "limit": 10, "includeTools": False},
-            )
-            output = _extract_output_from_history(hist)
-            if output:
-                break
-
-        # Clean up the session regardless of outcome
-        try:
-            await _gateway_invoke(
-                "sessions_kill",
-                f"{GATEWAY_SESSION_KEY}-assign-kill-{uuid.uuid4().hex[:6]}",
-                {"sessionKey": child_key, "reason": "assignment complete"},
-            )
-        except Exception:
-            pass
-
-        if not output:
-            logger.warning("[ASSIGNMENT] No LLM response for task %s after polling", task.id[:8])
-            return {"assigned": False, "reason": "no LLM response after polling", "task_title": task.title}
-
-        logger.info("[ASSIGNMENT] LLM response for task %s: %s", task.id[:8], output[:300])
-
-        # 3. Parse and apply assignment
-        agent_type = _parse_agent_response(output)
-        if not agent_type:
-            logger.warning("[ASSIGNMENT] Could not parse agent from LLM response: %s", output[:500])
-            return {"assigned": False, "reason": "unparseable LLM response", "task_title": task.title, "raw_output": output[:500]}
-
-        task.agent = agent_type
-        task.updated_at = datetime.now(timezone.utc)
-        await db.commit()
-
-        logger.info("[ASSIGNMENT] Assigned agent '%s' to task %s (%s)", agent_type, task.id[:8], task.title[:50])
-        return {"assigned": True, "agent": agent_type, "task_title": task.title, "task_id": task.id}
-
     except Exception as e:
-        logger.error("[ASSIGNMENT] Error assigning agent: %s", e, exc_info=True)
+        logger.error("[ASSIGNMENT] LLM call failed for %s: %s", task_id[:8], e)
         return {"assigned": False, "reason": str(e), "task_title": task.title}
 
+    if not output:
+        logger.warning("[ASSIGNMENT] No LLM response for task %s", task_id[:8])
+        return {"assigned": False, "reason": "no LLM response", "task_title": task.title}
 
-async def _gateway_invoke(tool: str, session_key: str, args: dict) -> dict | None:
-    """Invoke a Gateway tool and return the details dict, or None on failure."""
-    if not GATEWAY_URL or not GATEWAY_TOKEN:
-        return None
-    try:
-        async with aiohttp.ClientSession() as session:
-            resp = await session.post(
-                f"{GATEWAY_URL}/tools/invoke",
-                headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                json={"tool": tool, "sessionKey": session_key, "args": args},
-                timeout=aiohttp.ClientTimeout(total=60),
-            )
-            data = await resp.json()
-            if not data.get("ok"):
-                return None
-            result = data.get("result", {})
-            return result.get("details", result)
-    except Exception:
-        logger.exception("[ASSIGNMENT] Gateway invoke failed tool=%s", tool)
-        return None
+    logger.info("[ASSIGNMENT] LLM response for %s: %s", task_id[:8], output[:200])
 
+    agent_type = _parse_agent_response(output)
+    if not agent_type:
+        logger.warning("[ASSIGNMENT] Could not parse agent from: %s", output[:300])
+        return {"assigned": False, "reason": "unparseable response", "task_title": task.title, "raw": output[:300]}
 
-def _extract_output_from_history(hist: dict | None) -> str | None:
-    """Extract the last assistant message from sessions_history output."""
-    if not hist:
-        return None
-    messages = hist.get("messages") if isinstance(hist, dict) else None
-    if not isinstance(messages, list):
-        return None
-    for msg in reversed(messages):
-        if not isinstance(msg, dict) or msg.get("role") != "assistant":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            text_parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
-            joined = "\n".join(text_parts).strip()
-            if joined:
-                return joined
-    return None
+    task.agent = agent_type
+    task.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+
+    logger.info("[ASSIGNMENT] Assigned '%s' to task %s (%s)", agent_type, task_id[:8], task.title[:50])
+    return {"assigned": True, "agent": agent_type, "task_title": task.title, "task_id": task.id}
 
 
 def _parse_agent_response(text: str) -> str | None:
-    """Extract agent type from LLM JSON response.
-
-    Only returns agents in ASSIGNABLE_AGENTS (excludes inbox-responder
-    which is reserved for internal inbox triage).
-    """
     if not text:
         return None
-
-    # Try to find JSON in the response
     try:
-        # Look for JSON object
         start = text.find("{")
         end = text.rfind("}") + 1
         if start >= 0 and end > start:
@@ -251,11 +150,8 @@ def _parse_agent_response(text: str) -> str | None:
                 return agent
     except (json.JSONDecodeError, AttributeError):
         pass
-
-    # Fallback: look for agent name directly in text
     text_lower = text.lower()
     for agent in ASSIGNABLE_AGENTS:
         if agent in text_lower:
             return agent
-
     return None
