@@ -302,7 +302,18 @@ DEFAULT_WORKFLOWS = [
             {
                 "id": "done",
                 "type": "cleanup",
-                "config": {"delete_session": True},
+                "config": {
+                    "session_refs": [
+                        "spawn_programmer.output.childSessionKey",
+                        "spawn_programmer_fix_1.output.childSessionKey",
+                        "spawn_programmer_fix_2.output.childSessionKey",
+                        "spawn_researcher.output.childSessionKey",
+                        "spawn_writer.output.childSessionKey",
+                        "spawn_architect.output.childSessionKey",
+                        "spawn_reviewer.output.childSessionKey",
+                        "spawn_inbox.output.childSessionKey",
+                    ]
+                },
             },
         ],
         "edges": [],
@@ -510,7 +521,11 @@ DEFAULT_WORKFLOWS = [
             {
                 "id": "cleanup",
                 "type": "cleanup",
-                "config": {"delete_session": True},
+                "config": {
+                    "session_refs": [
+                        "write_code.output.childSessionKey",
+                    ]
+                },
             },
         ],
         "edges": [],
@@ -536,7 +551,11 @@ DEFAULT_WORKFLOWS = [
             {
                 "id": "cleanup",
                 "type": "cleanup",
-                "config": {"delete_session": True},
+                "config": {
+                    "session_refs": [
+                        "research.output.childSessionKey",
+                    ]
+                },
             },
         ],
         "edges": [],

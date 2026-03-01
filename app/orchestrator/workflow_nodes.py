@@ -199,16 +199,16 @@ class NodeHandlers:
         return await checker(node_def, run, db=self.db, worker_manager=self.worker_manager)
 
     async def delete_session(self, session_key: str) -> None:
-        """Delete an OpenClaw session via Gateway."""
+        """Delete an OpenClaw session via Gateway using the subagents kill action."""
         try:
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
                     f"{GATEWAY_URL}/tools/invoke",
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     json={
-                        "tool": "sessions_kill",
+                        "tool": "subagents",
                         "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-cleanup-{uuid.uuid4().hex[:6]}",
-                        "args": {"sessionKey": session_key, "reason": "workflow cleanup"},
+                        "args": {"action": "kill", "target": session_key},
                     },
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
@@ -216,9 +216,9 @@ class NodeHandlers:
                 if data.get("ok"):
                     logger.info("[NODE] Deleted session %s", session_key)
                 else:
-                    logger.debug("[NODE] Session delete response: %s", data)
+                    logger.debug("[NODE] Session delete response (non-fatal): %s", data)
         except Exception as e:
-            logger.debug("[NODE] Session delete failed: %s", e)
+            logger.debug("[NODE] Session delete failed (non-fatal): %s", e)
 
 # ══════════════════════════════════════════════════════════════════════
 # Helper: model tier resolution
@@ -293,11 +293,14 @@ async def _exec_spawn_agent(config, context, run, *, db, worker_manager):
     if not worker_manager:
         return NodeResult(status="failed", error="No worker_manager available — cannot spawn agent")
 
+    timeout_seconds = config.get("timeout_seconds", 1800)
+
     try:
         spawned = await worker_manager.spawn_worker(
             task=task_for_spawn,
             project_id=project_id,
             agent_type=agent_type,
+            timeout_seconds=timeout_seconds,
         )
 
         if not spawned:
@@ -646,11 +649,42 @@ async def _exec_notify(config, context, run, *, db, worker_manager):
 
 @register_node("cleanup")
 async def _exec_cleanup(config, context, run, *, db, worker_manager):
-    """Clean up sessions and artifacts."""
+    """Clean up sessions and artifacts.
+
+    Config:
+        session_ref: str — dotted path in context to the worker session key to delete
+                          (e.g. "write_code.output.childSessionKey"). Preferred over
+                          delete_session + run.session_key since run.session_key is
+                          typically null for subagent workers.
+        delete_session: bool — if True and no session_ref, fall back to run.session_key
+        session_refs: list[str] — delete multiple sessions by context path (for parallel spawns)
+    """
     handlers = NodeHandlers(db, worker_manager)
-    if config.get("delete_session", True) and run.session_key:
+    deleted = []
+
+    # Primary: delete by session_ref (dotted path to childSessionKey in context)
+    session_ref = config.get("session_ref")
+    if session_ref:
+        session_key = _resolve_context_path(context, session_ref)
+        if session_key and isinstance(session_key, str):
+            await handlers.delete_session(session_key)
+            deleted.append(session_key)
+        else:
+            logger.debug("[NODE:cleanup] session_ref '%s' resolved to nothing", session_ref)
+
+    # Multiple refs (for parallel spawns)
+    for ref in config.get("session_refs", []):
+        session_key = _resolve_context_path(context, ref)
+        if session_key and isinstance(session_key, str) and session_key not in deleted:
+            await handlers.delete_session(session_key)
+            deleted.append(session_key)
+
+    # Fallback: delete run.session_key if explicitly requested and no ref was given
+    if not deleted and config.get("delete_session", False) and run.session_key:
         await handlers.delete_session(run.session_key)
-    return NodeResult(status="completed", output={"cleaned_up": True})
+        deleted.append(run.session_key)
+
+    return NodeResult(status="completed", output={"cleaned_up": True, "deleted_sessions": deleted})
 
 # ── sub_workflow ─────────────────────────────────────────────────────
 
