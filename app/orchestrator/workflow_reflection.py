@@ -106,7 +106,7 @@ async def spawn_reflection_agents(db: AsyncSession, worker_manager=None, context
         # Build prompt using existing method
         prompt = ReflectionCycleManager._build_reflection_prompt(agent, packet, reflection_id)
 
-        # Choose model
+        # Choose model — reflections need high quality thinking, use standard tier
         choice = await chooser.choose(
             agent_type=agent,
             task={
@@ -114,6 +114,7 @@ async def spawn_reflection_agents(db: AsyncSession, worker_manager=None, context
                 "title": "Strategic reflection cycle",
                 "notes": "Periodic strategic reflection run",
                 "status": "inbox",
+                "model_tier": "standard",
             },
             purpose="reflection",
         )
