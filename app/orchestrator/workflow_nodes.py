@@ -277,6 +277,13 @@ async def _exec_spawn_agent(config, context, run, *, db, worker_manager):
         task_for_spawn["model_tier"] = model_tier
     elif config.get("model"):
         task_for_spawn["model_tier"] = config["model"]
+    elif not task_for_spawn.get("model_tier"):
+        # Check if classify_tier node ran and set a tier
+        classify_output = context.get("classify_tier", {})
+        if isinstance(classify_output, dict) and classify_output.get("classified_tier"):
+            task_for_spawn["model_tier"] = classify_output["classified_tier"]
+    logger.info("[NODE:spawn_agent] task_id=%s model_tier_in_ctx=%s classify_output=%s model_tier_for_spawn=%s",
+                task_id, task_ctx.get("model_tier"), context.get("classify_tier", {}).get("classified_tier"), task_for_spawn.get("model_tier"))
 
     if isinstance(prompt_template, str) and prompt_template.strip():
         rendered = _render_template(prompt_template, context).strip()
