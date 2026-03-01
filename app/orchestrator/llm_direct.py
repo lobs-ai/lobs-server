@@ -15,6 +15,7 @@ import logging
 import os
 from typing import Any
 
+import asyncio
 import re
 import aiohttp
 
@@ -22,6 +23,9 @@ logger = logging.getLogger(__name__)
 
 LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1")
 LMSTUDIO_MODEL = os.environ.get("LMSTUDIO_MODEL", "qwen/qwen3.5-35b-a3b")
+
+GEMINI_CLI = os.environ.get("GEMINI_CLI_PATH", "/opt/homebrew/bin/gemini")
+GEMINI_CLI_MODEL = os.environ.get("GEMINI_CLI_MODEL", "gemini-3.1-pro-preview")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyD9A6O9qoAtN2JV1cXdc14dUhZ1uSUvIdE")
 GEMINI_MODEL = os.environ.get("GEMINI_CLASSIFY_MODEL", "gemini-3.1-pro-preview")
@@ -58,19 +62,51 @@ async def complete(
 ) -> str | None:
     """Call an LLM directly and return the assistant text, or None on failure.
 
-    Tries providers in order: LM Studio -> Gemini -> Anthropic.
+    Tries providers in order:
+      1. Gemini CLI (Google Pro subscription — preferred)
+      2. LM Studio (local qwen — free fallback when Gemini CLI unavailable)
+      3. Anthropic Haiku (cloud fallback)
     """
+    result = await _gemini_cli(system, user, max_tokens, timeout)
+    if result:
+        return result
+
+    logger.info("[LLM_DIRECT] Gemini CLI unavailable, trying LM Studio")
     result = await _lmstudio(system, user, max_tokens, temperature, timeout)
     if result:
         return result
 
-    logger.info("[LLM_DIRECT] LM Studio unavailable, trying Gemini API")
-    result = await _gemini(system, user, max_tokens, temperature, timeout)
-    if result:
-        return result
-
-    logger.info("[LLM_DIRECT] Gemini unavailable, trying Anthropic Haiku")
+    logger.info("[LLM_DIRECT] LM Studio unavailable, trying Anthropic Haiku")
     return await _anthropic(system, user, max_tokens, temperature, timeout)
+
+
+async def _gemini_cli(
+    system: str, user: str, max_tokens: int, timeout: float
+) -> str | None:
+    """Call Gemini via the authenticated CLI (uses Google Pro subscription)."""
+    prompt = f"{system}\n\n{user}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            GEMINI_CLI,
+            "-m", GEMINI_CLI_MODEL,
+            "-p", prompt,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.debug("[LLM_DIRECT] Gemini CLI timed out")
+            return None
+        if proc.returncode != 0:
+            logger.debug("[LLM_DIRECT] Gemini CLI exit %d: %s", proc.returncode, stderr.decode()[:200])
+            return None
+        text = stdout.decode().strip()
+        return text if text else None
+    except Exception as e:
+        logger.debug("[LLM_DIRECT] Gemini CLI error: %s", e)
+        return None
 
 
 async def _lmstudio(
