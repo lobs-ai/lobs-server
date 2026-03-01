@@ -65,11 +65,11 @@ Wire in `create_task()` in `app/routers/tasks.py`:
 - Before return
 - Wrap in try/except: any exception → log warning, keep model_tier as-is (null is fine, ModelChooser handles it)
 
-### 2. ModelChooser — no change needed
+### 2. ModelChooser — fast-path when tier is set
 
-`decide_models()` already reads task.model_tier. DB settings already store model lists per tier. When tier is set at creation, routing is automatic.
+`decide_models()` already reads task.model_tier but passes through fuzzy catalog derivation and agent-type heuristics. Add a fast-path in `ModelChooser.choose()`: when `task.model_tier` is a known tier (micro/small/medium/standard/strong), skip `decide_models()` and read directly from `cfg["tiers"][tier]` (DB settings keys already store these). Budget guards and health ranking still apply. Fall through to `decide_models()` when tier is null (backwards compat).
 
-**Only change:** Remove `_node_classify_model_tier` dead code from `workflow_nodes.py` (cleanup, low priority).
+Also remove `_node_classify_model_tier` dead code from `workflow_nodes.py` (no workflow uses it).
 
 ### 3. Fix NodeHandlers.delete_session()
 

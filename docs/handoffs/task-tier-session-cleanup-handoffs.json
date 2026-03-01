@@ -12,9 +12,18 @@
     "to": "programmer",
     "initiative": "task-tier-classification-session-cleanup",
     "title": "Fix NodeHandlers.delete_session() to actually delete sessions",
-    "context": "Session cleanup nodes call NodeHandlers.delete_session() which is a no-op placeholder (workflow_nodes.py lines 201-211). The real delete implementation exists in WorkerGateway.delete_session() (worker_gateway.py lines 382-422) using WebSocket JSON-RPC sessions.delete — this method is already proven via worker_monitor.py line 366. The task-router done node already has correct session_refs wired for all spawn nodes. Only the underlying delete call is broken. Design doc: docs/task-tier-classification-and-session-cleanup-design.md",
+    "context": "Session cleanup nodes call NodeHandlers.delete_session() which is a no-op placeholder (workflow_nodes.py lines 201-211). The real delete implementation exists in WorkerGateway.delete_session() (worker_gateway.py lines 382-422) using WebSocket JSON-RPC sessions.delete — proven via worker_monitor.py line 366. Design doc: docs/task-tier-classification-and-session-cleanup-design.md",
     "spec": "In app/orchestrator/workflow_nodes.py, replace NodeHandlers.delete_session() no-op (lines ~201-211) with: check self.worker_manager has gateway attribute → call await self.worker_manager.gateway.delete_session(session_key) → log result. If no gateway available, log warning and return (do not raise). Also remove dead code: @register_node('classify_model_tier') and _node_classify_model_tier function (~line 1643) — no workflow uses this node type.",
     "acceptance": "After a programmer task completes and hits the done/cleanup node, the worker session is deleted from Gateway (verify via openclaw sessions list — session count stays low). No crash when gateway unavailable. Unit test: mock worker_manager.gateway, assert delete_session called with correct session key.",
     "files": ["docs/task-tier-classification-and-session-cleanup-design.md", "app/orchestrator/workflow_nodes.py", "app/orchestrator/worker_gateway.py"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "task-tier-classification-session-cleanup",
+    "title": "ModelChooser fast-path: skip fuzzy routing when task.model_tier is set",
+    "context": "With tier set at task creation (handoff 1), ModelChooser.choose() should be a simple table lookup. decide_models() adds fuzzy logic + catalog derivation that compensated for tier never being set. Now that tier is always set, we need a deterministic fast-path. The DB settings keys MODEL_ROUTER_TIER_{MICRO,SMALL,MEDIUM,STANDARD,STRONG}_KEY already store the model lists per tier — use them. Do NOT hardcode model lists.",
+    "spec": "In ModelChooser.choose() (app/orchestrator/model_chooser.py): After loading cfg, check if task.get('model_tier') is a known tier (micro/small/medium/standard/strong). If yes: (1) Read model list from cfg['tiers'][tier]. (2) Prepend local models from LM Studio/Ollama discovery (existing logic). (3) Apply project local policy (_get_project_local_policy). (4) Apply budget guards (_apply_budget_guards, _apply_lane_budget_guard, _apply_global_daily_cap). (5) Apply health ranking (_rank_by_health_and_cost). (6) Return ModelChoice with audit showing 'tier_fastpath': True. Skip decide_models() entirely. If task.model_tier is null or unknown, fall through to existing decide_models() path unchanged.",
+    "acceptance": "When task.model_tier='standard', chooser skips decide_models(), reads standard list from DB settings, applies budget+health. Audit shows tier_fastpath=true. When model_tier is null, original path runs (no regression). Unit tests in tests/test_model_chooser.py for both paths.",
+    "files": ["docs/task-tier-classification-and-session-cleanup-design.md", "app/orchestrator/model_chooser.py"]
   }
 ]

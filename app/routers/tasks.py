@@ -17,6 +17,7 @@ from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWork
 from app.config import settings
 from app.services.github_sync import GitHubSyncService
 from app.services.task_status import get_task_status_counts
+from app.services.task_tier import classify_task_tier
 
 logger = logging.getLogger(__name__)
 
