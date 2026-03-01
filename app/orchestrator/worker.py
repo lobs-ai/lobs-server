@@ -176,7 +176,7 @@ class WorkerManager:
         project_id: str,
         agent_type: str,
         rules: Optional[dict[str, Any]] = None,
-        timeout_seconds: int = 1800,
+        timeout_seconds: int = 7200,
     ) -> bool:
         """
         Spawn an OpenClaw worker via Gateway API for the given task.
@@ -454,7 +454,7 @@ class WorkerManager:
         label: str,
         routing_policy: dict[str, Any] | None = None,
         budget_lane: str | None = None,
-        timeout_seconds: int = 1800,
+        timeout_seconds: int = 7200,
     ) -> tuple[Optional[dict[str, str]], Optional[str], str]:
         """
         Call Gateway API to spawn a new session.

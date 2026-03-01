@@ -283,7 +283,7 @@ async def _exec_spawn_agent(config, context, run, *, db, worker_manager):
     if not worker_manager:
         return NodeResult(status="failed", error="No worker_manager available — cannot spawn agent")
 
-    timeout_seconds = config.get("timeout_seconds", 1800)
+    timeout_seconds = config.get("timeout_seconds", 7200)
 
     try:
         spawned = await worker_manager.spawn_worker(
