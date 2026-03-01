@@ -292,6 +292,7 @@ class Prompter:
             + f"**Project:** {project_id}  \n"
             + f"**Workspace:** `{project_path}`  \n"
             + f"**Task ID:** {task_id}\n\n"
+            + f"> ⚠️ **CRITICAL: Your cwd is NOT the project.** Use the absolute path `{project_path}` for ALL file reads, writes, exec commands, and git ops. Start every exec with `cd {project_path} &&`. Never use relative paths.\n\n"
             + "---\n\n"
             + f"{agent_guidance}"
             + escalation_block
