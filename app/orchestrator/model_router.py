@@ -57,6 +57,7 @@ DEFAULT_TIER_MODELS: dict[ModelTier, tuple[str, ...]] = {
     "standard": (
         "openai-codex/gpt-5.3-codex",
         "anthropic/claude-sonnet-4-6",
+        "google-gemini-cli/gemini-3.1-pro",
     ),
     "strong": (
         "anthropic/claude-opus-4-6",

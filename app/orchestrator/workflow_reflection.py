@@ -120,10 +120,13 @@ async def spawn_reflection_agents(db: AsyncSession, worker_manager=None, context
         )
 
         label = f"reflection-{agent}"
+        # Prefer Gemini 3.1 for reflections (strong reasoning, no tool use needed)
+        REFLECTION_MODEL = "google-gemini-cli/gemini-3.1-pro"
+        reflection_model = REFLECTION_MODEL if REFLECTION_MODEL in choice.candidates else choice.model
         result, error, _error_type = await worker_manager._spawn_session(
             task_prompt=prompt,
             agent_id=agent,
-            model=choice.model,
+            model=reflection_model,
             label=label,
         )
 
@@ -131,7 +134,7 @@ async def spawn_reflection_agents(db: AsyncSession, worker_manager=None, context
             worker_manager.register_external_worker(
                 result,
                 agent_type=agent,
-                model=choice.model,
+                model=reflection_model,
                 label=label,
             )
             spawned += 1
