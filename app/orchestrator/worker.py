@@ -412,25 +412,29 @@ class WorkerManager:
             self.project_locks[project_id] = task_id
 
             # Persist session key immediately so restart recovery can find it
-            # (crash-safe: written before any work starts)
-            try:
-                async with self._get_independent_session() as _persist_db:
-                    _run_stub = WorkerRun(
-                        worker_id=worker_id,
-                        task_id=task_id,
-                        started_at=datetime.fromtimestamp(start_time, tz=timezone.utc),
-                        source="orchestrator-gateway",
-                        model=chosen_model,
-                        child_session_key=child_session_key,
-                        agent_type=agent_type,
-                        tasks_completed=0,
-                        succeeded=None,
-                    )
-                    _persist_db.add(_run_stub)
-                    await _persist_db.commit()
-                    logger.debug("[WORKER] Persisted session key %s for task %s", child_session_key[:16], task_id_short)
-            except Exception as _e:
-                logger.warning("[WORKER] Failed to persist session key (non-fatal): %s", _e)
+            # (crash-safe: written before any work starts, retries on DB lock)
+            for _attempt in range(3):
+                try:
+                    await asyncio.sleep(_attempt * 0.5)  # backoff: 0, 0.5, 1.0s
+                    async with self._get_independent_session() as _persist_db:
+                        _run_stub = WorkerRun(
+                            worker_id=worker_id,
+                            task_id=task_id,
+                            started_at=datetime.fromtimestamp(start_time, tz=timezone.utc),
+                            source="orchestrator-gateway",
+                            model=chosen_model,
+                            child_session_key=child_session_key,
+                            agent_type=agent_type,
+                            tasks_completed=0,
+                            succeeded=None,
+                        )
+                        _persist_db.add(_run_stub)
+                        await _persist_db.commit()
+                        logger.debug("[WORKER] Persisted session key %s for task %s", child_session_key[:16], task_id_short)
+                        break
+                except Exception as _e:
+                    if _attempt == 2:
+                        logger.warning("[WORKER] Failed to persist session key after 3 attempts (non-fatal): %s", _e)
 
             # Update DB: worker status
             await self._update_worker_status(
