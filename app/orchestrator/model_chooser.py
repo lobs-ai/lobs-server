@@ -362,6 +362,14 @@ class ModelChooser:
             purpose=purpose,
         )
 
+        # Pin local models (free) to the front — health ranking should not
+        # deprioritize them since failures are transient (model reloads, etc.)
+        local_prefixes = ("lmstudio/", "ollama/")
+        local_models = [m for m in candidates if m.startswith(local_prefixes)]
+        cloud_models = [m for m in candidates if not m.startswith(local_prefixes)]
+        if local_models:
+            candidates = local_models + cloud_models
+
         if agent_type == "programmer" and cfg["strict_coding_tier"] and candidates:
             candidates = [candidates[0]]
 
