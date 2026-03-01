@@ -164,11 +164,9 @@ class WorkerManager:
         self.sweep_requested = False
 
     def _get_independent_session(self):
-        """Get an independent DB session for operations that must not conflict with the engine's session."""
-        if self._session_factory:
-            return self._session_factory()
-        from app.database import AsyncSessionLocal
-        return AsyncSessionLocal()
+        """Get an independent DB session using NullPool — avoids pool contention with main session."""
+        from app.database import IndependentSessionLocal
+        return IndependentSessionLocal()
 
     async def spawn_worker(
         self,

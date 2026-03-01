@@ -27,6 +27,26 @@ def _set_sqlite_pragma(dbapi_conn, connection_record):
     cursor.execute("PRAGMA busy_timeout=10000")
     cursor.close()
 
+# NullPool session factory for independent writes (avoids pool contention)
+from sqlalchemy.pool import NullPool as _NullPool
+_independent_engine = create_async_engine(
+    settings.DATABASE_URL,
+    echo=False,
+    future=True,
+    connect_args={"timeout": 30},
+    poolclass=_NullPool,
+)
+
+@event.listens_for(_independent_engine.sync_engine, "connect")
+def _set_independent_pragma(dbapi_conn, connection_record):
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=15000")
+    cursor.close()
+
+# Independent session for fire-and-forget writes that shouldn't block the main pool
+IndependentSessionLocal = async_sessionmaker(_independent_engine, expire_on_commit=False)
+
 # Create async session factory
 AsyncSessionLocal = async_sessionmaker(
     engine,
