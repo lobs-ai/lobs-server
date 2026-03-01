@@ -2,6 +2,7 @@
 
 import os
 import uuid
+import logging
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,8 @@ from app.schemas import Task, TaskCreate, TaskUpdate, TaskStatusUpdate, TaskWork
 from app.config import settings
 from app.services.github_sync import GitHubSyncService
 from app.services.task_status import get_task_status_counts
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 

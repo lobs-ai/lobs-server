@@ -143,6 +143,19 @@ class WorkflowExecutor:
                         "[WORKFLOW] Skipping duplicate run for task %s — active run exists",
                         task_id[:8],
                     )
+                    # Ensure work_state is in_progress (may have been reset)
+                    try:
+                        db_task = await self.db.get(Task, task_id)
+                        if db_task and db_task.work_state == "not_started":
+                            db_task.work_state = "in_progress"
+                            db_task.updated_at = datetime.now(timezone.utc)
+                            await self.db.commit()
+                            logger.info(
+                                "[WORKFLOW] Fixed work_state for task %s (run already exists)",
+                                task_id[:8],
+                            )
+                    except Exception:
+                        pass
                     return existing_run
 
             context["task"] = task
@@ -375,6 +388,24 @@ class WorkflowExecutor:
         """Poll a running node for completion."""
         node_id = node_def["id"]
         ns = node_states.get(node_id, {})
+
+        # Log a warning if node has been running for > 5 minutes without completing
+        started_at_str = ns.get("started_at")
+        if started_at_str:
+            try:
+                started_at_dt = datetime.fromisoformat(started_at_str)
+                if started_at_dt.tzinfo is None:
+                    started_at_dt = started_at_dt.replace(tzinfo=timezone.utc)
+                node_age_secs = (datetime.now(timezone.utc) - started_at_dt).total_seconds()
+                if node_age_secs > 300 and int(node_age_secs) % 300 < 15:
+                    # Log every 5 minutes (detected when within 15s of a 5-min boundary)
+                    task_id = (run.task_id or "?")[:8]
+                    logger.warning(
+                        "[WORKFLOW] Run %s task=%s stuck at node '%s' (type=%s) for %.0f min — waiting",
+                        run.id[:8], task_id, node_id, node_def.get("type", "?"), node_age_secs / 60,
+                    )
+            except Exception:
+                pass
 
         try:
             result = await self.node_handlers.check(node_def, run)

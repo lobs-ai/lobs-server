@@ -70,8 +70,8 @@ _DEFAULT_PROJECT_POLICY: dict[str, str] = {
     "lobs-mission-control": "never",
     "lobs-mobile": "never",
     "lobs-sail": "never",
-    # App projects — prefer local to save cost
-    "grandmas-stories": "preferred",
+    # App projects — allow local but not pinned first (cloud preferred for iOS code quality)
+    "grandmas-stories": "allowed",
     "flock-master": "preferred",
 }
 

@@ -101,6 +101,11 @@ class OrchestratorEngine:
         if not self._openclaw_available:
             logger.warning("[ENGINE] OpenClaw not found on PATH — orchestrator will run in monitoring-only mode (no worker spawning)")
         
+        # Initialize worker manager early so startup_recovery can use it for session checks
+        if self._worker_manager is None:
+            async with self._session_factory() as _init_db:
+                self._worker_manager = WorkerManager(_init_db, provider_health=self.provider_health, session_factory=self._session_factory)
+        
         # Startup recovery: ensure default project exists and reset orphaned tasks
         await self._startup_recovery()
         
@@ -281,7 +286,7 @@ class OrchestratorEngine:
                     logger.info("[ENGINE] Startup recovery: checking %d persisted worker sessions", len(recent_runs))
 
                     for run in recent_runs:
-                        task = await db.get(Task, run.task_id) if run.task_id else None
+                        task = await db.get(TaskModel, run.task_id) if run.task_id else None
                         if not task or task.status == "completed":
                             continue  # task done, ignore
                         

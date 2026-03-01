@@ -86,30 +86,10 @@ DEFAULT_WORKFLOWS = [
     # ══════════════════════════════════════════════════════════════════
     {
         "name": "task-router",
-        "description": "Master task router: classifies model tier, checks capacity, routes tasks to the correct agent workflow.",
+        "description": "Master task router: checks capacity and routes tasks to the correct agent workflow (model tier classified at task creation).",
         "trigger": {"type": "task_match", "agent_types": ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]},
         "is_active": True,
         "nodes": [
-            # ── Classify model tier first ─────────────────────────────
-            {
-                "id": "classify_tier",
-                "type": "classify_model_tier",
-                "config": {
-                    "deterministic_rules": [
-                        # Always cloud — these need strong reasoning
-                        {"match": "agent:architect", "tier": "strong"},
-                        {"match": "title_contains:reflection", "tier": "standard"},
-                        {"match": "title_contains:security", "tier": "standard"},
-                        {"match": "title_contains:migration", "tier": "standard"},
-                        # Everything else defaults to local (small)
-                        # The model can punt via ESCALATE if the task is too complex
-                        {"match": "always", "tier": "small"},
-                    ],
-                    "llm_fallback": False,
-                    "default_tier": "small",
-                    "on_classified": "preflight",
-                },
-            },
             # ── Pre-flight: check system capacity before doing anything ──
             {
                 "id": "preflight",
@@ -1106,6 +1086,34 @@ DEFAULT_WORKFLOWS = [
                 "on_success": "done",
                 "on_failure": {"retry": 1},
             },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "system", "system": True},
+    },
+    {
+        "name": "system-cleanup",
+        "description": "Daily cleanup: delete old workflow runs (7d), clear context blobs (2d), purge worker history (14d), fail stale runs (8h).",
+        "trigger": {"type": "schedule", "cron": "0 3 * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "cleanup",
+                "type": "python_call",
+                "config": {"callable": "system.cleanup"},
+                "on_success": "notify",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "notify",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "System cleanup done: {cleanup.workflow_runs_deleted} wf runs deleted, {cleanup.worker_runs_deleted} worker runs deleted, {cleanup.stale_runs_failed} stale runs failed.",
+                },
+                "on_success": "done",
+            },
+            # No spawn_agent nodes — no session cleanup needed
             {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
         ],
         "edges": [],

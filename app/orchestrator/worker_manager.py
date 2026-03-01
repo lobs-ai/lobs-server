@@ -352,6 +352,22 @@ class WorkerManager:
         logger.info("[WORKER] Registered external worker %s (label=%s, agent=%s)", worker_id, label, agent_type)
         return worker_id
 
+    async def check_session_alive(self, session_key: str) -> bool:
+        """Check if an OpenClaw session is still alive (running or recently completed).
+
+        Used by startup recovery to determine whether to re-attach or re-queue.
+        Returns True if the session exists and has not fully completed/expired.
+        """
+        try:
+            status = await self.gateway.check_session_status(session_key)
+            if status is None:
+                # Cannot determine — assume dead for safety
+                return False
+            return not status.get("completed", True)
+        except Exception as e:
+            logger.warning("[WORKER] check_session_alive failed for %s: %s", session_key[:20], e)
+            return False
+
     async def check_workers(self) -> None:
         """
         Check all active workers and handle completed/failed ones.
