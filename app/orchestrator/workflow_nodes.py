@@ -35,7 +35,6 @@ from app.orchestrator.config import GATEWAY_URL, GATEWAY_TOKEN, GATEWAY_SESSION_
 
 logger = logging.getLogger(__name__)
 
-
 # ══════════════════════════════════════════════════════════════════════
 # Node Result
 # ══════════════════════════════════════════════════════════════════════
@@ -49,7 +48,6 @@ class NodeResult:
     error_type: str = ""
     session_key: Optional[str] = None
 
-
 # ══════════════════════════════════════════════════════════════════════
 # Node Registry — the plugin system
 # ══════════════════════════════════════════════════════════════════════
@@ -59,7 +57,6 @@ class NodeResult:
 
 _NODE_EXECUTORS: dict[str, Callable] = {}
 _NODE_CHECKERS: dict[str, Callable] = {}
-
 
 def register_node(node_type: str):
     """Decorator to register a node executor.
@@ -74,7 +71,6 @@ def register_node(node_type: str):
         return fn
     return decorator
 
-
 def register_node_checker(node_type: str):
     """Decorator to register a node checker for async nodes.
 
@@ -88,11 +84,9 @@ def register_node_checker(node_type: str):
         return fn
     return decorator
 
-
 def get_registered_node_types() -> list[str]:
     """Return all registered node type names."""
     return sorted(_NODE_EXECUTORS.keys())
-
 
 # ══════════════════════════════════════════════════════════════════════
 # Template rendering
@@ -114,7 +108,6 @@ def _render_template(template: str, context: dict[str, Any]) -> str:
 
     return re.sub(r"\{([a-zA-Z0-9_.]+)\}", replacer, template)
 
-
 def _resolve_context_path(context: dict, path: str) -> Any:
     """Walk a dotted path in context, returning the value or None."""
     value = context
@@ -124,7 +117,6 @@ def _resolve_context_path(context: dict, path: str) -> Any:
         else:
             return None
     return value
-
 
 def _evaluate_condition(expr: str, context: dict) -> bool:
     """Evaluate a simple condition expression.
@@ -170,7 +162,6 @@ def _evaluate_condition(expr: str, context: dict) -> bool:
     # Truthiness check
     value = _resolve_context_path(context, expr)
     return bool(value)
-
 
 # ══════════════════════════════════════════════════════════════════════
 # NodeHandlers — dispatcher (backward compat + registry)
@@ -229,7 +220,6 @@ class NodeHandlers:
         except Exception as e:
             logger.debug("[NODE] Session delete failed: %s", e)
 
-
 # ══════════════════════════════════════════════════════════════════════
 # Helper: model tier resolution
 # ══════════════════════════════════════════════════════════════════════
@@ -252,11 +242,9 @@ async def _resolve_model_tier(tier: str, agent_type: str, context: dict, db: Any
         logger.warning("[NODE] Model tier resolution failed for tier=%s: %s", tier, e)
         return None
 
-
 # ══════════════════════════════════════════════════════════════════════
 # Built-in Node Types
 # ══════════════════════════════════════════════════════════════════════
-
 
 # ── spawn_agent ──────────────────────────────────────────────────────
 
@@ -331,7 +319,6 @@ async def _exec_spawn_agent(config, context, run, *, db, worker_manager):
     except Exception as e:
         return NodeResult(status="failed", error=str(e), error_type="spawn_error")
 
-
 @register_node_checker("spawn_agent")
 async def _check_spawn_agent(node_def, run, *, db, worker_manager):
     """Check if a spawned agent has completed."""
@@ -404,7 +391,6 @@ async def _check_spawn_agent(node_def, run, *, db, worker_manager):
             error=f"Worker completed but task state is {db_task.work_state if db_task else 'unknown'}",
         )
 
-
 # ── send_to_session ──────────────────────────────────────────────────
 
 @register_node("send_to_session")
@@ -450,7 +436,6 @@ async def _exec_send_to_session(config, context, run, *, db, worker_manager):
     except Exception as e:
         return NodeResult(status="failed", error=str(e))
 
-
 @register_node_checker("send_to_session")
 async def _check_send_to_session(node_def, run, *, db, worker_manager):
     """Wait a short grace period after sending follow-up instructions."""
@@ -463,7 +448,6 @@ async def _check_send_to_session(node_def, run, *, db, worker_manager):
     if datetime.now(timezone.utc).timestamp() < float(wait_until):
         return None
     return NodeResult(status="completed", output={"message_sent": True, "wait_elapsed": True})
-
 
 # ── tool_call ────────────────────────────────────────────────────────
 
@@ -496,7 +480,6 @@ async def _exec_tool_call(config, context, run, *, db, worker_manager):
         return NodeResult(status="failed", error="Command timed out", error_type="timeout")
     except Exception as e:
         return NodeResult(status="failed", error=str(e))
-
 
 # ── branch ───────────────────────────────────────────────────────────
 
@@ -542,7 +525,6 @@ async def _exec_branch(config, context, run, *, db, worker_manager):
 
     return NodeResult(status="failed", error="No branch condition matched and no default")
 
-
 # ── gate ─────────────────────────────────────────────────────────────
 
 @register_node("gate")
@@ -564,7 +546,6 @@ async def _exec_gate(config, context, run, *, db, worker_manager):
     await db.commit()
 
     return NodeResult(status="running", output={"inbox_item_id": item.id, "gate_type": "human_approval"})
-
 
 @register_node_checker("gate")
 async def _check_gate(node_def, run, *, db, worker_manager):
@@ -595,7 +576,6 @@ async def _check_gate(node_def, run, *, db, worker_manager):
             return NodeResult(status="failed", error="Gate timed out without approval")
 
     return None
-
 
 # ── notify ───────────────────────────────────────────────────────────
 
@@ -648,7 +628,6 @@ async def _exec_notify(config, context, run, *, db, worker_manager):
     await db.commit()
     return NodeResult(status="completed", output={"notified": True, "channel": channel})
 
-
 # ── cleanup ──────────────────────────────────────────────────────────
 
 @register_node("cleanup")
@@ -658,7 +637,6 @@ async def _exec_cleanup(config, context, run, *, db, worker_manager):
     if config.get("delete_session", True) and run.session_key:
         await handlers.delete_session(run.session_key)
     return NodeResult(status="completed", output={"cleaned_up": True})
-
 
 # ── sub_workflow ─────────────────────────────────────────────────────
 
@@ -712,7 +690,6 @@ async def _exec_sub_workflow(config, context, run, *, db, worker_manager):
         output={"child_run_id": child_run.id, "child_workflow": wf.name},
     )
 
-
 @register_node_checker("sub_workflow")
 async def _check_sub_workflow(node_def, run, *, db, worker_manager):
     """Check if the child workflow run has completed."""
@@ -748,7 +725,6 @@ async def _check_sub_workflow(node_def, run, *, db, worker_manager):
         output={"child_run_id": child_run_id, "child_status": child_run.status},
         error=child_run.error or f"Child workflow {child_run.status}",
     )
-
 
 # ── python_call ──────────────────────────────────────────────────────
 
@@ -787,7 +763,6 @@ async def _exec_python_call(config, context, run, *, db, worker_manager):
         logger.error("[NODE:python_call] %s failed: %s", callable_name, e, exc_info=True)
         return NodeResult(status="failed", error=str(e), error_type="python_error")
 
-
 @register_node_checker("python_call")
 async def _check_python_call(node_def, run, *, db, worker_manager):
     """Re-check a polling python_call node."""
@@ -810,7 +785,6 @@ async def _check_python_call(node_def, run, *, db, worker_manager):
         return NodeResult(status="completed", output={"result": str(result)})
     except Exception as e:
         return NodeResult(status="failed", error=str(e), error_type="python_error")
-
 
 # ── for_each ─────────────────────────────────────────────────────────
 
@@ -893,7 +867,6 @@ async def _exec_for_each(config, context, run, *, db, worker_manager):
             collect_key: results,
         },
     )
-
 
 # ── http_request ─────────────────────────────────────────────────────
 
@@ -980,7 +953,6 @@ async def _exec_http_request(config, context, run, *, db, worker_manager):
     except Exception as e:
         return NodeResult(status="failed", error=str(e), error_type="http_error")
 
-
 # ── transform ────────────────────────────────────────────────────────
 
 @register_node("transform")
@@ -1036,7 +1008,6 @@ async def _exec_transform(config, context, run, *, db, worker_manager):
         output["rendered"] = _render_template(template, context)
 
     return NodeResult(status="completed", output=output)
-
 
 # ── parallel ─────────────────────────────────────────────────────────
 
@@ -1104,7 +1075,6 @@ async def _exec_parallel(config, context, run, *, db, worker_manager):
         },
     )
 
-
 # ── delay ────────────────────────────────────────────────────────────
 
 @register_node("expression")
@@ -1171,7 +1141,6 @@ async def _exec_expression(config, context, run, *, db, worker_manager):
         output["goto"] = default
 
     return NodeResult(status="completed", output=output)
-
 
 @register_node("llm_route")
 async def _exec_llm_route(config, context, run, *, db, worker_manager):
@@ -1340,7 +1309,6 @@ Respond with ONLY the id of the chosen route. Nothing else."""
             )
         return NodeResult(status="failed", error=str(e))
 
-
 @register_node("delay")
 async def _exec_delay(config, context, run, *, db, worker_manager):
     """Wait for a specified duration before proceeding.
@@ -1354,7 +1322,6 @@ async def _exec_delay(config, context, run, *, db, worker_manager):
         status="running",
         output={"wait_until": wait_until, "delay_seconds": seconds},
     )
-
 
 @register_node_checker("delay")
 async def _check_delay(node_def, run, *, db, worker_manager):
@@ -1371,7 +1338,6 @@ async def _check_delay(node_def, run, *, db, worker_manager):
         return NodeResult(status="completed", output={"delayed": True, "delay_seconds": output.get("delay_seconds", 0)})
 
     return None  # Still waiting
-
 
 # ══════════════════════════════════════════════════════════════════════
 # Python Call Registry — bridges workflow nodes to existing business logic
@@ -1444,13 +1410,11 @@ async def _pcall_scan_unassigned(db, worker_manager, context, **kw):
     from app.orchestrator.workflow_assignment import scan_unassigned
     return await scan_unassigned(db, worker_manager, context, **kw)
 
-
 async def _pcall_inbox_process_threads(db, worker_manager, context, **kw):
     """Process inbox threads with user responses."""
     from app.orchestrator.inbox_processor import InboxProcessor
     processor = InboxProcessor(db)
     return await processor.process_threads()
-
 
 _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Legacy monolithic callables
@@ -1487,7 +1451,6 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     "inbox.process_threads": _pcall_inbox_process_threads,
 }
 
-
 def register_python_callable(name: str, handler: Callable):
     """Register a new Python callable for use in python_call nodes.
 
@@ -1496,21 +1459,17 @@ def register_python_callable(name: str, handler: Callable):
     """
     _PYTHON_CALL_REGISTRY[name] = handler
 
-
 async def _pcall_integration(func_name: str, db, worker_manager, context, **kw):
     """Generic dispatcher for integration callables."""
     import app.orchestrator.workflow_integrations as integrations
     fn = getattr(integrations, func_name)
     return await fn(db, worker_manager, context, **kw)
 
-
 async def _pcall_learning(func_name: str, db, worker_manager, context, **kw):
     """Dispatcher for learning service callables."""
     import app.services.learning_service as learning
     fn = getattr(learning, func_name)
     return await fn(db, worker_manager, context, **kw)
-
-
 
 # ══════════════════════════════════════════════════════════════════════
 # Node Type: classify_model_tier
@@ -1546,8 +1505,8 @@ async def _node_classify_model_tier(config: dict, context: dict, run, *, db, wor
         logger.info("[NODE:classify_tier] Task %s has explicit tier: %s", task_id, explicit_tier)
         return NodeResult(
             status="completed",
-            output={"classified_tier": explicit_tier, "source": "explicit"},
-            goto=config.get("on_classified"),
+            output={"classified_tier": explicit_tier, "source": "explicit", "goto": config.get("on_classified")},
+
         )
 
     rules = config.get("deterministic_rules", [])
@@ -1607,10 +1566,13 @@ async def _node_classify_model_tier(config: dict, context: dict, run, *, db, wor
                 logger.warning("[NODE:classify_tier] Failed to update task tier: %s", e)
 
             task["model_tier"] = tier
+            # Update run context so spawn_agent sees the tier
+            if hasattr(run, 'context') and isinstance(run.context, dict):
+                if "task" in run.context:
+                    run.context["task"]["model_tier"] = tier
             return NodeResult(
                 status="completed",
-                output={"classified_tier": tier, "source": f"rule:{match_expr}"},
-                goto=config.get("on_classified"),
+                output={"classified_tier": tier, "source": f"rule:{match_expr}", "goto": config.get("on_classified")},
             )
 
     # LLM fallback
@@ -1619,10 +1581,12 @@ async def _node_classify_model_tier(config: dict, context: dict, run, *, db, wor
 
     if not use_llm:
         task["model_tier"] = default_tier
+        if hasattr(run, "context") and isinstance(run.context, dict) and "task" in run.context:
+            run.context["task"]["model_tier"] = default_tier
         return NodeResult(
             status="completed",
-            output={"classified_tier": default_tier, "source": "default"},
-            goto=config.get("on_classified"),
+            output={"classified_tier": default_tier, "source": "default", "goto": config.get("on_classified")},
+
         )
 
     # Use local model for classification
@@ -1635,10 +1599,12 @@ async def _node_classify_model_tier(config: dict, context: dict, run, *, db, wor
         if not lm_models:
             # No local model available, use default
             task["model_tier"] = default_tier
+            if hasattr(run, "context") and isinstance(run.context, dict) and "task" in run.context:
+                run.context["task"]["model_tier"] = default_tier
             return NodeResult(
                 status="completed",
-                output={"classified_tier": default_tier, "source": "no_local_model"},
-                goto=config.get("on_classified"),
+                output={"classified_tier": default_tier, "source": "no_local_model", "goto": config.get("on_classified")},
+
             )
 
         # Pick first available local model
@@ -1704,8 +1670,10 @@ Respond with ONLY the tier name: small, medium, standard, or strong"""
         logger.warning("[NODE:classify_tier] Failed to update task tier: %s", e)
 
     task["model_tier"] = classified_tier
+    if hasattr(run, "context") and isinstance(run.context, dict) and "task" in run.context:
+        run.context["task"]["model_tier"] = classified_tier
     return NodeResult(
         status="completed",
-        output={"classified_tier": classified_tier, "source": "llm"},
-        goto=config.get("on_classified"),
+        output={"classified_tier": classified_tier, "source": "llm", "goto": config.get("on_classified")},
+
     )
