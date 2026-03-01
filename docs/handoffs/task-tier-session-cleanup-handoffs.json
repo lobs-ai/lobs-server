@@ -1,66 +1,20 @@
 [
   {
     "to": "programmer",
-    "initiative": "task-tier-at-creation",
-    "title": "Create TierClassifier service (app/services/tier_classifier.py)",
-    "context": "Part of task-tier-at-creation initiative. Tier classification currently happens mid-workflow in a `classify_model_tier` node. We need it at task creation time instead. See design: docs/task-tier-and-session-cleanup-design.md",
-    "spec": {
-      "file": "app/services/tier_classifier.py",
-      "function": "async def classify_task_tier(payload: dict, db: AsyncSession) -> str",
-      "logic": [
-        "1. If payload['model_tier'] is non-empty -> return it unchanged",
-        "2. Project hard minimums: if project_id contains 'lobs-server', 'lobs-mission-control', or 'lobs-mobile' -> minimum 'standard'. Read overrides from DB setting 'model_router.project_minimums' (dict of project_id -> min_tier). Fallback to hardcoded lobs-* defaults.",
-        "3. LLM classification: POST to http://localhost:1234/v1/chat/completions (LM Studio), 5s timeout. Use first model from MODEL_ROUTER_TIER_MICRO_KEY DB setting, or any model with 'qwen' in the name. Prompt: 'Classify this task complexity: small, standard, or strong.\\n\\nTitle: {title}\\nProject: {project_id}\\nAgent: {agent}\\nNotes: {notes[:500]}\\n\\nReturn ONLY one word.' Parse first word of response. If not in {small,standard,strong} -> standard.",
-        "4. Default: return 'standard'"
-      ],
-      "imports": "Use aiohttp for LM Studio call. Import MODEL_ROUTER_TIER_MICRO_KEY from app.orchestrator.model_router. Import OrchestratorSetting from app.models."
-    },
-    "acceptance": "Unit tests: (a) caller-set tier passes through unchanged, (b) lobs-server project gets minimum standard even if LLM returns small, (c) LM Studio timeout/unavailable falls back to standard, (d) LLM returns 'small' for a script task. All tests pass.",
-    "files": ["docs/task-tier-and-session-cleanup-design.md", "app/orchestrator/model_router.py", "app/models.py"]
+    "initiative": "task-tier-classification-session-cleanup",
+    "title": "Add tier classification at task creation",
+    "context": "Tasks need model_tier set before the first workflow step runs. Currently model_tier is always null at creation. The field exists on TaskCreate schema (schemas.py line 64) and Task model. Design doc: docs/task-tier-classification-and-session-cleanup-design.md. Use existing llm_direct module (app/orchestrator/llm_direct.py) for local qwen call — it already handles LM Studio with timeout+fallback.",
+    "spec": "1. Create app/services/tier_classifier.py with async function classify_task_tier(task_dict: dict, db: AsyncSession) -> str. Logic: (a) if task_dict.get('model_tier') → return it unchanged. (b) Project hard minimum: if project_id contains 'lobs-server', 'lobs-mission-control', or 'lobs-mobile' → floor is 'standard'. (c) Call llm_direct with system prompt defining tiers (small=boilerplate/docs/simple crud/scripts/experiments, standard=production features/API/refactors/research, strong=architecture/security/complex debugging/migrations) and user prompt with title+notes+project_id+agent. Parse first word of response, validate is one of small/standard/strong. On any exception or invalid response → use 'standard'. (d) Apply project floor: if floor='standard' and result='small' → return 'standard'. 2. In app/routers/tasks.py create_task(), after db.flush()+db.refresh(db_task), call classify_task_tier and set db_task.model_tier. Wrap in try/except — on any error log warning and continue (do not fail the request). 3. The TaskCreate schema already has model_tier: Optional[str] = None — callers can pass it to override.",
+    "acceptance": "POST /api/tasks with no model_tier → response has model_tier populated. POST with model_tier='strong' → keeps 'strong'. lobs-server project gets minimum 'standard'. LLM unavailable → gets 'standard', no error. Unit tests in tests/test_tier_classifier.py covering all 4 paths.",
+    "files": ["docs/task-tier-classification-and-session-cleanup-design.md", "app/services/tier_classifier.py", "app/routers/tasks.py", "app/orchestrator/llm_direct.py"]
   },
   {
     "to": "programmer",
-    "initiative": "task-tier-at-creation",
-    "title": "Wire tier classification into POST /api/tasks",
-    "context": "Part of task-tier-at-creation initiative. After TierClassifier service exists, integrate it into task creation. See design: docs/task-tier-and-session-cleanup-design.md",
-    "spec": {
-      "file": "app/routers/tasks.py",
-      "location": "In create_task(), after 'await db.flush()' and 'await db.refresh(db_task)', before the final return",
-      "change": "If db_task.model_tier is None or empty, call `tier = await classify_task_tier(payload, db)` and set `db_task.model_tier = tier`. Then call `await db.flush()` again so the tier is persisted. Import classify_task_tier from app.services.tier_classifier.",
-      "note": "The classification must happen before the return — the TaskCreated ControlLoopEvent is already emitted at flush time, but that's OK; the orchestrator reads task.model_tier fresh from DB when it processes the event."
-    },
-    "acceptance": "POST /api/tasks with no model_tier returns task with model_tier set (not null). POST with model_tier='strong' returns model_tier='strong' unchanged. Tests pass.",
-    "files": ["docs/task-tier-and-session-cleanup-design.md", "app/routers/tasks.py", "app/services/tier_classifier.py"]
-  },
-  {
-    "to": "programmer",
-    "initiative": "task-tier-at-creation",
-    "title": "ModelChooser: short-circuit to tier list when task.model_tier is set",
-    "context": "Part of task-tier-at-creation initiative. Currently ModelChooser.choose() always calls decide_models() which does fuzzy task analysis, ignoring task.model_tier. We need a direct path: model_tier -> DB tier list -> candidates. See design: docs/task-tier-and-session-cleanup-design.md",
-    "spec": {
-      "file": "app/orchestrator/model_chooser.py",
-      "changes": [
-        "Add helper at module level: def _tier_to_lane(tier: str) -> str — maps micro/small -> 'background', medium/standard -> 'standard', strong -> 'critical', default -> 'standard'",
-        "In ModelChooser.choose(), after `tiers = dict(cfg.get('tiers') or {})` and after local model discovery injection, add: task_tier = (task.get('model_tier') or '').strip().lower(). If task_tier is non-empty AND task_tier in tiers AND tiers[task_tier] is non-empty list: set candidates = list(tiers[task_tier]) and budget_lane = _tier_to_lane(task_tier). Skip the decide_models() call entirely.",
-        "If task_tier is not set or tier list is empty, fall through to existing decide_models() path as-is.",
-        "For the short-circuit path, the audit dict should include: {'tier_source': 'task.model_tier', 'tier': task_tier, 'tier_models': tiers}. Pass candidates into the existing routing policy, budget guards, and health ranking steps unchanged.",
-        "For ModelChoice construction in the short-circuit path, use detected_lane from lane_guard_decision.get('lane') as usual (budget guard may override), and set audit tier_models to the full tiers dict."
-      ]
-    },
-    "acceptance": "Unit test: mock DB returning tier lists, call choose() with task={'model_tier': 'small'} -> first candidate comes from small tier list. Call with task={} (no tier) -> existing decide_models path runs. All existing model chooser tests still pass.",
-    "files": ["docs/task-tier-and-session-cleanup-design.md", "app/orchestrator/model_chooser.py", "app/orchestrator/model_router.py"]
-  },
-  {
-    "to": "programmer",
-    "initiative": "task-tier-at-creation",
-    "title": "Fix worker.py _terminate_session: remove broken sessions_kill call",
-    "context": "worker.py._terminate_session() calls sessions_kill via Gateway, which doesn't exist (verified: returns 'Tool not available'). Sessions auto-archive after archiveAfterMinutes=5. The fix: make _terminate_session a no-op like workflow_nodes.py.delete_session(). See design: docs/task-tier-and-session-cleanup-design.md",
-    "spec": {
-      "file": "app/orchestrator/worker.py",
-      "change": "Replace the entire body of _terminate_session() with: logger.debug('[WORKER] Session %s will be auto-archived by OpenClaw. reason=%s', session_key, reason); return True. Remove the aiohttp import from this method if it's only used here (check other usages first).",
-      "note": "The method signature stays the same so callers don't need to change."
-    },
-    "acceptance": "No sessions_kill in codebase after change. _terminate_session returns True. No HTTP calls made. Run grep -rn sessions_kill app/ to verify. Tests pass.",
-    "files": ["docs/task-tier-and-session-cleanup-design.md", "app/orchestrator/worker.py"]
+    "initiative": "task-tier-classification-session-cleanup",
+    "title": "Fix NodeHandlers.delete_session() to actually delete sessions",
+    "context": "Session cleanup nodes call NodeHandlers.delete_session() which is a no-op placeholder (workflow_nodes.py lines 201-211). The real delete implementation exists in WorkerGateway.delete_session() (worker_gateway.py lines 382-422) using WebSocket JSON-RPC sessions.delete — this method is already proven via worker_monitor.py line 366. The task-router done node already has correct session_refs wired for all spawn nodes. Only the underlying delete call is broken. Design doc: docs/task-tier-classification-and-session-cleanup-design.md",
+    "spec": "In app/orchestrator/workflow_nodes.py, replace NodeHandlers.delete_session() no-op (lines ~201-211) with: check self.worker_manager has gateway attribute → call await self.worker_manager.gateway.delete_session(session_key) → log result. If no gateway available, log warning and return (do not raise). Also remove dead code: @register_node('classify_model_tier') and _node_classify_model_tier function (~line 1643) — no workflow uses this node type.",
+    "acceptance": "After a programmer task completes and hits the done/cleanup node, the worker session is deleted from Gateway (verify via openclaw sessions list — session count stays low). No crash when gateway unavailable. Unit test: mock worker_manager.gateway, assert delete_session called with correct session key.",
+    "files": ["docs/task-tier-classification-and-session-cleanup-design.md", "app/orchestrator/workflow_nodes.py", "app/orchestrator/worker_gateway.py"]
   }
 ]
