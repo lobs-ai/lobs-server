@@ -24,7 +24,7 @@ LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v
 LMSTUDIO_MODEL = os.environ.get("LMSTUDIO_MODEL", "qwen/qwen3.5-35b-a3b")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyD9A6O9qoAtN2JV1cXdc14dUhZ1uSUvIdE")
-GEMINI_MODEL = os.environ.get("GEMINI_CLASSIFY_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_CLASSIFY_MODEL", "gemini-3.1-pro-preview")
 
 AUTH_PROFILES_PATH = os.path.expanduser(
     "~/.openclaw/agents/main/agent/auth-profiles.json"
