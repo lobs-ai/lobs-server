@@ -608,6 +608,13 @@ class ModelChooser:
 
         return sorted(candidates, key=provider_rank)
 
+    async def _get_project_local_policy(self, project_id: str, cfg: dict) -> str:
+        """Return local model policy: 'never' | 'preferred' | 'allowed'."""
+        raw = cfg.get("project_policy") or {}
+        if project_id and project_id in raw:
+            return raw[project_id]
+        return _DEFAULT_PROJECT_POLICY.get(project_id or "", "preferred")
+
     async def _provider_month_cost(self, provider: str, now: datetime) -> float:
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         result = await self.db.execute(
