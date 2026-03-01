@@ -199,26 +199,16 @@ class NodeHandlers:
         return await checker(node_def, run, db=self.db, worker_manager=self.worker_manager)
 
     async def delete_session(self, session_key: str) -> None:
-        """Delete an OpenClaw session via Gateway using the subagents kill action."""
-        try:
-            async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "subagents",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-wf-cleanup-{uuid.uuid4().hex[:6]}",
-                        "args": {"action": "kill", "target": session_key},
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10),
-                )
-                data = await resp.json()
-                if data.get("ok"):
-                    logger.info("[NODE] Deleted session %s", session_key)
-                else:
-                    logger.debug("[NODE] Session delete response (non-fatal): %s", data)
-        except Exception as e:
-            logger.debug("[NODE] Session delete failed (non-fatal): %s", e)
+        """Mark a session for cleanup.
+
+        OpenClaw does not expose an HTTP session-delete API. Cleanup relies on:
+          1. runTimeoutSeconds=1800 — kills stuck/long-running sessions
+          2. agents.defaults.subagents.archiveAfterMinutes=5 — auto-archives completed sessions
+
+        This method is a no-op placeholder. If a Gateway delete API becomes available,
+        implement it here. For now, log and move on.
+        """
+        logger.debug("[NODE] Session %s will be auto-archived by OpenClaw (archiveAfterMinutes=5)", session_key)
 
 # ══════════════════════════════════════════════════════════════════════
 # Helper: model tier resolution
