@@ -183,8 +183,8 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests_1",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && if [ -d tests ] || ls *test*.py >/dev/null 2>&1; then python -m pytest --tb=short 2>&1; else echo 'No tests detected; skipping pytest'; fi",
-                    "timeout_seconds": 300,
+                    "command": "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}",
+                    "timeout_seconds": 600,
                 },
                 "on_success": "tests_gate_1",
                 "on_failure": {"retry": 0},
@@ -195,7 +195,7 @@ DEFAULT_WORKFLOWS = [
                 "config": {
                     "conditions": [
                         {"match": "run_tests_1.returncode == 0", "goto": "done"},
-                        {"match": 'contains(run_tests_1.stdout, "No tests detected")', "goto": "done"},
+                        {"match": 'contains(run_tests_1.stdout, "no buildable project")', "goto": "done"},
                     ],
                     "default": "spawn_programmer_fix_1",
                 },
@@ -205,7 +205,7 @@ DEFAULT_WORKFLOWS = [
                 "type": "spawn_agent",
                 "config": {
                     "agent_type": "programmer",
-                    "prompt_template": "Previous implementation failed project tests. Fix the failures and update code only as needed.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nLatest test output:\n{run_tests_1.stdout}\n{run_tests_1.stderr}",
+                    "prompt_template": "CI (build + tests) failed after your implementation. Read the errors carefully and fix only what's broken. Common issues: missing imports, type errors, undeclared variables, missing files.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nCI output:\n{run_tests_1.stdout}\n{run_tests_1.stderr}",
                 },
                 "on_success": "run_tests_2",
                 "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
@@ -214,8 +214,8 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests_2",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && if [ -d tests ] || ls *test*.py >/dev/null 2>&1; then python -m pytest --tb=short 2>&1; else echo 'No tests detected; skipping pytest'; fi",
-                    "timeout_seconds": 300,
+                    "command": "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}",
+                    "timeout_seconds": 600,
                 },
                 "on_success": "tests_gate_2",
                 "on_failure": {"retry": 0},
@@ -235,7 +235,7 @@ DEFAULT_WORKFLOWS = [
                 "type": "spawn_agent",
                 "config": {
                     "agent_type": "programmer",
-                    "prompt_template": "Tests are still failing after one fix attempt. Make a second and final repair pass.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nLatest test output:\n{run_tests_2.stdout}\n{run_tests_2.stderr}",
+                    "prompt_template": "CI is still failing after one fix attempt. This is the final try. Read errors carefully, fix the root cause.\n\nTask: {task.title}\n\nOriginal notes:\n{task.notes}\n\nCI output:\n{run_tests_2.stdout}\n{run_tests_2.stderr}",
                 },
                 "on_success": "run_tests_3",
                 "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
@@ -244,8 +244,8 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests_3",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && if [ -d tests ] || ls *test*.py >/dev/null 2>&1; then python -m pytest --tb=short 2>&1; else echo 'No tests detected; skipping pytest'; fi",
-                    "timeout_seconds": 300,
+                    "command": "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}",
+                    "timeout_seconds": 600,
                 },
                 "on_success": "tests_gate_3",
                 "on_failure": {"retry": 0},
@@ -264,7 +264,7 @@ DEFAULT_WORKFLOWS = [
                 "id": "tests_failed_terminal",
                 "type": "gate",
                 "config": {
-                    "prompt": "Programmer task failed tests after max retries (2). Manual intervention required.",
+                    "prompt": "CI (build + tests) still failing after 2 fix attempts. Manual intervention required.",
                     "timeout_hours": 24,
                 },
                 "on_success": "done",
@@ -418,8 +418,8 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1 || true",
-                    "timeout_seconds": 300,
+                    "command": "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}",
+                    "timeout_seconds": 600,
                 },
                 "on_success": "check_tests",
                 "on_failure": {"retry": 1, "fallback": "fix_tests", "escalate_after": 3, "abort_on": ["timeout"]},
@@ -448,8 +448,8 @@ DEFAULT_WORKFLOWS = [
                 "id": "run_tests_retry",
                 "type": "tool_call",
                 "config": {
-                    "command": "cd {project.repo_path} && python -m pytest --tb=short 2>&1 || true",
-                    "timeout_seconds": 300,
+                    "command": "/Users/lobs/lobs-server/bin/ci.sh {project.repo_path}",
+                    "timeout_seconds": 600,
                 },
                 "on_success": "check_tests_retry",
                 "on_failure": {"retry": 0, "abort_on": ["timeout"]},
