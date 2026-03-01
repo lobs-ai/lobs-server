@@ -199,16 +199,23 @@ class NodeHandlers:
         return await checker(node_def, run, db=self.db, worker_manager=self.worker_manager)
 
     async def delete_session(self, session_key: str) -> None:
-        """Mark a session for cleanup.
+        """Delete a worker session via Gateway WebSocket API.
 
-        OpenClaw does not expose an HTTP session-delete API. Cleanup relies on:
-          1. runTimeoutSeconds=1800 — kills stuck/long-running sessions
-          2. agents.defaults.subagents.archiveAfterMinutes=5 — auto-archives completed sessions
-
-        This method is a no-op placeholder. If a Gateway delete API becomes available,
-        implement it here. For now, log and move on.
+        Delegates to WorkerManager.gateway.delete_session() which uses the
+        sessions.delete JSON-RPC method. Falls back gracefully if gateway is
+        unavailable (session will be auto-archived by OpenClaw as a safety net).
         """
-        logger.debug("[NODE] Session %s will be auto-archived by OpenClaw (archiveAfterMinutes=5)", session_key)
+        if self.worker_manager and hasattr(self.worker_manager, "gateway") and self.worker_manager.gateway:
+            try:
+                result = await self.worker_manager.gateway.delete_session(session_key)
+                if result:
+                    logger.info("[NODE] Deleted session %s via Gateway", session_key)
+                else:
+                    logger.warning("[NODE] Gateway could not delete session %s (will auto-archive)", session_key)
+            except Exception as exc:
+                logger.warning("[NODE] Error deleting session %s: %s (will auto-archive)", session_key, exc)
+        else:
+            logger.debug("[NODE] No gateway available; session %s will auto-archive", session_key)
 
 # ══════════════════════════════════════════════════════════════════════
 # Helper: model tier resolution
@@ -1636,209 +1643,3 @@ async def _pcall_learning(func_name: str, db, worker_manager, context, **kw):
     fn = getattr(learning, func_name)
     return await fn(db, worker_manager, context, **kw)
 
-# ══════════════════════════════════════════════════════════════════════
-# Node Type: classify_model_tier
-# ══════════════════════════════════════════════════════════════════════
-
-@register_node("classify_model_tier")
-async def _node_classify_model_tier(config: dict, context: dict, run, *, db, worker_manager=None) -> NodeResult:
-    """Classify a task's model tier using deterministic rules + LLM fallback.
-
-    Sets task.model_tier for downstream spawn_agent nodes to use.
-
-    Config:
-        deterministic_rules: list of {match, tier} — evaluated in order
-            match patterns:
-                "project:<pattern>"       — project_id contains pattern
-                "agent:<type>"            — exact agent type match
-                "title_contains:<text>"   — title contains text
-                "project_tag:<tag>"       — project notes contain tag (e.g. "experimental")
-                "always"                  — always matches (use as final default)
-        llm_fallback: bool — use LLM for unmatched tasks (default: true)
-        llm_model_tier: str — tier for the classification LLM (default: "micro")
-        default_tier: str — fallback if nothing matches (default: "standard")
-    """
-    task = context.get("task", {})
-    if not isinstance(task, dict):
-        task = {}
-
-    task_id = task.get("id", "?")
-
-    # If the task already has an explicit model_tier, respect it
-    explicit_tier = (task.get("model_tier") or "").strip().lower()
-    if explicit_tier:
-        logger.info("[NODE:classify_tier] Task %s has explicit tier: %s", task_id, explicit_tier)
-        return NodeResult(
-            status="completed",
-            output={"classified_tier": explicit_tier, "source": "explicit", "goto": config.get("on_classified")},
-
-        )
-
-    rules = config.get("deterministic_rules", [])
-    project_id = (task.get("project_id") or "").lower()
-    agent_type = (task.get("agent") or "").lower()
-    title = (task.get("title") or "").lower()
-
-    # Check project metadata for tags
-    project_notes = ""
-    try:
-        from sqlalchemy import text as sa_text
-        result = await db.execute(
-            sa_text("SELECT notes FROM projects WHERE id = :pid"),
-            {"pid": task.get("project_id", "")}
-        )
-        row = result.fetchone()
-        if row:
-            project_notes = (row[0] or "").lower()
-    except Exception:
-        pass
-
-    # Evaluate deterministic rules in order
-    for rule in rules:
-        match_expr = rule.get("match", "")
-        tier = rule.get("tier", "standard")
-        matched = False
-
-        if match_expr.startswith("project:"):
-            pattern = match_expr.split(":", 1)[1].strip().lower()
-            matched = pattern in project_id
-        elif match_expr.startswith("agent:"):
-            pattern = match_expr.split(":", 1)[1].strip().lower()
-            matched = pattern == agent_type
-        elif match_expr.startswith("title_contains:"):
-            pattern = match_expr.split(":", 1)[1].strip().lower()
-            matched = pattern in title
-        elif match_expr.startswith("project_tag:"):
-            tag = match_expr.split(":", 1)[1].strip().lower()
-            matched = tag in project_notes
-        elif match_expr == "always":
-            matched = True
-
-        if matched:
-            logger.info(
-                "[NODE:classify_tier] Task %s matched rule '%s' -> tier=%s",
-                task_id, match_expr, tier
-            )
-            # Update the task in DB so spawn_agent picks it up
-            try:
-                from sqlalchemy import text as sa_text
-                await db.execute(
-                    sa_text("UPDATE tasks SET model_tier = :tier WHERE id = :tid"),
-                    {"tier": tier, "tid": task.get("id", "")}
-                )
-                await db.commit()
-            except Exception as e:
-                logger.warning("[NODE:classify_tier] Failed to update task tier: %s", e)
-
-            task["model_tier"] = tier
-            # Update run context so spawn_agent sees the tier
-            if hasattr(run, 'context') and isinstance(run.context, dict):
-                if "task" in run.context:
-                    run.context["task"]["model_tier"] = tier
-            return NodeResult(
-                status="completed",
-                output={"classified_tier": tier, "source": f"rule:{match_expr}", "goto": config.get("on_classified")},
-            )
-
-    # LLM fallback
-    use_llm = config.get("llm_fallback", True)
-    default_tier = config.get("default_tier", "standard")
-
-    if not use_llm:
-        task["model_tier"] = default_tier
-        if hasattr(run, "context") and isinstance(run.context, dict) and "task" in run.context:
-            run.context["task"]["model_tier"] = default_tier
-        return NodeResult(
-            status="completed",
-            output={"classified_tier": default_tier, "source": "default", "goto": config.get("on_classified")},
-
-        )
-
-    # Use local model for classification
-    classified_tier = default_tier
-    try:
-        import aiohttp
-        from app.orchestrator.model_chooser import _LMSTUDIO_BASE_URL, discover_lmstudio_models
-
-        lm_models = await discover_lmstudio_models()
-        if not lm_models:
-            # No local model available, use default
-            task["model_tier"] = default_tier
-            if hasattr(run, "context") and isinstance(run.context, dict) and "task" in run.context:
-                run.context["task"]["model_tier"] = default_tier
-            return NodeResult(
-                status="completed",
-                output={"classified_tier": default_tier, "source": "no_local_model", "goto": config.get("on_classified")},
-
-            )
-
-        # Pick first available local model
-        model_id = list(lm_models.values())[0][0]
-        raw_model = model_id.replace("lmstudio/", "", 1)
-
-        prompt = f"""Classify the MODEL TIER for this task based on its complexity and stakes.
-
-Task: {task.get('title', 'Unknown')}
-Agent: {agent_type}
-Project: {project_id}
-Description: {(task.get('notes') or '')[:500]}
-
-TIER GUIDELINES:
-- small: Scaffolding, boilerplate, simple CRUD, config files, basic UI views, draft docs, data entry scripts, simple bug fixes with obvious solutions
-- medium: Multi-file features, API endpoints with validation, moderate refactors, research summaries, non-critical integrations
-- standard: Production features, complex business logic, multi-service changes, security-sensitive code, database migrations, important bug fixes
-- strong: Architecture decisions, system design, performance-critical paths, security audits, complex debugging
-
-KEY FACTORS:
-- Experimental/trial/prototype projects → lean toward small unless task is complex
-- Production systems → lean toward standard unless task is trivial
-- Number of files/systems touched → more = higher tier
-- Reversibility → easy to undo = lower tier, hard to undo = higher tier
-- Domain knowledge needed → more = higher tier
-
-Respond with ONLY the tier name: small, medium, standard, or strong"""
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{_LMSTUDIO_BASE_URL}/v1/chat/completions",
-                json={
-                    "model": raw_model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "max_tokens": 20,
-                    "temperature": 0,
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    raw = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip().lower()
-                    for t in ["small", "medium", "standard", "strong"]:
-                        if t in raw:
-                            classified_tier = t
-                            break
-
-        logger.info("[NODE:classify_tier] LLM classified task %s -> tier=%s", task_id, classified_tier)
-
-    except Exception as e:
-        logger.warning("[NODE:classify_tier] LLM classification failed: %s", e)
-
-    # Update task
-    try:
-        from sqlalchemy import text as sa_text
-        await db.execute(
-            sa_text("UPDATE tasks SET model_tier = :tier WHERE id = :tid"),
-            {"tier": classified_tier, "tid": task.get("id", "")}
-        )
-        await db.commit()
-    except Exception as e:
-        logger.warning("[NODE:classify_tier] Failed to update task tier: %s", e)
-
-    task["model_tier"] = classified_tier
-    if hasattr(run, "context") and isinstance(run.context, dict) and "task" in run.context:
-        run.context["task"]["model_tier"] = classified_tier
-    return NodeResult(
-        status="completed",
-        output={"classified_tier": classified_tier, "source": "llm", "goto": config.get("on_classified")},
-
-    )
