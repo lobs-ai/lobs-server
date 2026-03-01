@@ -60,11 +60,11 @@ DEFAULT_LANE_POLICY: dict[str, dict[str, Any]] = {
         "downgrade_tier": None,
     },
     LANE_STANDARD: {
-        "daily_cap_usd": 8.0,
+        "daily_cap_usd": 25.0,
         "downgrade_tier": "medium",
     },
     LANE_BACKGROUND: {
-        "daily_cap_usd": 3.0,
+        "daily_cap_usd": 15.0,
         "downgrade_tier": "small",
     },
 }
