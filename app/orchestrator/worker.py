@@ -912,14 +912,16 @@ class WorkerManager:
                 if messages:
                     return {"completed": True, "success": True, "error": ""}
                 # Give the session time before declaring stale. Local models can
-                # take 10+ minutes on a single prompt chain without writing to
-                # the transcript. Use a generous threshold (20 min since last
-                # transcript write), but also require at least 15 min since spawn.
+                # take a long time between transcript writes — a single tool call
+                # or code generation pass can take 30-60+ minutes on slow hardware.
+                # Only declare stale if BOTH:
+                #   - No transcript activity for 2 hours
+                #   - Session has been alive for at least 1 hour
                 min_spawn_age = (
-                    (time.time() - spawn_time) > 900  # 15 min since spawn
+                    (time.time() - spawn_time) > 3600  # 1 hour since spawn
                     if spawn_time else True
                 )
-                if age_seconds > 1200 and min_spawn_age:
+                if age_seconds > 7200 and min_spawn_age:
                     return {"completed": True, "success": False, "error": "Session stale (no response)"}
                 return {"completed": False, "success": False, "error": ""}
 
@@ -929,7 +931,7 @@ class WorkerManager:
                 has_assistant = any(msg.get("role") == "assistant" for msg in history)
                 if has_assistant:
                     return {"completed": True, "success": True, "error": ""}
-                if spawn_time and (time.time() - spawn_time) / 60 > 15:
+                if spawn_time and (time.time() - spawn_time) / 60 > 120:
                     return {"completed": True, "success": False, "error": "Session stale"}
                 return {"completed": False, "success": False, "error": ""}
 
