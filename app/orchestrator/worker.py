@@ -203,13 +203,51 @@ class WorkerManager:
             )
             return False
 
-        # Check project lock (one worker per project)
+        # Check project lock (one worker per project) — in-memory first
         if project_id in self.project_locks:
             logger.debug(
-                f"[WORKER] Project {project_id} locked. "
+                f"[WORKER] Project {project_id} locked (in-memory). "
                 f"Task {task_id[:8]} queued."
             )
             return False
+
+        # Also check DB for persisted in-flight sessions (survives restarts)
+        try:
+            from app.models import WorkerRun as _WorkerRun
+            from sqlalchemy import select as _select
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=8)
+            _existing = (await self.db.execute(
+                _select(_WorkerRun).where(
+                    _WorkerRun.task_id == task_id,
+                    _WorkerRun.child_session_key.isnot(None),
+                    _WorkerRun.succeeded.is_(None),  # still in-flight stub
+                    _WorkerRun.started_at >= cutoff,
+                )
+            )).scalars().all()
+            if _existing:
+                _key = _existing[0].child_session_key
+                _alive = await self.check_session_alive(_key)
+                if _alive:
+                    logger.info(
+                        "[WORKER] Project %s has live persisted session %s — skipping spawn for task %s",
+                        project_id, _key[:20], task_id[:8],
+                    )
+                    # Re-register it so check_workers tracks it
+                    self.register_external_worker(
+                        {"runId": _existing[0].worker_id, "childSessionKey": _key},
+                        agent_type=_existing[0].agent_type or "programmer",
+                        model=_existing[0].model or "",
+                        label=f"task-{task_id}",
+                    )
+                    self.project_locks[project_id] = task_id
+                    return False
+                else:
+                    logger.info(
+                        "[WORKER] Persisted session %s for task %s is dead — allowing fresh spawn",
+                        _key[:20], task_id[:8],
+                    )
+        except Exception as _e:
+            logger.debug("[WORKER] DB session check failed (non-fatal): %s", _e)
 
         # Note: agent type lock removed — multiple instances of the same
         # agent can now run concurrently (Gateway sessions are isolated).
