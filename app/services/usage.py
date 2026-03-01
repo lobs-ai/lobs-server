@@ -14,6 +14,11 @@ from app.models import ModelPricing, ModelUsageEvent
 
 def infer_provider(model: str) -> str:
     lowered = (model or "").lower()
+    # Local model providers (check first — free/preferred)
+    if lowered.startswith("lmstudio/") or "lmstudio" in lowered:
+        return "lmstudio"
+    if lowered.startswith("ollama/") or "ollama" in lowered:
+        return "ollama"
     if "gemini" in lowered or lowered.startswith("google"):
         return "gemini"
     if "anthropic" in lowered or "claude" in lowered:
