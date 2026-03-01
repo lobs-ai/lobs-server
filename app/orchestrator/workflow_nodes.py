@@ -385,12 +385,52 @@ async def _check_spawn_agent(node_def, run, *, db, worker_manager):
     if worker_active:
         return None
 
-    from app.models import Task
+    from app.models import Task, WorkerRun
     db_task = await db.get(Task, task_id)
+
     if db_task and db_task.work_state == "completed":
         return NodeResult(status="completed", output={"task_status": "completed", "task_id": task_id})
     elif db_task and db_task.work_state == "blocked":
         return NodeResult(status="failed", output={"task_status": "blocked", "task_id": task_id}, error="Task blocked after worker failure")
+    elif db_task and db_task.work_state == "in_progress":
+        # Worker not in active_workers (e.g. after server restart) but task still in_progress.
+        # Check if there's a live persisted session before declaring failure.
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=8)
+        stub_result = await db.execute(
+            select(WorkerRun).where(
+                WorkerRun.task_id == task_id,
+                WorkerRun.child_session_key.isnot(None),
+                WorkerRun.succeeded.is_(None),
+                WorkerRun.started_at >= cutoff,
+            )
+        )
+        stub = stub_result.scalars().first()
+        if stub and stub.child_session_key:
+            alive = await worker_manager.check_session_alive(stub.child_session_key)
+            if alive:
+                # Re-register so future checks find it in active_workers
+                worker_manager.register_external_worker(
+                    {"runId": stub.worker_id, "childSessionKey": stub.child_session_key},
+                    agent_type=stub.agent_type or "programmer",
+                    model=stub.model or "",
+                    label=f"task-{task_id}",
+                )
+                logger.info("[NODE:spawn_agent] Re-attached live session %s for task %s", stub.child_session_key[:20], task_id[:8])
+                return None  # still running
+            else:
+                # Session dead — reset task and let it re-queue
+                if db_task:
+                    db_task.work_state = "not_started"
+                    db_task.status = "active"
+                    await db.commit()
+                return NodeResult(status="failed", error="Session dead after restart, re-queuing task")
+        # No persisted session and not in active_workers — worker is truly gone
+        return NodeResult(
+            status="failed",
+            output={"task_status": "in_progress_orphaned", "task_id": task_id},
+            error="Worker lost (no active session or persisted key), re-queuing",
+        )
     else:
         return NodeResult(
             status="failed",
@@ -1454,6 +1494,91 @@ async def _pcall_inbox_process_threads(db, worker_manager, context, **kw):
     processor = InboxProcessor(db)
     return await processor.process_threads()
 
+
+async def _pcall_system_cleanup(db, worker_manager, context, **kw):
+    """Clean up old workflow runs, worker history, and stale state."""
+    from datetime import datetime, timezone, timedelta
+    from sqlalchemy import select, and_
+    from app.models import WorkflowRun, WorkerRun
+
+    now = datetime.now(timezone.utc)
+    results = {}
+
+    # 1. Delete terminal workflow runs older than 7 days
+    cutoff_7d = now - timedelta(days=7)
+    old_runs_result = await db.execute(
+        select(WorkflowRun).where(
+            and_(
+                WorkflowRun.status.in_(["completed", "failed", "cancelled"]),
+                WorkflowRun.finished_at < cutoff_7d,
+            )
+        )
+    )
+    old_runs = old_runs_result.scalars().all()
+    deleted_wf = 0
+    for run in old_runs:
+        await db.delete(run)
+        deleted_wf += 1
+    results["workflow_runs_deleted"] = deleted_wf
+
+    # 2. Clear context/node_states payloads from completed runs older than 2 days
+    cutoff_2d = now - timedelta(days=2)
+    old_context_result = await db.execute(
+        select(WorkflowRun).where(
+            and_(
+                WorkflowRun.status.in_(["completed", "failed", "cancelled"]),
+                WorkflowRun.finished_at < cutoff_2d,
+            )
+        )
+    )
+    old_context_runs = old_context_result.scalars().all()
+    cleared_context = 0
+    for run in old_context_runs:
+        ctx = run.context or {}
+        if ctx and not ctx.get("_cleared"):
+            run.context = {"_cleared": True, "cleared_at": now.isoformat()}
+            run.node_states = {}
+            cleared_context += 1
+    results["workflow_contexts_cleared"] = cleared_context
+
+    # 3. Delete worker run history older than 14 days
+    cutoff_14d = now - timedelta(days=14)
+    old_worker_result = await db.execute(
+        select(WorkerRun).where(WorkerRun.started_at < cutoff_14d)
+    )
+    old_worker_runs = old_worker_result.scalars().all()
+    deleted_wr = 0
+    for wr in old_worker_runs:
+        await db.delete(wr)
+        deleted_wr += 1
+    results["worker_runs_deleted"] = deleted_wr
+
+    # 4. Mark runs stuck in "running" for > 8 hours as failed
+    cutoff_8h = now - timedelta(hours=8)
+    stale_result = await db.execute(
+        select(WorkflowRun).where(
+            and_(
+                WorkflowRun.status == "running",
+                WorkflowRun.updated_at < cutoff_8h,
+            )
+        )
+    )
+    stale_runs = stale_result.scalars().all()
+    marked_failed = 0
+    for run in stale_runs:
+        run.status = "failed"
+        run.error = "Cleanup: stuck in running for >8 hours"
+        run.finished_at = now
+        marked_failed += 1
+    results["stale_runs_failed"] = marked_failed
+
+    await db.commit()
+    logger.info(
+        "[CLEANUP] Done: %d wf runs deleted, %d contexts cleared, %d worker runs deleted, %d stale runs failed",
+        deleted_wf, cleared_context, deleted_wr, marked_failed
+    )
+    return results
+
 _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     # Legacy monolithic callables
     "reflection_cycle.run_strategic": _pcall_run_strategic_reflections,
@@ -1487,6 +1612,8 @@ _PYTHON_CALL_REGISTRY: dict[str, Any] = {
     "learning.create_plan": lambda db=None, worker_manager=None, context=None, **kw: _pcall_learning("create_plan_from_request", db, worker_manager, context, **kw),
     # Inbox processing
     "inbox.process_threads": _pcall_inbox_process_threads,
+    # System maintenance
+    "system.cleanup": _pcall_system_cleanup,
 }
 
 def register_python_callable(name: str, handler: Callable):
