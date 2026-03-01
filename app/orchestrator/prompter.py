@@ -150,6 +150,7 @@ class Prompter:
                 "4. Mention test results in your `.work-summary`\n\n"
                 "**Be proactive:** Fix related issues blocking your task. Improve test coverage for code you touch. "
                 "If you discover problems outside your scope, create handoffs.\n\n"
+                "**Important:** Do NOT output thinking/reasoning text. Go straight to action. /no_think\n\n"
                 + code_ctx
             )
 

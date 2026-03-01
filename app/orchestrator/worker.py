@@ -477,7 +477,7 @@ class WorkerManager:
                             "task": task_prompt,
                             "agentId": agent_id,
                             "model": model,
-                            "runTimeoutSeconds": 900,
+                            "runTimeoutSeconds": 1800,
                             "cleanup": "keep",
                             "label": label
                         }
