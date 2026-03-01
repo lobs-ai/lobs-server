@@ -613,7 +613,7 @@ class ModelChooser:
         raw = cfg.get("project_policy") or {}
         if project_id and project_id in raw:
             return raw[project_id]
-        return _DEFAULT_PROJECT_POLICY.get(project_id or "", "preferred")
+        return _DEFAULT_PROJECT_POLICY.get(project_id or "", "allowed")
 
     async def _provider_month_cost(self, provider: str, now: datetime) -> float:
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
