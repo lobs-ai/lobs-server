@@ -86,10 +86,36 @@ DEFAULT_WORKFLOWS = [
     # ══════════════════════════════════════════════════════════════════
     {
         "name": "task-router",
-        "description": "Master task router: checks capacity, routes tasks to the correct agent workflow, with LLM fallback for ambiguous agent types.",
+        "description": "Master task router: classifies model tier, checks capacity, routes tasks to the correct agent workflow.",
         "trigger": {"type": "task_match", "agent_types": ["programmer", "researcher", "writer", "architect", "reviewer", "inbox-responder"]},
         "is_active": True,
         "nodes": [
+            # ── Classify model tier first ─────────────────────────────
+            {
+                "id": "classify_tier",
+                "type": "classify_model_tier",
+                "config": {
+                    "deterministic_rules": [
+                        {"match": "agent:architect", "tier": "strong"},
+                        {"match": "title_contains:reflection", "tier": "standard"},
+                        {"match": "title_contains:architecture", "tier": "strong"},
+                        {"match": "title_contains:security", "tier": "standard"},
+                        {"match": "title_contains:migration", "tier": "standard"},
+                        {"match": "project_tag:experimental", "tier": "small"},
+                        {"match": "project_tag:trial", "tier": "small"},
+                        {"match": "project:grandmas-stories", "tier": "small"},
+                        {"match": "project:flock", "tier": "small"},
+                        {"match": "project:prairielearn", "tier": "small"},
+                        {"match": "project:lobs-server", "tier": "standard"},
+                        {"match": "project:lobs-mission-control", "tier": "standard"},
+                        {"match": "project:lobs-mobile", "tier": "standard"},
+                    ],
+                    "llm_fallback": True,
+                    "llm_model_tier": "micro",
+                    "default_tier": "standard",
+                    "on_classified": "preflight",
+                },
+            },
             # ── Pre-flight: check system capacity before doing anything ──
             {
                 "id": "preflight",
