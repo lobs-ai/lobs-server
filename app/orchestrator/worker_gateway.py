@@ -56,7 +56,10 @@ class WorkerGateway:
                             "task": task_prompt,
                             "agentId": agent_id,
                             "model": model,
-                            "runTimeoutSeconds": 900,
+                            # Local models get a shorter timeout — they tend to hang
+                            # on context overflow rather than fail cleanly.
+                            # Cloud models get the full 15 min window.
+                            "runTimeoutSeconds": 480 if (model or "").startswith(("lmstudio/", "ollama/")) else 900,
                             "cleanup": "keep",
                             "label": label
                         }
@@ -89,7 +92,7 @@ class WorkerGateway:
                                     "task": task_prompt,
                                     "agentId": agent_id,
                                     "model": model,
-                                    "runTimeoutSeconds": 900,
+                                    "runTimeoutSeconds": 480 if (model or "").startswith(("lmstudio/", "ollama/")) else 900,
                                     "cleanup": "keep",
                                     "label": label,
                                 }

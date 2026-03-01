@@ -52,6 +52,29 @@ _lmstudio_cache_time: float = 0.0
 _LMSTUDIO_CACHE_TTL = 60.0
 _LMSTUDIO_BASE_URL = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
 
+# ── Project-level model policy ────────────────────────────────────────────
+# Controls whether local (LM Studio/Ollama) models are allowed per project.
+# Format: {"<project_id>": {"local": "never"|"preferred"|"allowed"}}
+# "never"     — strip all local models; use cloud only
+# "preferred" — local models stay at front (default behavior)
+# "allowed"   — local models allowed but ranked normally (not pinned to front)
+#
+# Set via orchestrator_settings key: model_router.project_policy
+# Can be overridden per-task via task.model_tier = "standard" or higher.
+PROJECT_LOCAL_POLICY_SETTINGS_KEY = "model_router.project_policy"
+
+# Built-in defaults (can be overridden via DB settings)
+_DEFAULT_PROJECT_POLICY: dict[str, str] = {
+    # Core infra — always use cloud models for reliability
+    "lobs-server": "never",
+    "lobs-mission-control": "never",
+    "lobs-mobile": "never",
+    "lobs-sail": "never",
+    # App projects — prefer local to save cost
+    "grandmas-stories": "preferred",
+    "flock-master": "preferred",
+}
+
 # Name-based parameter size hints for LM Studio models (no metadata from API).
 # Map substring → estimated billions of parameters.
 _LMSTUDIO_PARAM_HINTS: dict[str, float] = {
@@ -362,13 +385,22 @@ class ModelChooser:
             purpose=purpose,
         )
 
-        # Pin local models (free) to the front — health ranking should not
-        # deprioritize them since failures are transient (model reloads, etc.)
+        # Apply project-level local model policy
+        project_id = (task or {}).get("project_id", "")
+        local_policy = await self._get_project_local_policy(project_id, cfg)
         local_prefixes = ("lmstudio/", "ollama/")
         local_models = [m for m in candidates if m.startswith(local_prefixes)]
         cloud_models = [m for m in candidates if not m.startswith(local_prefixes)]
-        if local_models:
-            candidates = local_models + cloud_models
+
+        if local_policy == "never":
+            # Strip all local models — cloud only
+            candidates = cloud_models
+        elif local_policy == "preferred":
+            # Pin local to front (original behavior)
+            if local_models:
+                candidates = local_models + cloud_models
+        else:  # "allowed" — don't pin, let health ranking decide
+            pass  # candidates already ranked by health
 
         if agent_type == "programmer" and cfg["strict_coding_tier"] and candidates:
             candidates = [candidates[0]]
@@ -440,6 +472,23 @@ class ModelChooser:
         }
         available_models = explicit_available_models or derived["available_models"]
 
+        # Load project-level model policy from DB (runtime override of defaults)
+        project_policy: dict[str, str] = {}
+        try:
+            pp_result = await self.db.execute(
+                select(OrchestratorSetting).where(
+                    OrchestratorSetting.key == PROJECT_LOCAL_POLICY_SETTINGS_KEY
+                )
+            )
+            pp_row = pp_result.scalar_one_or_none()
+            if pp_row and isinstance(pp_row.value, dict):
+                project_policy = pp_row.value
+            elif pp_row and isinstance(pp_row.value, str):
+                import json as _json
+                project_policy = _json.loads(pp_row.value)
+        except Exception:
+            pass
+
         return {
             "tiers": tiers,
             "available_models": available_models,
@@ -447,6 +496,7 @@ class ModelChooser:
             "degrade_on_quota": bool(rows.get(SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA, False)),
             "routing_policy": rows.get(USAGE_ROUTING_POLICY_KEY) if isinstance(rows.get(USAGE_ROUTING_POLICY_KEY), dict) else {},
             "budgets": rows.get(USAGE_BUDGETS_KEY) if isinstance(rows.get(USAGE_BUDGETS_KEY), dict) else {},
+            "project_policy": project_policy,
         }
 
     @staticmethod
