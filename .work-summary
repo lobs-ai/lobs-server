@@ -1,1 +1,1 @@
-Session cleanup fix already implemented in prior commits. sessions.delete WebSocket JSON-RPC correctly used in worker_gateway.py and workflow_nodes.py. Workflow seeds have session_refs for all spawn_agent nodes. All 17 session cleanup tests pass.
+Session cleanup fix verified: sessions_kill replaced with sessions.delete WebSocket API in prior commits. All 19 session cleanup tests pass. task-router and code-task/research-task cleanup nodes have correct session_refs. No further changes needed.
