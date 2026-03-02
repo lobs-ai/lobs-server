@@ -201,6 +201,44 @@ class OrchestratorEngine:
                         "[ENGINE] Startup recovery: cancelled %d stale workflow run(s) (>2h old)",
                         len(stale_runs),
                     )
+                # 3b. Cancel workflow runs for tasks that are already completed/cancelled
+                # (These shouldn't be running regardless of age)
+                done_result = await db.execute(
+                    select(WorkflowRun).where(
+                        WorkflowRun.status.in_(["running", "pending"]),
+                        WorkflowRun.task_id.isnot(None),
+                    )
+                )
+                done_cancelled = 0
+                for wf_run in done_result.scalars().all():
+                    task = await db.get(TaskModel, wf_run.task_id)
+                    if task and task.status in ("completed", "cancelled"):
+                        wf_run.status = "cancelled"
+                        wf_run.error = "Task already completed/cancelled"
+                        wf_run.finished_at = datetime.now(timezone.utc)
+                        wf_run.updated_at = datetime.now(timezone.utc)
+                        done_cancelled += 1
+                if done_cancelled:
+                    await db.commit()
+                    logger.info(
+                        "[ENGINE] Startup recovery: cancelled %d workflow run(s) for completed/cancelled tasks",
+                        done_cancelled,
+                    )
+
+                # 3c. Backfill model_tier on tasks that are missing it
+                null_tier_result = await db.execute(
+                    select(TaskModel).where(TaskModel.model_tier.is_(None))
+                )
+                null_tier_tasks = null_tier_result.scalars().all()
+                if null_tier_tasks:
+                    for task in null_tier_tasks:
+                        task.model_tier = "standard"
+                    await db.commit()
+                    logger.info(
+                        "[ENGINE] Startup recovery: backfilled model_tier='standard' on %d tasks",
+                        len(null_tier_tasks),
+                    )
+
                 # Reset pending workflow runs back to ready state
                 pending_result = await db.execute(
                     select(WorkflowRun).where(
