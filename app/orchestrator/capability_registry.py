@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,5 +48,24 @@ class CapabilityRegistrySync:
                     existing.confidence = existing.confidence or 0.7
                     updated += 1
 
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    # Log error and re-raise if all retries exhausted
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error("[CAPABILITY_REGISTRY] Failed to sync after 5 attempts: %s", _e)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
+                    raise
+        
         return {"added": added, "updated": updated}

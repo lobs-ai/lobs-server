@@ -6,6 +6,7 @@ no workspace context, no tools. Much faster and cheaper than session-based appro
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -77,11 +78,27 @@ class TaskAutoAssigner:
 
                 task.agent = chosen
                 task.updated_at = datetime.now(timezone.utc)
-                await self.db.commit()
-                result.assigned += 1
-                logger.info("[AUTO_ASSIGN] task=%s agent=%s", task.id, chosen)
+                
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await self.db.commit()
+                        result.assigned += 1
+                        logger.info("[AUTO_ASSIGN] task=%s agent=%s", task.id, chosen)
+                        break
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await self.db.rollback()
+                        else:
+                            logger.error("[AUTO_ASSIGN] Failed to commit after 5 attempts for task %s: %s", task.id, _e)
+                            result.failed += 1
+                            try:
+                                await self.db.rollback()
+                            except Exception:
+                                pass
+                            
             except Exception as e:
-                await self.db.rollback()
                 result.failed += 1
                 logger.error("[AUTO_ASSIGN] Failed for task=%s: %s", task.id, e, exc_info=True)
 

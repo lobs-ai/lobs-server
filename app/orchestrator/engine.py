@@ -157,7 +157,35 @@ class OrchestratorEngine:
                         tracking="local",
                     )
                     db.add(default_project)
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info("[ENGINE] Created default project 'General'")
 
                 # 2. Clear stale worker_status (since no workers survive restart)
@@ -170,7 +198,35 @@ class OrchestratorEngine:
                         agent_status.status = "idle"
                         agent_status.activity = None
                         agent_status.current_task_id = None
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info("[ENGINE] Startup recovery: cleared stale worker_status")
                 except Exception:
                     pass  # AgentStatus table might not exist yet
@@ -195,7 +251,35 @@ class OrchestratorEngine:
                         wf_run.error = "Cancelled: server restart (no sessions survive restart)"
                         wf_run.finished_at = datetime.now(timezone.utc)
                         wf_run.updated_at = datetime.now(timezone.utc)
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info(
                         "[ENGINE] Startup recovery: cancelled %d orphaned workflow run(s)",
                         len(stale_runs),
@@ -215,7 +299,35 @@ class OrchestratorEngine:
                         for task in orphaned_tasks:
                             task.work_state = "not_started"
                         if orphaned_tasks:
-                            await db.commit()
+                            # Commit with retry-on-lock logic
+
+                            for _attempt in range(5):
+
+                                try:
+
+                                    await db.commit()
+
+                                    break
+
+                                except Exception as _e:
+
+                                    if _attempt < 4:
+
+                                        await asyncio.sleep(_attempt * 0.5)
+
+                                        await db.rollback()
+
+                                    else:
+
+                                        logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                        try:
+
+                                            await db.rollback()
+
+                                        except Exception:
+
+                                            pass
                             logger.info(
                                 "[ENGINE] Startup recovery: reset %d orphaned task(s) to not_started",
                                 len(orphaned_tasks),
@@ -238,7 +350,35 @@ class OrchestratorEngine:
                         wf_run.updated_at = datetime.now(timezone.utc)
                         done_cancelled += 1
                 if done_cancelled:
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info(
                         "[ENGINE] Startup recovery: cancelled %d workflow run(s) for completed/cancelled tasks",
                         done_cancelled,
@@ -252,7 +392,35 @@ class OrchestratorEngine:
                 if null_tier_tasks:
                     for task in null_tier_tasks:
                         task.model_tier = "standard"
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info(
                         "[ENGINE] Startup recovery: backfilled model_tier='standard' on %d tasks",
                         len(null_tier_tasks),
@@ -282,7 +450,35 @@ class OrchestratorEngine:
                         task.updated_at = datetime.now(timezone.utc)
                         unblocked += 1
                 if unblocked:
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info(
                         "[ENGINE] Startup recovery: unblocked %d task(s) blocked by transient errors",
                         unblocked,
@@ -302,7 +498,35 @@ class OrchestratorEngine:
                     for refl in stale_reflections:
                         refl.status = "failed"
                         refl.result = {"error": "stale: never completed (server restart)"}
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info(
                         "[ENGINE] Startup recovery: marked %d stale pending reflections as failed",
                         len(stale_reflections),
@@ -320,7 +544,35 @@ class OrchestratorEngine:
                     ws.current_task = None
                     ws.current_project = None
                     ws.ended_at = datetime.now(timezone.utc)
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                     logger.info("[ENGINE] Startup recovery: cleared stale worker_status")
 
                 # 7. Re-attach or cancel persisted worker sessions
@@ -382,7 +634,35 @@ class OrchestratorEngine:
                                 # Reset task so it re-queues
                                 task.work_state = "not_started"
                                 task.status = "active"
-                                await db.commit()
+                                # Commit with retry-on-lock logic
+
+                                for _attempt in range(5):
+
+                                    try:
+
+                                        await db.commit()
+
+                                        break
+
+                                    except Exception as _e:
+
+                                        if _attempt < 4:
+
+                                            await asyncio.sleep(_attempt * 0.5)
+
+                                            await db.rollback()
+
+                                        else:
+
+                                            logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                            try:
+
+                                                await db.rollback()
+
+                                            except Exception:
+
+                                                pass
                                 logger.info(
                                     "[ENGINE] Startup recovery: session dead for task %s, cancelled %d stuck runs, re-queuing",
                                     run.task_id, len(stuck_runs),
@@ -418,7 +698,35 @@ class OrchestratorEngine:
                             if t and t.work_state == "in_progress" and t.status == "active":
                                 t.work_state = "not_started"
                                 t.updated_at = datetime.now(timezone.utc)
-                        await db.commit()
+                        # Commit with retry-on-lock logic
+
+                        for _attempt in range(5):
+
+                            try:
+
+                                await db.commit()
+
+                                break
+
+                            except Exception as _e:
+
+                                if _attempt < 4:
+
+                                    await asyncio.sleep(_attempt * 0.5)
+
+                                    await db.rollback()
+
+                                else:
+
+                                    logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                    try:
+
+                                        await db.rollback()
+
+                                    except Exception:
+
+                                        pass
                         logger.info(
                             "[ENGINE] Startup recovery: cancelled %d stuck spawn-node run(s), reset %d task(s)",
                             len(stuck_spawn_runs), len(reset_task_ids),
@@ -449,7 +757,35 @@ class OrchestratorEngine:
                             if t:
                                 t.work_state = "not_started"
                                 t.updated_at = datetime.now(timezone.utc)
-                        await db.commit()
+                        # Commit with retry-on-lock logic
+
+                        for _attempt in range(5):
+
+                            try:
+
+                                await db.commit()
+
+                                break
+
+                            except Exception as _e:
+
+                                if _attempt < 4:
+
+                                    await asyncio.sleep(_attempt * 0.5)
+
+                                    await db.rollback()
+
+                                else:
+
+                                    logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                    try:
+
+                                        await db.rollback()
+
+                                    except Exception:
+
+                                        pass
                         logger.info(
                             "[ENGINE] Startup recovery: reset %d orphaned in_progress task(s) with no live stub",
                             len(orphaned_ids),
@@ -598,7 +934,35 @@ class OrchestratorEngine:
                             f"[ENGINE] Scheduler fired {result['total_fired']} event(s)"
                         )
                     self._last_scheduler_check = current_time
-                    await db.commit()  # Commit scheduler changes
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass  # Commit scheduler changes
                 except Exception as e:
                     logger.error(f"[ENGINE] Scheduler check failed: {e}", exc_info=True)
                     await db.rollback()
@@ -623,7 +987,35 @@ class OrchestratorEngine:
                             routine_result.errors,
                         )
                     self._last_routine_check = current_time
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
                 except Exception as e:
                     logger.error("[ENGINE] Routine registry check failed: %s", e, exc_info=True)
                     await db.rollback()
@@ -675,7 +1067,49 @@ class OrchestratorEngine:
                     else:
                         policy_setting.value = policy
 
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+
+                    for _attempt in range(5):
+
+
+                        try:
+
+
+                            await db.commit()
+
+
+                            break
+
+
+                        except Exception as _e:
+
+
+                            if _attempt < 4:
+
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+
+                                await db.rollback()
+
+
+                            else:
+
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+
+                                try:
+
+
+                                    await db.rollback()
+
+
+                                except Exception:
+
+
+                                    pass
                     self._last_openclaw_model_sync = current_time
                     if subscription_models or subscription_providers:
                         activity = True
@@ -865,7 +1299,35 @@ class OrchestratorEngine:
                             )
                             continue
                         db_task.sync_state = "synced"
-                        await db.commit()
+                        # Commit with retry-on-lock logic
+
+                        for _attempt in range(5):
+
+                            try:
+
+                                await db.commit()
+
+                                break
+
+                            except Exception as _e:
+
+                                if _attempt < 4:
+
+                                    await asyncio.sleep(_attempt * 0.5)
+
+                                    await db.rollback()
+
+                                else:
+
+                                    logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                    try:
+
+                                        await db.rollback()
+
+                                    except Exception:
+
+                                        pass
                     except Exception as claim_err:
                         logger.warning(
                             "[ENGINE] GitHub claim handshake error for %s: %s",
@@ -910,7 +1372,35 @@ class OrchestratorEngine:
                     db_task.work_state = "blocked"
                     db_task.failure_reason = f"No matching workflow for agent '{agent_type}'"
                     db_task.updated_at = datetime.now(timezone.utc)
-                    await db.commit()
+                    # Commit with retry-on-lock logic
+
+                    for _attempt in range(5):
+
+                        try:
+
+                            await db.commit()
+
+                            break
+
+                        except Exception as _e:
+
+                            if _attempt < 4:
+
+                                await asyncio.sleep(_attempt * 0.5)
+
+                                await db.rollback()
+
+                            else:
+
+                                logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                                try:
+
+                                    await db.rollback()
+
+                                except Exception:
+
+                                    pass
 
         return activity
 
@@ -973,7 +1463,35 @@ class OrchestratorEngine:
                     "generated_at": brief.generated_at.isoformat(),
                 },
             )
-            await db.commit()
+            # Commit with retry-on-lock logic
+
+            for _attempt in range(5):
+
+                try:
+
+                    await db.commit()
+
+                    break
+
+                except Exception as _e:
+
+                    if _attempt < 4:
+
+                        await asyncio.sleep(_attempt * 0.5)
+
+                        await db.rollback()
+
+                    else:
+
+                        logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                        try:
+
+                            await db.rollback()
+
+                        except Exception:
+
+                            pass
 
             await manager.broadcast_to_session(
                 session_key,
@@ -997,7 +1515,35 @@ class OrchestratorEngine:
                 db.add(brief_marker)
             else:
                 brief_marker.value = today_key_et
-            await db.commit()
+            # Commit with retry-on-lock logic
+
+            for _attempt in range(5):
+
+                try:
+
+                    await db.commit()
+
+                    break
+
+                except Exception as _e:
+
+                    if _attempt < 4:
+
+                        await asyncio.sleep(_attempt * 0.5)
+
+                        await db.rollback()
+
+                    else:
+
+                        logger.error("[ENGINE] Commit failed after 5 attempts: %s", _e)
+
+                        try:
+
+                            await db.rollback()
+
+                        except Exception:
+
+                            pass
         except Exception as e:
             logger.error("[BRIEF] Daily brief failed: %s", e, exc_info=True)
 

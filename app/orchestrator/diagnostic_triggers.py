@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -289,8 +290,22 @@ class DiagnosticTriggerEngine:
                 outcome={"suppressed_by_event_id": duplicate.id},
             )
             self.db.add(suppressed)
-            await self.db.commit()
-            return None
+            # Commit with retry-on-lock logic
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    return None
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[DIAGNOSTIC] Failed to record suppressed trigger after 5 attempts: %s", _e)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
+                        raise
 
         event = DiagnosticTriggerEvent(
             id=str(uuid.uuid4()),
@@ -303,8 +318,22 @@ class DiagnosticTriggerEngine:
             trigger_payload=trigger,
         )
         self.db.add(event)
-        await self.db.commit()
-        return event
+        # Commit with retry-on-lock logic
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                return event
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[DIAGNOSTIC] Failed to record trigger after 5 attempts: %s", _e)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
+                    raise
 
     async def _spawn_diagnostic(self, trigger: dict[str, Any], event: DiagnosticTriggerEvent) -> bool:
         agent_type = trigger["agent_type"]
@@ -325,7 +354,22 @@ class DiagnosticTriggerEngine:
         self.db.add(reflection)
         event.status = "spawned"
         event.diagnostic_reflection_id = reflection.id
-        await self.db.commit()
+        # Commit with retry-on-lock logic
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[DIAGNOSTIC] Failed to record reflection spawn after 5 attempts: %s", _e)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
+                    raise
 
         prompt = self._build_prompt(agent_type, reflection.id, context_packet)
         choice = await self.model_chooser.choose(
@@ -360,7 +404,21 @@ class DiagnosticTriggerEngine:
         reflection.completed_at = datetime.now(timezone.utc)
         event.status = "failed"
         event.outcome = {"spawn_error": error or "spawn_failed"}
-        await self.db.commit()
+        # Commit with retry-on-lock logic
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[DIAGNOSTIC] Failed to record diagnostic failure after 5 attempts: %s", _e)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         logger.warning("[DIAGNOSTIC] Failed to spawn diagnostic for %s: %s", agent_type, error)
         return False
 

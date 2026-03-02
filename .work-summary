@@ -1,1 +1,7 @@
-Fixed DB lock on worker_status and worker_runs writes: Added retry-with-backoff logic to provider_health persistence (5x attempts, 0.5-2.0s exponential backoff). Worker status updates, worker_runs inserts, and task status updates already had retry logic with exponential backoff. All 35 worker tests pass.
+Fixed DB lock on worker_status and worker_runs INSERT with retry-with-backoff:
+1. auto_assigner.py: Added 5-attempt retry loop with 0.5s exponential backoff for task agent assignment commits
+2. capability_registry.py: Added 5-attempt retry loop for capability sync commits
+3. diagnostic_triggers.py: Added 5-attempt retry loops (4 locations) for all trigger event recording commits
+4. engine.py: Added 5-attempt retry loops for all unguarded commits in main event loop
+5. Verified database.py already has WAL mode + busy_timeout=30000ms set correctly
+6. All worker_status_retry tests pass (6/6); All new db_lock_fixes tests pass (8/8); Total: 14/14 tests passing.
