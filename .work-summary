@@ -1,1 +1,1 @@
-Task already completed by prior agents. sessions_kill replaced with sessions.delete WebSocket RPC. session_refs added to task-router and legacy workflow cleanup nodes. 11/11 tests pass.
+Session cleanup fix was already applied in prior commits (sessions_kill → sessions.delete via WebSocket in worker_gateway.py; workflow_seeds.py cleanup nodes already have session_refs). Added 4 new tests for cleanup node session_ref/session_refs behavior; 76 workflow tests pass. Pre-existing failure in test_api_contract_swift.py (missing content field in memory API) is unrelated.
