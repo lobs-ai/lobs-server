@@ -301,6 +301,8 @@ class OrchestratorEngine:
                         task = await db.get(TaskModel, run.task_id) if run.task_id else None
                         if not task or task.status == "completed":
                             continue  # task done, ignore
+                        if task.work_state == "blocked":
+                            continue  # blocked tasks should not re-attach workers
                         
                         # Check if OpenClaw session is still alive
                         session_alive = await self._worker_manager.check_session_alive(run.child_session_key)
