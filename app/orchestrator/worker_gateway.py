@@ -383,40 +383,88 @@ class WorkerGateway:
 
     async def delete_session(self, session_key: str) -> bool:
         """Delete a completed worker session to prevent session leak.
-        
-        Uses Gateway WebSocket API (sessions.delete) via aiohttp.
+
+        Uses Gateway WebSocket API (sessions.delete) with the proper
+        challenge-response handshake:
+          1. Server sends connect.challenge with a nonce.
+          2. Client sends a 'connect' request with auth token.
+          3. Client sends 'sessions.delete' request.
         """
-        import aiohttp
-        ws_url = GATEWAY_URL.replace("http://", "ws://").replace("https://", "wss://")
+        ws_url = GATEWAY_URL.replace("http://", "ws://").replace("https://", "wss://") + "/ws"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.ws_connect(
                     ws_url,
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
                     timeout=aiohttp.ClientTimeout(total=15),
                 ) as ws:
-                    request_id = uuid.uuid4().hex[:12]
-                    await ws.send_json({
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "method": "sessions.delete",
-                        "params": {"key": session_key},
-                    })
+                    connect_id = str(uuid.uuid4())
+                    delete_id = str(uuid.uuid4())
+                    authenticated = False
+
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             data = json.loads(msg.data)
-                            if data.get("id") == request_id:
-                                if "error" in data:
+                            event = data.get("event")
+                            frame_id = data.get("id")
+
+                            if event == "connect.challenge":
+                                # Respond to challenge with auth token
+                                await ws.send_json({
+                                    "type": "req",
+                                    "id": connect_id,
+                                    "method": "connect",
+                                    "params": {
+                                        "minProtocol": 3,
+                                        "maxProtocol": 3,
+                                        "client": {
+                                            "id": "gateway-client",
+                                            "version": "dev",
+                                            "platform": "linux",
+                                            "mode": "backend",
+                                        },
+                                        "auth": {"token": GATEWAY_TOKEN},
+                                        "role": "operator",
+                                        "scopes": ["operator.admin"],
+                                    },
+                                })
+
+                            elif frame_id == connect_id:
+                                if not data.get("ok"):
+                                    logger.warning(
+                                        "[GATEWAY] WS connect auth failed for session delete %s: %s",
+                                        session_key, data,
+                                    )
+                                    return False
+                                authenticated = True
+                                # Now send the delete request
+                                await ws.send_json({
+                                    "type": "req",
+                                    "id": delete_id,
+                                    "method": "sessions.delete",
+                                    "params": {"key": session_key},
+                                })
+
+                            elif frame_id == delete_id:
+                                if not data.get("ok"):
+                                    err = data.get("error", {})
+                                    # not_found means already deleted — treat as success
+                                    if err.get("type") == "not_found" or "not found" in str(err).lower():
+                                        logger.info("[GATEWAY] Session %s already gone", session_key)
+                                        return True
                                     logger.warning(
                                         "[GATEWAY] sessions.delete error for %s: %s",
-                                        session_key, data["error"],
+                                        session_key, err,
                                     )
                                     return False
                                 logger.info("[GATEWAY] Deleted session %s", session_key)
                                 return True
+
                         elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                             break
-            return False
+
+                    if not authenticated:
+                        logger.warning("[GATEWAY] WS handshake never completed for session delete %s", session_key)
+                    return False
         except Exception as e:
             logger.warning("[GATEWAY] Error deleting session %s: %s", session_key, e)
             return False

@@ -230,7 +230,7 @@ class TestWorkerManager:
         with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
             mock_session = MagicMock()
             mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock()
+            mock_session.__aexit__ = AsyncMock(return_value=False)
             mock_session.post = AsyncMock(side_effect=Exception("Network error"))
             mock_session_class.return_value = mock_session
             

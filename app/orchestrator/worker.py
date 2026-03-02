@@ -1473,54 +1473,51 @@ class WorkerManager:
 
     async def _terminate_session(self, session_key: str, reason: str) -> bool:
         """
-        Terminate a session via Gateway API.
-        
-        Attempts to gracefully terminate the session using sessions_kill.
-        Returns True if termination was successful or the session is already gone.
+        Terminate a session via Gateway WebSocket API (sessions.delete JSON-RPC).
+
+        Uses the same sessions.delete method as worker_gateway.delete_session().
+        Returns True if deletion was successful or the session is already gone.
         """
+        ws_url = GATEWAY_URL.replace("http://", "ws://").replace("https://", "wss://")
         try:
             async with aiohttp.ClientSession() as session:
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
+                async with session.ws_connect(
+                    ws_url,
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_kill",
-                        "sessionKey": f"{GATEWAY_SESSION_KEY}-kill-{uuid.uuid4().hex[:8]}",
-                        "args": {
-                            "sessionKey": session_key,
-                            "reason": reason,
-                        }
-                    },
-                    timeout=aiohttp.ClientTimeout(total=10)
-                )
-                
-                data = await resp.json()
-                
-                if data.get("ok"):
-                    logger.info(
-                        "[GATEWAY] Session terminated successfully: %s (reason: %s)",
-                        session_key, reason
-                    )
-                    return True
-                else:
-                    # Session might already be gone or API doesn't support sessions_kill
-                    error = data.get("error", {})
-                    error_msg = error.get("message", str(data))
-                    
-                    # If session not found, treat as success (already terminated)
-                    if "not found" in error_msg.lower() or "unknown session" in error_msg.lower():
-                        logger.info(
-                            "[GATEWAY] Session already terminated: %s",
-                            session_key
-                        )
-                        return True
-                    
-                    logger.warning(
-                        "[GATEWAY] Failed to terminate session %s: %s",
-                        session_key, error_msg
-                    )
-                    return False
-                    
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as ws:
+                    request_id = uuid.uuid4().hex[:12]
+                    await ws.send_json({
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": "sessions.delete",
+                        "params": {"key": session_key},
+                    })
+                    async for msg in ws:
+                        if msg.type == aiohttp.WSMsgType.TEXT:
+                            data = json.loads(msg.data)
+                            if data.get("id") == request_id:
+                                if "error" in data:
+                                    err_msg = str(data["error"])
+                                    if "not found" in err_msg.lower() or "unknown" in err_msg.lower():
+                                        logger.info(
+                                            "[GATEWAY] Session already gone: %s (reason: %s)",
+                                            session_key, reason
+                                        )
+                                        return True
+                                    logger.warning(
+                                        "[GATEWAY] sessions.delete error for %s: %s",
+                                        session_key, data["error"],
+                                    )
+                                    return False
+                                logger.info(
+                                    "[GATEWAY] Session terminated: %s (reason: %s)",
+                                    session_key, reason
+                                )
+                                return True
+                        elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                            break
+            return False
         except Exception as e:
             logger.warning(
                 "[GATEWAY] Error terminating session %s: %s",
