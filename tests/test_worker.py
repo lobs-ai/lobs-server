@@ -362,3 +362,98 @@ async def test_terminate_session_uses_websocket_delete(monkeypatch):
     src = inspect.getsource(wmod.WorkerManager._terminate_session)
     assert "sessions_kill" not in src, "sessions_kill must not be used in _terminate_session"
     assert "sessions.delete" in src, "sessions.delete must be used in _terminate_session"
+
+
+
+@pytest.mark.asyncio
+async def test_record_worker_run_retry_on_lock():
+    """Test that _record_worker_run retries on database lock."""
+    import asyncio
+    from datetime import datetime, timezone
+    from unittest.mock import AsyncMock, MagicMock, patch
+    from app.models import WorkerRun
+    
+    # Create a mock session
+    db = AsyncMock(spec=AsyncSession)
+    
+    # Mock the independent session
+    independent_db = AsyncMock(spec=AsyncSession)
+    independent_db.add = MagicMock()
+    
+    # Fail first 2 times, succeed on 3rd
+    independent_db.commit = AsyncMock(side_effect=[
+        Exception("database is locked"),
+        Exception("database is locked"),
+        None  # Success
+    ])
+    independent_db.rollback = AsyncMock()
+    
+    # Create manager
+    manager = WorkerManager(db)
+    
+    # Mock the independent session context manager
+    async def mock_session_context():
+        return independent_db
+    
+    manager._get_independent_session = MagicMock()
+    manager._get_independent_session.return_value.__aenter__ = AsyncMock(return_value=independent_db)
+    manager._get_independent_session.return_value.__aexit__ = AsyncMock(return_value=None)
+    
+    # Call the method
+    await manager._record_worker_run(
+        worker_id="worker-123",
+        task_id="task-1",
+        start_time=datetime.now(timezone.utc).timestamp(),
+        duration=60.0,
+        succeeded=True,
+        exit_code=0,
+        summary="Test run"
+    )
+    
+    # Verify retry behavior
+    assert independent_db.commit.call_count == 3  # 2 failures + 1 success
+    assert independent_db.rollback.call_count == 2  # 2 rollbacks for failures
+
+
+@pytest.mark.asyncio
+async def test_persist_reflection_output_retry_on_lock():
+    """Test that _persist_reflection_output retries on database lock."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock, patch
+    
+    # Create a mock session
+    db = AsyncMock(spec=AsyncSession)
+    
+    # Mock the independent session
+    independent_db = AsyncMock(spec=AsyncSession)
+    
+    # Fail first 1 time, succeed on 2nd
+    independent_db.commit = AsyncMock(side_effect=[
+        Exception("database is locked"),
+        None  # Success
+    ])
+    independent_db.rollback = AsyncMock()
+    
+    # Create manager
+    manager = WorkerManager(db)
+    
+    # Mock the independent session context manager
+    manager._get_independent_session = MagicMock()
+    manager._get_independent_session.return_value.__aenter__ = AsyncMock(return_value=independent_db)
+    manager._get_independent_session.return_value.__aexit__ = AsyncMock(return_value=None)
+    
+    # Mock _persist_reflection_output_impl
+    manager._persist_reflection_output_impl = AsyncMock()
+    
+    # Call the method
+    await manager._persist_reflection_output(
+        agent_type="programmer",
+        reflection_label="test",
+        reflection_type="strategic",
+        summary="Test reflection",
+        succeeded=True
+    )
+    
+    # Verify retry behavior
+    assert independent_db.commit.call_count == 2  # 1 failure + 1 success
+    assert independent_db.rollback.call_count == 1  # 1 rollback for failure

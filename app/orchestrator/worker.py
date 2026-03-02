@@ -1849,11 +1849,32 @@ class WorkerManager:
                         },
                     )
 
-                await db.commit()
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await db.commit()
+                        break  # Success - exit the retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await db.rollback()
+                        else:
+                            logger.error(
+                                "[WORKER] Failed to record worker run for %s after 5 attempts: %s",
+                                task_id, _e, exc_info=True
+                            )
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                            raise
 
         except Exception as e:
             logger.error(f"Failed to record worker run: {e}", exc_info=True)
-            await self.db.rollback()
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
     
     async def _persist_reflection_output(
         self,
@@ -1879,7 +1900,25 @@ class WorkerManager:
                     summary=summary,
                     succeeded=succeeded,
                 )
-                await db.commit()
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await db.commit()
+                        break  # Success - exit the retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await db.rollback()
+                        else:
+                            logger.warning(
+                                "[WORKER] Failed to persist reflection output after 5 attempts: %s",
+                                _e, exc_info=True
+                            )
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                            raise
         except Exception as e:
             logger.warning("[WORKER] Failed to persist reflection output: %s", e, exc_info=True)
 
