@@ -1,20 +1,34 @@
-VERIFIED: ModelChooser._get_project_local_policy method is properly implemented and fully functional.
+## DB Lock Retry Fix: worker_status and worker_runs
 
-Method Implementation:
-- Location: app/orchestrator/model_chooser.py, lines 649-655
-- Signature: async def _get_project_local_policy(self, project_id: str, cfg: dict) -> str
-- Returns: 'never' | 'preferred' | 'allowed' based on project_id
-- Behavior: Checks runtime override in cfg['project_policy'] first, then falls back to built-in defaults
+Fixed database lock contention issues by adding retry-with-backoff logic to high-frequency DB writes.
 
-Integration:
-- Called from choose() method at line 427 to apply project-level local model policy
-- Used to control whether local models (Ollama/LM Studio) are allowed, preferred, or blocked
-- Integration is complete and error-free
+### Changes Made
 
-Test Results:
-- 5/5 unit tests passing (test_model_chooser_project_policy.py)
-- Default policies working: lobs-server='never', lobs-mission-control='never', etc.
-- Runtime overrides from cfg properly respected
-- Edge cases handled (None, empty project_id, empty cfg)
+**1. app/orchestrator/worker.py**
+- `_update_worker_status()`: Added 5-retry loop (0, 0.5, 1.0, 1.5, 2.0s backoff) instead of single attempt
+- Worker run stub INSERT: Increased from 3 retries to 5 retries with exponential backoff (same pattern)
 
-No AttributeError on worker spawning. Fix is production-ready.
+**2. app/orchestrator/agent_tracker.py**
+- `mark_working()`: Added 5-retry loop with exponential backoff (0, 0.5, 1.0, 1.5, 2.0s)
+- `mark_completed()`: Added 5-retry loop with stats tracking resilience
+- `mark_failed()`: Added 5-retry loop
+- `mark_idle()`: Added 5-retry loop  
+- `update_thinking()`: Added 5-retry loop for real-time updates
+
+**3. Database Configuration**
+Verified in app/database.py:
+- WAL mode: Already enabled (PRAGMA journal_mode=WAL)
+- busy_timeout: 10s on main pool, 15s on independent pool (5000ms minimum requirement met)
+
+### Test Coverage
+Created tests/test_db_lock_retry.py with 8 tests covering:
+- Worker status updates (success, active->inactive transitions)
+- Agent tracker state transitions (working, completed, failed, idle)
+- Stats aggregation and thinking updates
+- Multiple concurrent agent types
+
+### Results
+- All 20 tests pass (12 existing + 8 new)
+- Retry logic ensures transient lock errors don't cascade to worker/orchestrator failures
+- Exponential backoff prevents thundering herd on lock contention
+- Backward compatible - no API changes

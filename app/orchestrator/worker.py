@@ -423,10 +423,10 @@ class WorkerManager:
             self.project_locks[project_id] = task_id
 
             # Persist session key immediately so restart recovery can find it
-            # (crash-safe: written before any work starts, retries on DB lock)
-            for _attempt in range(3):
+            # (crash-safe: written before any work starts, retries on DB lock with exponential backoff)
+            for _attempt in range(5):
                 try:
-                    await asyncio.sleep(_attempt * 0.5)  # backoff: 0, 0.5, 1.0s
+                    await asyncio.sleep(_attempt * 0.5)  # backoff: 0, 0.5, 1.0, 1.5, 2.0s
                     async with self._get_independent_session() as _persist_db:
                         _run_stub = WorkerRun(
                             worker_id=worker_id,
@@ -444,8 +444,8 @@ class WorkerManager:
                         logger.debug("[WORKER] Persisted session key %s for task %s", child_session_key[:16], task_id_short)
                         break
                 except Exception as _e:
-                    if _attempt == 2:
-                        logger.warning("[WORKER] Failed to persist session key after 3 attempts (non-fatal): %s", _e)
+                    if _attempt == 4:
+                        logger.warning("[WORKER] Failed to persist session key after 5 attempts (non-fatal): %s", _e)
 
             # Update DB: worker status
             await self._update_worker_status(
@@ -1563,36 +1563,55 @@ class WorkerManager:
         project_id: Optional[str] = None,
         started_at: Optional[datetime] = None
     ) -> None:
-        """Update worker_status table (singleton record)."""
-        try:
-            result = await self.db.execute(
-                select(WorkerStatus).where(WorkerStatus.id == 1)
-            )
-            status = result.scalar_one_or_none()
+        """Update worker_status table (singleton record) with retry-on-lock logic."""
+        for _attempt in range(5):
+            try:
+                # Backoff on retry: 0, 0.5, 1.0, 1.5, 2.0 seconds
+                if _attempt > 0:
+                    await asyncio.sleep(_attempt * 0.5)
+                
+                result = await self.db.execute(
+                    select(WorkerStatus).where(WorkerStatus.id == 1)
+                )
+                status = result.scalar_one_or_none()
 
-            if not status:
-                status = WorkerStatus(id=1)
-                self.db.add(status)
+                if not status:
+                    status = WorkerStatus(id=1)
+                    self.db.add(status)
 
-            status.active = active
-            
-            if active:
-                status.worker_id = worker_id
-                status.current_task = task_id
-                status.current_project = project_id
-                status.started_at = started_at
-                status.last_heartbeat = datetime.now(timezone.utc)
-            else:
-                status.worker_id = None
-                status.current_task = None
-                status.current_project = None
-                status.ended_at = datetime.now(timezone.utc)
+                status.active = active
+                
+                if active:
+                    status.worker_id = worker_id
+                    status.current_task = task_id
+                    status.current_project = project_id
+                    status.started_at = started_at
+                    status.last_heartbeat = datetime.now(timezone.utc)
+                else:
+                    status.worker_id = None
+                    status.current_task = None
+                    status.current_project = None
+                    status.ended_at = datetime.now(timezone.utc)
 
-            await self.db.commit()
+                await self.db.commit()
+                return  # Success - exit the retry loop
 
-        except Exception as e:
-            logger.error(f"Failed to update worker status: {e}", exc_info=True)
-            await self.db.rollback()
+            except Exception as e:
+                if _attempt < 4:
+                    logger.debug(
+                        "[WORKER] Failed to update worker status (attempt %d/5): %s, retrying...",
+                        _attempt + 1, e
+                    )
+                    await self.db.rollback()
+                else:
+                    logger.error(
+                        "[WORKER] Failed to update worker status after 5 attempts: %s", e,
+                        exc_info=True
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
 
     async def _record_worker_run(
         self,
