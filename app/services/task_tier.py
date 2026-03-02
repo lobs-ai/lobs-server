@@ -73,6 +73,13 @@ async def classify_task_tier(task: "TaskModel", db: AsyncSession) -> str:
     if task.model_tier and task.model_tier in VALID_TIERS:
         return task.model_tier
 
+    # 2. Skip LLM classification for test tasks (avoid hammering LM Studio during pytest)
+    task_id = str(task.id or "")
+    if any(task_id.startswith(p) for p in ("test-task", "contract-test", "github-task", "local-task", "compat-test")):
+        tier = _apply_hard_minimum("standard", task.project_id)
+        logger.debug("[TASK_TIER] Skipping LLM for test task=%s, default=%s", task_id, tier)
+        return tier
+
     tier = "standard"
 
     try:
