@@ -1342,7 +1342,7 @@ Respond with ONLY the id of the chosen route. Nothing else."""
     if not resolved_model and model_tier:
         resolved_model = await _resolve_model_tier(model_tier, "router", context, db)
     if not resolved_model:
-        resolved_model = "haiku"  # Safe default
+        resolved_model = "lmstudio/qwen/qwen3.5-35b-a3b"  # Local first, haiku fallback via ModelChooser
 
     # Call LLM via Gateway
     try:

@@ -61,7 +61,7 @@ async def create_plan(
 
     # Generate outline via LLM
     prompt = OUTLINE_PROMPT.format(topic=topic, goal=goal, total_days=total_days)
-    outline_text = await _llm_generate(prompt, model="haiku")
+    outline_text = await _llm_generate(prompt, model="lmstudio/qwen/qwen3.5-35b-a3b")
 
     if not outline_text:
         return {"status": "error", "error": "Failed to generate plan outline"}
@@ -160,7 +160,7 @@ async def generate_next_lesson(db: AsyncSession, plan_id: str) -> dict[str, Any]
         previous_topics=prev_topics,
     )
 
-    content = await _llm_generate(prompt, model="haiku")
+    content = await _llm_generate(prompt, model="lmstudio/qwen/qwen3.5-35b-a3b")
     if not content:
         return {"status": "error", "error": "Failed to generate lesson content"}
 
@@ -266,7 +266,7 @@ async def create_plan_from_request(db: AsyncSession, worker_manager=None, contex
 # LLM Helper
 # ══════════════════════════════════════════════════════════════════════
 
-async def _llm_generate(prompt: str, model: str = "haiku") -> str | None:
+async def _llm_generate(prompt: str, model: str = "lmstudio/qwen/qwen3.5-35b-a3b") -> str | None:
     """Generate text via Gateway session spawn + JSONL transcript read.
 
     Spawns a sub-agent, waits for completion, reads the JSONL transcript
