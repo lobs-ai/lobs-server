@@ -1,1 +1,1 @@
-Session cleanup fix verified: workflow_nodes.py uses sessions.delete JSON-RPC (not sessions_kill), workflow_seeds.py task-router already has session_refs for all spawn nodes. All 23 related tests pass.
+Session cleanup fix already fully implemented and verified. All 11 session cleanup tests pass (test_session_cleanup.py + test_gateway_delete_session.py). The pre-existing test_api_contract_swift failure (missing 'content' field in memories) is unrelated to this task.
