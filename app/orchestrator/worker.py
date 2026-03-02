@@ -1175,14 +1175,15 @@ class WorkerManager:
         
         # Record the escalation in worker_runs
         await self._record_worker_run(
-            task_id=task_id,
             worker_id=worker_id,
+            task_id=task_id,
+            start_time=worker_info.start_time,
+            duration=duration,
+            succeeded=False,
+            exit_code=-1,
+            summary=f"Model punted to higher tier: {reason}",
             model=worker_info.model,
             agent_type=worker_info.agent_type,
-            succeeded=False,
-            duration_seconds=duration,
-            error_log=f"ESCALATED: {reason}",
-            result_summary=f"Model punted to higher tier: {reason}",
         )
         
         # Cancel the workflow run so it restarts with new tier
