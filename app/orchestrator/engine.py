@@ -200,6 +200,26 @@ class OrchestratorEngine:
                         "[ENGINE] Startup recovery: cancelled %d orphaned workflow run(s)",
                         len(stale_runs),
                     )
+
+                    # Reset orphaned tasks back to not_started so they can be re-queued
+                    orphaned_task_ids = {wr.task_id for wr in stale_runs if wr.task_id}
+                    if orphaned_task_ids:
+                        orphaned_tasks_result = await db.execute(
+                            select(TaskModel).where(
+                                TaskModel.id.in_(orphaned_task_ids),
+                                TaskModel.status == "active",
+                                TaskModel.work_state.in_(["in_progress", "blocked"]),
+                            )
+                        )
+                        orphaned_tasks = orphaned_tasks_result.scalars().all()
+                        for task in orphaned_tasks:
+                            task.work_state = "not_started"
+                        if orphaned_tasks:
+                            await db.commit()
+                            logger.info(
+                                "[ENGINE] Startup recovery: reset %d orphaned task(s) to not_started",
+                                len(orphaned_tasks),
+                            )
                 # 3b. Cancel workflow runs for tasks that are already completed/cancelled
                 # (These shouldn't be running regardless of age)
                 done_result = await db.execute(

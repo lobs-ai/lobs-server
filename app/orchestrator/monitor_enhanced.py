@@ -31,9 +31,9 @@ class MonitorEnhanced:
     def __init__(self, db: AsyncSession, worker_manager: Optional[Any] = None):
         self.db = db
         self.worker_manager = worker_manager
-        self.stuck_timeout = 900  # 15 minutes
-        self.warning_timeout = 1800  # 30 minutes
-        self.kill_timeout = 3600  # 1 hour
+        self.stuck_timeout = 1800  # 30 minutes (allows for slow local models)
+        self.warning_timeout = 3600  # 1 hour
+        self.kill_timeout = 7200  # 2 hours
         self.max_retry_count = 3  # Maximum auto-retries before escalation
 
     async def check_stuck_tasks(self) -> list[dict[str, Any]]:
@@ -115,8 +115,16 @@ class MonitorEnhanced:
                             f"(running for {int(age_seconds/60)}m)"
                         )
                 else:
-                    # Mark task as stuck and create inbox alert
-                    await self._mark_task_stuck(task, age_seconds)
+                    # Reset task to not_started so orchestrator can retry
+                    # For medium severity (15-30min), just reset silently
+                    # For high severity (30-60min), reset and log warning
+                    task.work_state = "not_started"
+                    task.updated_at = datetime.now(timezone.utc)
+                    await self.db.commit()
+                    logger.info(
+                        f"[MONITOR] Reset stuck task {task.id[:8]} to not_started "
+                        f"(was in_progress for {int(age_seconds/60)}m, no worker/workflow)"
+                    )
             
             return stuck
         
