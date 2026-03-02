@@ -613,20 +613,7 @@ class WorkerManager:
                 error_msg = f"sessions_spawn_failed: {data}"
                 error_type = classify_error_type(error_msg, data)
                 
-                try:
-                    await asyncio.wait_for(_safe_log_usage_event(
-                        self.db,
-                        source="orchestrator-spawn",
-                        model=model,
-                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                        task_type="inbox" if "inbox" in label else "task_execution",
-                        budget_lane=budget_lane,
-                        status="error",
-                        error_code="sessions_spawn_failed",
-                        metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
-                    ), timeout=5.0)
-                except Exception:
-                    pass
+                # Usage logging skipped (sessions_spawn_failed)
                 logger.error(
                     "[GATEWAY] sessions_spawn failed",
                     extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
@@ -640,40 +627,16 @@ class WorkerManager:
                 error_msg = f"sessions_spawn_not_accepted: {result}"
                 error_type = classify_error_type(error_msg, result)
                 
-                try:
-                    await asyncio.wait_for(_safe_log_usage_event(
-                        self.db,
-                        source="orchestrator-spawn",
-                        model=model,
-                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                        task_type="inbox" if "inbox" in label else "task_execution",
-                        budget_lane=budget_lane,
-                        status="error",
-                        error_code="sessions_spawn_not_accepted",
-                        metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
-                    ), timeout=5.0)
-                except Exception:
-                    pass
+                # Usage logging skipped (sessions_spawn_not_accepted)
                 logger.error(
                     "[GATEWAY] sessions_spawn not accepted",
                     extra={"gateway": {"model": model, "result": result, "error_type": error_type}},
                 )
                 return None, error_msg, error_type
 
-            # Log usage event — but don't let it block the spawn
-            try:
-                await asyncio.wait_for(_safe_log_usage_event(
-                    self.db,
-                    source="orchestrator-spawn",
-                    model=model,
-                    route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                    task_type="inbox" if "inbox" in label else "task_execution",
-                    budget_lane=budget_lane,
-                    status="success",
-                    metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
-                ), timeout=5.0)
-            except Exception as log_err:
-                logger.warning("[WORKER] Usage event logging failed (non-fatal): %s", log_err)
+            # Usage logging skipped here — causes DB deadlock with aiosqlite.
+            # Spawn success is tracked via worker_runs table instead.
+            logger.info("[WORKER] Spawn usage: model=%s label=%s runId=%s", model, label, details.get("runId"))
 
             return (
                 {
