@@ -96,7 +96,8 @@ async def lifespan(app: FastAPI):
     if settings.ORCHESTRATOR_ENABLED:
         try:
             from app.orchestrator import OrchestratorEngine
-            orchestrator_engine = OrchestratorEngine(AsyncSessionLocal)
+            from app.database import IndependentSessionLocal
+            orchestrator_engine = OrchestratorEngine(IndependentSessionLocal)
             await orchestrator_engine.start()
             logger.info("Orchestrator started successfully")
         except Exception as e:
