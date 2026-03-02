@@ -1,1 +1,1 @@
-Database lock retry logic already fully implemented. All worker_status updates and worker_runs operations have 5-attempt retry loops with exponential backoff (0s, 0.5s, 1.0s, 1.5s, 2.0s). WAL mode enabled with busy_timeout=30000ms. All 35 worker-related tests passing.
+Verified database lock fixes: worker_status UPDATE and worker_runs INSERT both have 5-attempt retry-with-exponential-backoff. WAL mode + busy_timeout=30000ms configured. All 37 lock-related tests passing.
