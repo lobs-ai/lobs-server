@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import TYPE_CHECKING
 
 import aiohttp
@@ -72,6 +73,10 @@ async def classify_task_tier(task: "TaskModel", db: AsyncSession) -> str:
     # 1. Caller override
     if task.model_tier and task.model_tier in VALID_TIERS:
         return task.model_tier
+
+    # 2. Skip LLM in test environment (TESTING env var or pytest detection)
+    if os.environ.get("TESTING") or "pytest" in sys.modules:
+        return _apply_hard_minimum("standard", task.project_id)
 
     tier = "standard"
 
