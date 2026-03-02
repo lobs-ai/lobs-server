@@ -238,21 +238,6 @@ class OrchestratorEngine:
                         len(null_tier_tasks),
                     )
 
-                # Reset pending workflow runs back to ready state
-                pending_result = await db.execute(
-                    select(WorkflowRun).where(
-                        WorkflowRun.status == "pending",
-                        WorkflowRun.updated_at < stale_threshold,
-                    )
-                )
-                stale_pending = pending_result.scalars().all()
-                if stale_pending:
-                    for wf_run in stale_pending:
-                        wf_run.status = "failed"
-                        wf_run.error = "Stale: cancelled during startup recovery (>2h pending)"
-                        wf_run.finished_at = datetime.now(timezone.utc)
-                    await db.commit()
-
                 # 4. Unblock tasks that were blocked due to transient errors
                 blocked_result = await db.execute(
                     select(TaskModel).where(
