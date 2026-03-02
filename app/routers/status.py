@@ -1,6 +1,7 @@
 """System status and health API endpoints."""
 
 import asyncio
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -31,7 +32,9 @@ from app.schemas import (
     AgentCostBreakdown,
 )
 from app.services.task_status import get_task_status_counts
+from app.utils.db_retry import execute_with_retry
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/status", tags=["status"])
 
 
@@ -61,23 +64,44 @@ async def get_overview(
         paused=False  # TODO: get from orchestrator if it exposes pause state
     )
     
-    # Workers health - count active workers and get totals from worker_runs
-    active_result = await db.execute(
-        select(func.count()).select_from(WorkerRun).where(
-            and_(WorkerRun.ended_at.is_(None), WorkerRun.started_at.isnot(None))
+    # Workers health - count active workers and get totals from worker_runs (with retry-on-lock)
+    async def get_active_workers():
+        active_result = await db.execute(
+            select(func.count()).select_from(WorkerRun).where(
+                and_(WorkerRun.ended_at.is_(None), WorkerRun.started_at.isnot(None))
+            )
         )
-    )
-    active_workers = active_result.scalar() or 0
+        return active_result.scalar() or 0
     
-    completed_result = await db.execute(
-        select(func.count()).select_from(WorkerRun).where(WorkerRun.succeeded == True)
-    )
-    total_completed = completed_result.scalar() or 0
+    async def get_completed():
+        completed_result = await db.execute(
+            select(func.count()).select_from(WorkerRun).where(WorkerRun.succeeded == True)
+        )
+        return completed_result.scalar() or 0
     
-    failed_result = await db.execute(
-        select(func.count()).select_from(WorkerRun).where(WorkerRun.succeeded == False)
-    )
-    total_failed = failed_result.scalar() or 0
+    async def get_failed():
+        failed_result = await db.execute(
+            select(func.count()).select_from(WorkerRun).where(WorkerRun.succeeded == False)
+        )
+        return failed_result.scalar() or 0
+    
+    async def rollback_db():
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+    
+    # Execute worker queries with retry-on-lock
+    try:
+        active_workers = await execute_with_retry(get_active_workers, "get active workers", on_failure_callback=rollback_db)
+        total_completed = await execute_with_retry(get_completed, "get completed workers", on_failure_callback=rollback_db)
+        total_failed = await execute_with_retry(get_failed, "get failed workers", on_failure_callback=rollback_db)
+    except Exception as e:
+        logger.error("[STATUS] Failed to query worker stats after retries: %s", e)
+        # Use defaults on failure
+        active_workers = 0
+        total_completed = 0
+        total_failed = 0
     
     workers = WorkersHealth(
         active=active_workers,
@@ -85,17 +109,25 @@ async def get_overview(
         total_failed=total_failed
     )
     
-    # Agents - get recent agent statuses
-    agents_result = await db.execute(
-        select(AgentStatusModel).order_by(AgentStatusModel.last_active_at.desc())
-    )
-    agents_data = []
-    for agent in agents_result.scalars().all():
-        agents_data.append({
-            "type": agent.agent_type,
-            "status": agent.status or "unknown",
-            "last_active": agent.last_active_at.isoformat() if agent.last_active_at else None
-        })
+    # Agents - get recent agent statuses (with retry-on-lock)
+    async def get_agents():
+        agents_result = await db.execute(
+            select(AgentStatusModel).order_by(AgentStatusModel.last_active_at.desc())
+        )
+        agents_data = []
+        for agent in agents_result.scalars().all():
+            agents_data.append({
+                "type": agent.agent_type,
+                "status": agent.status or "unknown",
+                "last_active": agent.last_active_at.isoformat() if agent.last_active_at else None
+            })
+        return agents_data
+    
+    try:
+        agents_data = await execute_with_retry(get_agents, "get agent statuses", on_failure_callback=rollback_db)
+    except Exception as e:
+        logger.error("[STATUS] Failed to query agent statuses after retries: %s", e)
+        agents_data = []
     
     # Tasks health — use canonical aggregation service to guarantee parity
     # with /api/tasks/counts and any other endpoint that surfaces task counts.
@@ -115,29 +147,45 @@ async def get_overview(
     now = datetime.now(timezone.utc)  # still needed below for memories timestamp
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Memories health
-    total_memories_result = await db.execute(
-        select(func.count()).select_from(Memory)
-    )
-    total_memories = total_memories_result.scalar() or 0
-    
-    today_memories_result = await db.execute(
-        select(func.count()).select_from(Memory).where(
-            Memory.created_at >= today_start
+    # Memories health (with retry-on-lock)
+    async def get_memories():
+        total_result = await db.execute(
+            select(func.count()).select_from(Memory)
         )
-    )
-    today_entries = today_memories_result.scalar() or 0
+        total = total_result.scalar() or 0
+        
+        today_result = await db.execute(
+            select(func.count()).select_from(Memory).where(
+                Memory.created_at >= today_start
+            )
+        )
+        today = today_result.scalar() or 0
+        return total, today
+    
+    try:
+        total_memories, today_entries = await execute_with_retry(get_memories, "get memory stats", on_failure_callback=rollback_db)
+    except Exception as e:
+        logger.error("[STATUS] Failed to query memory stats after retries: %s", e)
+        total_memories = 0
+        today_entries = 0
     
     memories = MemoriesHealth(
         total=total_memories,
         today_entries=today_entries
     )
     
-    # Inbox health
-    unread_result = await db.execute(
-        select(func.count()).select_from(InboxItem).where(InboxItem.is_read == False)
-    )
-    unread = unread_result.scalar() or 0
+    # Inbox health (with retry-on-lock)
+    async def get_inbox():
+        unread_result = await db.execute(
+            select(func.count()).select_from(InboxItem).where(InboxItem.is_read == False)
+        )
+        return unread_result.scalar() or 0
+    
+    try:
+        unread = await execute_with_retry(get_inbox, "get inbox unread count", on_failure_callback=rollback_db)
+    except Exception as e:
+        logger.error("[STATUS] Failed to query inbox after retries: %s", e)
+        unread = 0
     
     inbox = InboxHealth(unread=unread)
     

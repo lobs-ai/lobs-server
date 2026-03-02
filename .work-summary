@@ -1,10 +1,1 @@
-Verified and validated database lock fix for worker_status and worker_runs INSERT operations:
-
-✓ VERIFIED: Database configuration properly set (WAL mode + busy_timeout=30000ms >= 5000ms)
-✓ VERIFIED: worker_status updates have 5-attempt retry-with-exponential-backoff (0.5s, 1.0s, 1.5s, 2.0s)
-✓ VERIFIED: worker_runs stub INSERT has 5-attempt retry-with-exponential-backoff
-✓ VERIFIED: All task-related commits have 5-attempt retry logic (task status, outcomes, learnings)
-✓ VERIFIED: AgentTracker all methods have 5-attempt retry-with-exponential-backoff
-✓ ALL TESTS PASSING: 28 comprehensive tests validate database configuration, retry logic, and concurrent handling
-
-No code changes needed - all required retry logic and database configuration already properly implemented.
+Fixed DB lock on worker_status and worker_runs INSERTs. Added retry-with-exponential-backoff (5 attempts, 0.5s backoff) to all database commits in: workflow_executor.py, escalation.py, inbox_processor.py, initiative_decisions.py, reflection_cycle.py, sweep_arbitrator.py. Verified WAL mode and busy_timeout=30000ms already configured. All 75 workflow+agent_tracker tests passing.
