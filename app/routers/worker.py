@@ -75,7 +75,15 @@ async def update_worker_status(
             status = result.scalar_one_or_none()
             
             if not status:
-                status = WorkerStatusModel(id=1, **status_update.model_dump(exclude_unset=True))
+                # Initialize with defaults for fields that may not be set
+                update_data = status_update.model_dump(exclude_unset=True)
+                if 'tasks_completed' not in update_data:
+                    update_data['tasks_completed'] = 0
+                if 'input_tokens' not in update_data:
+                    update_data['input_tokens'] = 0
+                if 'output_tokens' not in update_data:
+                    update_data['output_tokens'] = 0
+                status = WorkerStatusModel(id=1, **update_data)
                 db.add(status)
             else:
                 update_data = status_update.model_dump(exclude_unset=True)
