@@ -67,11 +67,6 @@ async def complete(
       2. LM Studio (local qwen — free fallback when Gemini CLI unavailable)
       3. Anthropic Haiku (cloud fallback)
     """
-    # Skip real LLM calls in test environment
-    import sys as _sys
-    if os.environ.get("TESTING") or "pytest" in _sys.modules:
-        return '{"agent": "programmer", "model_tier": "standard", "reasoning": "test mock"}'
-
     result = await _gemini_cli(system, user, max_tokens, timeout)
     if result:
         return result

@@ -49,6 +49,28 @@ async def get_test_db() -> AsyncSession:
             await session.close()
 
 
+@pytest.fixture(autouse=True)
+def mock_external_llm_calls(monkeypatch):
+    """Block ALL external LLM calls in tests — autouse so every test gets it."""
+    async def _mock_classify(task, db):
+        return task.model_tier if task.model_tier else "standard"
+    async def _mock_llm(**kwargs):
+        return '{"agent": "programmer", "model_tier": "standard", "reasoning": "test mock"}'
+    
+    # Patch at source modules
+    monkeypatch.setattr("app.services.task_tier.classify_task_tier", _mock_classify)
+    monkeypatch.setattr("app.orchestrator.llm_direct.complete", _mock_llm)
+    # Patch at import sites
+    try:
+        monkeypatch.setattr("app.routers.tasks.classify_task_tier", _mock_classify)
+    except AttributeError:
+        pass
+    try:
+        monkeypatch.setattr("app.orchestrator.workflow_assignment.complete", _mock_llm)
+    except AttributeError:
+        pass
+
+
 @pytest_asyncio.fixture(scope="function", autouse=True)
 async def setup_test_db():
     """Create tables before each test and drop after."""
@@ -83,27 +105,13 @@ async def test_token(db_session):
 
 
 @pytest_asyncio.fixture
-async def client(test_token, monkeypatch):
+async def client(test_token):
     """Provide an async HTTP client for testing."""
     # Override the database dependency
     app.dependency_overrides[get_db] = get_test_db
     
     # Disable orchestrator for tests
     settings.ORCHESTRATOR_ENABLED = False
-    
-    # Mock task tier classification so tests never hit LM Studio
-    async def _mock_classify(task, db):
-        return task.model_tier if task.model_tier else "standard"
-    # Patch at BOTH source and import sites (from X import Y binds a new ref)
-    monkeypatch.setattr("app.services.task_tier.classify_task_tier", _mock_classify)
-    monkeypatch.setattr("app.routers.tasks.classify_task_tier", _mock_classify)
-    
-    # Mock llm_direct.complete so tests never hit LM Studio / Gemini / Anthropic
-    async def _mock_llm_complete(**kwargs):
-        return '{"agent": "programmer", "model_tier": "standard", "reasoning": "test mock"}'
-    monkeypatch.setattr("app.orchestrator.llm_direct.complete", _mock_llm_complete)
-    # Also patch where it's imported
-    monkeypatch.setattr("app.orchestrator.workflow_assignment.complete", _mock_llm_complete)
     
     async with AsyncClient(
         transport=ASGITransport(app=app),
