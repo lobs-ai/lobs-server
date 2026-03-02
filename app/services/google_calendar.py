@@ -247,7 +247,27 @@ class GoogleCalendarService:
                     external_source=f"google_calendar:{ev.get('_source', 'unknown')}",
                 ))
                 created += 1
-        await self.db.commit()
+        
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error(
+                        "[GCAL] Failed to sync calendar events after 5 attempts: %s",
+                        _e, exc_info=True
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
+                    raise
+        
         return {"fetched": len(all_events), "created": created, "updated": updated}
 
     # ── Internal ─────────────────────────────────────────────────────
