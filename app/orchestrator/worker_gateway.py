@@ -45,7 +45,12 @@ class WorkerGateway:
         """
         try:
             async with aiohttp.ClientSession() as session:
-                parent_session_key = f"{GATEWAY_SESSION_KEY}-spawn-{uuid.uuid4().hex[:8]}"
+                # Use the fixed orchestrator session key for all spawns.
+                # DO NOT use a per-spawn random suffix (e.g. main-spawn-XXXX):
+                # those become real Gateway sessions and receive OpenClaw's
+                # built-in "Continue where you left off" retry prompts when a
+                # child run fails, causing noise and misbehavior.
+                parent_session_key = GATEWAY_SESSION_KEY
                 resp = await session.post(
                     f"{GATEWAY_URL}/tools/invoke",
                     headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
