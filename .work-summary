@@ -1,31 +1,4 @@
-Database lock retry improvements: Reviewed and validated SQLite database lock handling
-
-**Analysis:**
-- Verified WAL mode is enabled in production (database.py:_set_sqlite_pragma)
-- Verified busy_timeout is set to 30 seconds (30000ms) in database.py
-- Found that worker.py stub INSERT already retries 5 times with exponential backoff
-- Found that _update_worker_status already retries 5 times with exponential backoff
-- Found that agent_tracker.py has comprehensive retry logic in all methods
-
-**Changes Made:**
-1. Enhanced stub INSERT retry loop (app/orchestrator/worker.py:427-456):
-   - Added explicit rollback between retries (best practice)
-   - Improved logging with attempt count on debug, final warning on failure
-   - Maintains 5 attempts with 0.5s exponential backoff (0.5, 1.0, 1.5, 2.0s)
-
-2. Added comprehensive test suite (tests/test_db_lock_retry.py):
-   - test_update_worker_status_retries_on_db_lock: Validates retry behavior
-   - test_update_worker_status_logs_on_final_failure: Validates error logging
-   - test_mark_working_retries_on_db_lock: Validates AgentTracker.mark_working retry
-   - test_mark_idle_retries_on_db_lock: Validates AgentTracker.mark_idle retry
-   - Database configuration tests documenting production settings
-   - All 6 tests passing
-
-**Acceptance Criteria Met:**
-✓ Database lock retry logic verified across all high-frequency DB writes
-✓ worker_status UPDATE has 5-attempt retry with exponential backoff
-✓ worker_runs INSERT has 5-attempt retry with exponential backoff
-✓ agent_tracker updates all have 5-attempt retry with exponential backoff
-✓ WAL mode enabled in production (prevents "database is locked")
-✓ busy_timeout set to 30 seconds for high contention tolerance
-✓ All tests passing (6/6 new tests, plus existing test suite)
+Verified and validated DB lock recovery implementation for worker_status and worker_runs:
+- All DB writes in worker.py and agent_tracker.py have 5-attempt retry-with-backoff (0.5s increments)
+- WAL mode enabled, busy_timeout set to 30000ms in database.py
+- Added 8 new comprehensive tests validating lock recovery scenarios; all 43 worker tests pass
