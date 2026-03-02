@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 _LMSTUDIO_URL = os.environ.get("LMSTUDIO_HOST", "http://localhost:1234")
 _CLASSIFY_TIMEOUT = 2.0  # seconds
 
-VALID_TIERS = ("small", "standard", "strong")
+VALID_TIERS = ("micro", "small", "medium", "standard", "strong")
 
 # Projects that require at least 'standard' tier
 _PROJECT_HARD_MINIMUMS: dict[str, str] = {
