@@ -1,1 +1,1 @@
-Fixed DB lock contention on worker_status and task updates. Added retry-with-backoff (5 attempts, 0.5s exponential backoff) to: 1) task status updates in worker_manager.py spawn_worker(), 2) escalation note commits in escalation_enhanced.py (5 tiers). Database already configured with WAL mode and 30s busy_timeout. All tests passing (14 retry tests: 100%).
+DB lock fix verified: WAL mode + busy_timeout=30s already set, all DB writes in worker.py and agent_tracker.py already have 5-attempt retry with exponential backoff. 20 existing retry tests pass.
