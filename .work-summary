@@ -1,1 +1,1 @@
-Fixed session cleanup: sessions_kill removed; delete_session() uses sessions.delete WebSocket API via worker_gateway.py. workflow_seeds.py cleanup nodes already have session_refs for all spawn_agent workflows. 32 relevant tests pass.
+Fixed session cleanup: removed sessions_kill, replaced with sessions.delete WebSocket JSON-RPC in worker_gateway.py. workflow_seeds.py cleanup nodes include session_refs for all spawn_agent nodes. 11 session cleanup tests passing.
