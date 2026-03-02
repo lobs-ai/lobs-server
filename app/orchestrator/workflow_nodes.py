@@ -1675,3 +1675,16 @@ async def _pcall_learning(func_name: str, db, worker_manager, context, **kw):
     fn = getattr(learning, func_name)
     return await fn(db, worker_manager, context, **kw)
 
+
+
+# ── Upkeep callables ────────────────────────────────────────────────
+
+async def _pcall_upkeep(func_name: str, db, worker_manager, context, **kw):
+    """Dispatcher for upkeep service callables."""
+    import app.services.upkeep_service as upkeep
+    fn = getattr(upkeep, func_name)
+    return await fn(db, worker_manager, context, **kw)
+
+# Register upkeep callables
+_PYTHON_CALLABLES["upkeep.review_sweep"] = lambda db=None, worker_manager=None, context=None, **kw: _pcall_upkeep("review_sweep", db, worker_manager, context, **kw)
+_PYTHON_CALLABLES["upkeep.doc_scan"] = lambda db=None, worker_manager=None, context=None, **kw: _pcall_upkeep("doc_scan", db, worker_manager, context, **kw)

@@ -823,7 +823,90 @@ DEFAULT_WORKFLOWS = [
         "edges": [],
         "metadata": {"author": "lobs", "category": "learning", "system": True},
     },
-    # ── System Workflows (recurring/event-driven) ────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    # REVIEW SWEEP — scan for unreviewed programmer work
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "review-sweep",
+        "description": "Periodic scan for completed programmer tasks that lack review. Results go to Lobs for triage — not inbox.",
+        "trigger": {"type": "schedule", "cron": "0 */6 * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "scan",
+                "type": "python_call",
+                "config": {"callable": "upkeep.review_sweep"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "scan.unreviewed > 0", "goto": "notify_lobs"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "notify_lobs",
+                "type": "notify",
+                "config": {
+                    "channel": "internal",
+                    "message_template": "Review sweep: {scan.unreviewed} unreviewed programmer tasks in last 48h. Check scan.tasks for details.",
+                },
+                "on_success": "done",
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": False}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "upkeep", "system": True},
+    },
+    # ══════════════════════════════════════════════════════════════════
+    # DOC UPKEEP — scan repos for stale/missing documentation
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "doc-upkeep",
+        "description": "Daily scan of project repos for missing READMEs, stale docs, and documentation drift. Spawns writer on local model for fixes.",
+        "trigger": {"type": "schedule", "cron": "0 8 * * *", "timezone": "America/New_York"},
+        "is_active": True,
+        "nodes": [
+            {
+                "id": "scan",
+                "type": "python_call",
+                "config": {"callable": "upkeep.doc_scan"},
+                "on_success": "check_results",
+                "on_failure": {"retry": 1},
+            },
+            {
+                "id": "check_results",
+                "type": "branch",
+                "config": {
+                    "conditions": [
+                        {"match": "scan.findings > 0", "goto": "spawn_writer"},
+                    ],
+                    "default": "done",
+                },
+            },
+            {
+                "id": "spawn_writer",
+                "type": "spawn_agent",
+                "config": {
+                    "agent_type": "writer",
+                    "model_tier": "small",
+                    "prompt_template": "Documentation upkeep run. The following issues were found:\n\n{scan.details}\n\nFor each finding:\n- If it's a missing README or stale doc, write/update it directly in the repo.\n- If it's doc drift, review recent commits and update docs to match.\n- Skip low-priority items unless the fix is trivial.\n- Commit changes with message 'docs: <description>'.",
+                    "timeout_seconds": 600,
+                },
+                "on_success": "done",
+                "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
+            },
+            {"id": "done", "type": "cleanup", "config": {"delete_session": True}},
+        ],
+        "edges": [],
+        "metadata": {"author": "lobs", "category": "upkeep", "system": True},
+    },
+        # ── System Workflows (recurring/event-driven) ────────────────────
     {
         "name": "reflection-cycle",
         "description": "Full strategic reflection pipeline with capacity-aware scheduling. Checks worker capacity before spawning reflections to avoid competing with real work.",
