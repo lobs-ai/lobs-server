@@ -54,8 +54,7 @@ async def scan_unassigned(db: AsyncSession, worker_manager: Any, context: dict, 
         select(Task).where(
             Task.status.in_(["todo", "active", "inbox"]),
             Task.work_state.in_(["not_started", None]),
-            # Skip tasks that already have both agent and model_tier assigned
-            (Task.agent.is_(None)) | (Task.model_tier.is_(None)),
+            Task.agent.is_(None),
         ).limit(10)
     )
     tasks = result.scalars().all()
@@ -108,6 +107,15 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
     if task.agent and task.model_tier:
         return {"assigned": True, "agent": task.agent, "model_tier": task.model_tier, "reason": "already assigned", "task_title": task.title}
 
+    # If agent is set but model_tier is missing, classify tier only (no LLM needed)
+    if task.agent and not task.model_tier:
+        tier = _default_tier_for_agent(task.agent)
+        task.model_tier = tier
+        task.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+        logger.info("[ASSIGNMENT] Set default tier='%s' for task %s (agent=%s already set)", tier, task_id[:8], task.agent)
+        return {"assigned": True, "agent": task.agent, "model_tier": tier, "reason": "tier backfilled", "task_title": task.title}
+
     user_msg = ASSIGNMENT_USER_TEMPLATE.format(
         title=task.title or "Untitled",
         notes=(task.notes or "")[:1000],
@@ -147,6 +155,22 @@ async def assign_agent(db: AsyncSession, worker_manager: Any, context: dict, **k
 
     logger.info("[ASSIGNMENT] Assigned agent='%s' tier='%s' to task %s (%s)", agent_type, model_tier, task_id[:8], task.title[:50])
     return {"assigned": True, "agent": agent_type, "model_tier": model_tier, "task_title": task.title, "task_id": task.id}
+
+
+# Default model tier per agent type (used for backfilling tasks that already have agents)
+_AGENT_DEFAULT_TIERS = {
+    "programmer": "standard",
+    "architect": "strong",
+    "reviewer": "standard",
+    "researcher": "small",
+    "writer": "small",
+    "inbox-responder": "micro",
+}
+
+
+def _default_tier_for_agent(agent_type: str) -> str:
+    """Return a sensible default model tier for an agent type."""
+    return _AGENT_DEFAULT_TIERS.get(agent_type, "small")
 
 
 def _parse_agent_response(text: str) -> str | None:
