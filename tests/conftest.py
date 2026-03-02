@@ -11,6 +11,10 @@ if os.environ.get("LOBS_API_URL", "").startswith("http://localhost"):
 # from starting during lifespan and hitting the real DB / causing mock leaks.
 os.environ["ORCHESTRATOR_ENABLED"] = "false"
 
+# Use a separate test database to avoid SQLite WAL contention with the live server.
+# This MUST be set before any app module imports database.py.
+os.environ["DATABASE_PATH"] = "/tmp/lobs-test.db"
+
 """Shared test fixtures and configuration."""
 
 import pytest
