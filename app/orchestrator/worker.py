@@ -589,73 +589,35 @@ class WorkerManager:
             (Dict with runId and childSessionKey, error_string, error_type)
         """
         try:
-            async with aiohttp.ClientSession() as session:
-                parent_session_key = f"{GATEWAY_SESSION_KEY}-spawn-{uuid.uuid4().hex[:8]}"
-                resp = await session.post(
-                    f"{GATEWAY_URL}/tools/invoke",
-                    headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
-                    json={
-                        "tool": "sessions_spawn",
-                        "sessionKey": parent_session_key,
-                        "args": {
-                            "task": task_prompt,
-                            "agentId": agent_id,
-                            "model": model,
-                            "runTimeoutSeconds": timeout_seconds,
-                            "cleanup": "keep",
-                            "label": label
-                        }
-                    },
-                    timeout=aiohttp.ClientTimeout(total=30)
-                )
+            import httpx
+            parent_session_key = f"{GATEWAY_SESSION_KEY}-spawn-{uuid.uuid4().hex[:8]}"
+            # Use httpx sync in a thread to avoid aiohttp/aiosqlite event loop deadlock.
+            # The aiosqlite background thread blocks the event loop when aiohttp awaits.
+            def _do_spawn():
+                with httpx.Client(timeout=30) as client:
+                    r = client.post(
+                        f"{GATEWAY_URL}/tools/invoke",
+                        headers={"Authorization": f"Bearer {GATEWAY_TOKEN}"},
+                        json={
+                            "tool": "sessions_spawn",
+                            "sessionKey": parent_session_key,
+                            "args": {
+                                "task": task_prompt,
+                                "agentId": agent_id,
+                                "model": model,
+                                "runTimeoutSeconds": timeout_seconds,
+                                "cleanup": "keep",
+                                "label": label
+                            }
+                        },
+                    )
+                    return r.json()
+            data = await asyncio.get_event_loop().run_in_executor(None, _do_spawn)
                 
-                data = await resp.json()
+            if not data.get("ok"):
+                error_msg = f"sessions_spawn_failed: {data}"
+                error_type = classify_error_type(error_msg, data)
                 
-                if not data.get("ok"):
-                    error_msg = f"sessions_spawn_failed: {data}"
-                    error_type = classify_error_type(error_msg, data)
-                    
-                    await _safe_log_usage_event(
-                        self.db,
-                        source="orchestrator-spawn",
-                        model=model,
-                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                        task_type="inbox" if "inbox" in label else "task_execution",
-                        budget_lane=budget_lane,
-                        status="error",
-                        error_code="sessions_spawn_failed",
-                        metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
-                    )
-                    logger.error(
-                        "[GATEWAY] sessions_spawn failed",
-                        extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
-                    )
-                    return None, error_msg, error_type
-                
-                result = data.get("result", {})
-                # Gateway wraps tool results in {content, details}
-                details = result.get("details", result)
-                if details.get("status") != "accepted":
-                    error_msg = f"sessions_spawn_not_accepted: {result}"
-                    error_type = classify_error_type(error_msg, result)
-                    
-                    await _safe_log_usage_event(
-                        self.db,
-                        source="orchestrator-spawn",
-                        model=model,
-                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                        task_type="inbox" if "inbox" in label else "task_execution",
-                        budget_lane=budget_lane,
-                        status="error",
-                        error_code="sessions_spawn_not_accepted",
-                        metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
-                    )
-                    logger.error(
-                        "[GATEWAY] sessions_spawn not accepted",
-                        extra={"gateway": {"model": model, "result": result, "error_type": error_type}},
-                    )
-                    return None, error_msg, error_type
-
                 await _safe_log_usage_event(
                     self.db,
                     source="orchestrator-spawn",
@@ -663,18 +625,59 @@ class WorkerManager:
                     route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
                     task_type="inbox" if "inbox" in label else "task_execution",
                     budget_lane=budget_lane,
-                    status="success",
-                    metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
+                    status="error",
+                    error_code="sessions_spawn_failed",
+                    metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
                 )
+                logger.error(
+                    "[GATEWAY] sessions_spawn failed",
+                    extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
+                )
+                return None, error_msg, error_type
+            
+            result = data.get("result", {})
+            # Gateway wraps tool results in {content, details}
+            details = result.get("details", result)
+            if details.get("status") != "accepted":
+                error_msg = f"sessions_spawn_not_accepted: {result}"
+                error_type = classify_error_type(error_msg, result)
+                
+                await _safe_log_usage_event(
+                    self.db,
+                    source="orchestrator-spawn",
+                    model=model,
+                    route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
+                    task_type="inbox" if "inbox" in label else "task_execution",
+                    budget_lane=budget_lane,
+                    status="error",
+                    error_code="sessions_spawn_not_accepted",
+                    metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
+                )
+                logger.error(
+                    "[GATEWAY] sessions_spawn not accepted",
+                    extra={"gateway": {"model": model, "result": result, "error_type": error_type}},
+                )
+                return None, error_msg, error_type
 
-                return (
-                    {
-                        "runId": details["runId"],
-                        "childSessionKey": details["childSessionKey"],
-                    },
-                    None,
-                    "none",  # No error
-                )
+            await _safe_log_usage_event(
+                self.db,
+                source="orchestrator-spawn",
+                model=model,
+                route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
+                task_type="inbox" if "inbox" in label else "task_execution",
+                budget_lane=budget_lane,
+                status="success",
+                metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
+            )
+
+            return (
+                {
+                    "runId": details["runId"],
+                    "childSessionKey": details["childSessionKey"],
+                },
+                None,
+                "none",  # No error
+            )
 
         except Exception as e:
             error_msg = str(e)
@@ -706,10 +709,10 @@ class WorkerManager:
                     timeout=aiohttp.ClientTimeout(total=10),
                 )
                 data = await resp.json()
-                if not data.get("ok"):
-                    return False
-                result = data.get("result", {})
-                return isinstance(result, (list, dict))
+            if not data.get("ok"):
+                return False
+            result = data.get("result", {})
+            return isinstance(result, (list, dict))
         except aiohttp.ClientConnectorError:
             # Gateway unreachable — treat as "unknown" not "dead"
             logger.debug("[WORKER] Gateway unreachable in check_session_alive for %s", session_key[:20])
