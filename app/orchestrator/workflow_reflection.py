@@ -14,6 +14,7 @@ The full reflection workflow:
 7. emit_completion — signal that the batch is done
 """
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -175,7 +176,27 @@ async def spawn_reflection_agents(db: AsyncSession, worker_manager=None, context
     else:
         anchor.value = last_run_iso
 
-    await db.commit()
+    # Commit with retry-on-lock logic (exponential backoff)
+    for _attempt in range(5):
+        try:
+            if _attempt > 0:
+                await asyncio.sleep(_attempt * 0.5)
+            await db.commit()
+            break
+        except Exception as _e:
+            if _attempt < 4:
+                logger.debug(
+                    "[REFLECTION_WF] Failed to persist spawn_reflection_agents (attempt %d/5): %s, retrying...",
+                    _attempt + 1, _e
+                )
+                await db.rollback()
+            else:
+                logger.error(
+                    "[REFLECTION_WF] Failed to persist spawn_reflection_agents after 5 attempts: %s", _e,
+                    exc_info=True
+                )
+                await db.rollback()
+                raise
 
     return {
         "spawned": spawned,
@@ -230,5 +251,26 @@ async def run_daily_compression(db: AsyncSession, worker_manager=None, context=N
     else:
         marker.value = today_key
 
-    await db.commit()
+    # Commit with retry-on-lock logic (exponential backoff)
+    for _attempt in range(5):
+        try:
+            if _attempt > 0:
+                await asyncio.sleep(_attempt * 0.5)
+            await db.commit()
+            break
+        except Exception as _e:
+            if _attempt < 4:
+                logger.debug(
+                    "[REFLECTION_WF] Failed to persist daily compression marker (attempt %d/5): %s, retrying...",
+                    _attempt + 1, _e
+                )
+                await db.rollback()
+            else:
+                logger.error(
+                    "[REFLECTION_WF] Failed to persist daily compression marker after 5 attempts: %s", _e,
+                    exc_info=True
+                )
+                await db.rollback()
+                raise
+
     return result

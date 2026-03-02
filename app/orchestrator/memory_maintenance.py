@@ -449,10 +449,33 @@ async def run_memory_maintenance(routine=None) -> dict[str, Any]:
     try:
         from app.database import AsyncSessionLocal
         from app.services.memory_sync import sync_agent_memories
+        import asyncio
 
         async with AsyncSessionLocal() as db:
             sync_result = await sync_agent_memories(db)
-            await db.commit()
+            
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[MEMORY_MAINTENANCE] Failed to commit memory_sync (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await db.rollback()
+                    else:
+                        logger.error(
+                            "[MEMORY_MAINTENANCE] Failed to commit memory_sync after 5 attempts: %s", _e,
+                            exc_info=True
+                        )
+                        await db.rollback()
+                        raise
+            
             results["memory_sync"] = sync_result
     except Exception as e:
         logger.warning("Memory sync failed (non-fatal): %s", e)
