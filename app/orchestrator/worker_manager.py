@@ -288,13 +288,34 @@ class WorkerManager:
                 started_at=datetime.fromtimestamp(start_time, tz=timezone.utc)
             )
 
-            # Update DB: task status
+            # Update DB: task status (with retry-on-lock)
             db_task = await self.db.get(Task, task_id)
             if db_task:
                 db_task.work_state = "in_progress"
                 db_task.started_at = datetime.now(timezone.utc)
                 db_task.updated_at = datetime.now(timezone.utc)
-                await self.db.commit()
+                for _attempt in range(5):
+                    try:
+                        if _attempt > 0:
+                            await asyncio.sleep(_attempt * 0.5)
+                        await self.db.commit()
+                        break
+                    except Exception as _e:
+                        if _attempt < 4:
+                            logger.debug(
+                                "[WORKER] Failed to update task status (attempt %d/5): %s, retrying...",
+                                _attempt + 1, _e
+                            )
+                            await self.db.rollback()
+                        else:
+                            logger.error(
+                                "[WORKER] Failed to update task status after 5 attempts: %s", _e,
+                                exc_info=True
+                            )
+                            try:
+                                await self.db.rollback()
+                            except Exception:
+                                pass
 
             # Update agent tracker
             await AgentTracker(self.db).mark_working(

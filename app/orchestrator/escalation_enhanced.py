@@ -14,6 +14,7 @@ from typing import Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Task, InboxItem
+import asyncio
 from app.services.failure_explainer import explain_failure_markdown
 
 logger = logging.getLogger(__name__)
@@ -134,7 +135,26 @@ class EscalationManagerEnhanced:
             )
             task.notes = (task.notes or "") + retry_note
             
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[ESCALATION] Failed to update task notes (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[ESCALATION] Failed to update task notes after 5 attempts: %s", _e,
+                            exc_info=True
+                        )
+                        await self.db.rollback()
+                        raise
             
             logger.info(
                 f"[ESCALATION] Tier 1: Auto-retry {task.id[:8]} "
@@ -202,7 +222,26 @@ class EscalationManagerEnhanced:
             )
             task.notes = (task.notes or "") + switch_note
             
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[ESCALATION] Failed to update task notes (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[ESCALATION] Failed to update task notes after 5 attempts: %s", _e,
+                            exc_info=True
+                        )
+                        await self.db.rollback()
+                        raise
             
             logger.info(
                 f"[ESCALATION] Tier 2: Agent switch {task.id[:8]} "
@@ -292,7 +331,26 @@ class EscalationManagerEnhanced:
             )
             task.notes = (task.notes or "") + diagnostic_note
             
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[ESCALATION] Failed to commit diagnostic task (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[ESCALATION] Failed to commit diagnostic task after 5 attempts: %s", _e,
+                            exc_info=True
+                        )
+                        await self.db.rollback()
+                        raise
             
             logger.info(
                 f"[ESCALATION] Tier 3: Diagnostic spawned for {task.id[:8]} "
@@ -394,7 +452,26 @@ class EscalationManagerEnhanced:
             )
             task.notes = (task.notes or "") + escalation_note
             
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[ESCALATION] Failed to commit human escalation (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[ESCALATION] Failed to commit human escalation after 5 attempts: %s", _e,
+                            exc_info=True
+                        )
+                        await self.db.rollback()
+                        raise
             
             logger.warning(
                 f"[ESCALATION] Tier 4: Human escalation for {task.id[:8]} "
@@ -461,7 +538,26 @@ class EscalationManagerEnhanced:
             )
 
             self.db.add(alert)
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[ESCALATION] Failed to commit simple alert (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[ESCALATION] Failed to commit simple alert after 5 attempts: %s", _e,
+                            exc_info=True
+                        )
+                        await self.db.rollback()
+                        raise
 
             logger.info(
                 f"[ESCALATION] Created alert {alert_id} for task {task_id[:8]} "
