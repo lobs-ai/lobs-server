@@ -220,7 +220,6 @@ class OrchestratorEngine:
                 blocked_result = await db.execute(
                     select(TaskModel).where(
                         TaskModel.work_state == "blocked",
-                        TaskModel.failure_reason.isnot(None),
                     )
                 )
                 blocked_tasks = blocked_result.scalars().all()
@@ -233,7 +232,9 @@ class OrchestratorEngine:
                 unblocked = 0
                 for task in blocked_tasks:
                     reason = task.failure_reason or ""
-                    if any(r in reason for r in transient_reasons):
+                    # Unblock if: no failure reason (orphaned blocked state)
+                    # or known transient error reason
+                    if not reason or any(r in reason for r in transient_reasons):
                         task.work_state = "not_started"
                         task.failure_reason = None
                         task.updated_at = datetime.now(timezone.utc)
@@ -346,6 +347,44 @@ class OrchestratorEngine:
                                 )
                 except Exception as _e:
                     logger.warning("[ENGINE] Startup recovery: session reattach failed (non-fatal): %s", _e)
+
+                # Spawn-node sweep: cancel workflow runs stuck at a spawn_* node
+                # for more than 15 minutes with no matching live worker stub.
+                # Root cause: spawn_worker DB lock causes the session to be
+                # spawned but work_state never commits → workflow stuck forever.
+                try:
+                    from sqlalchemy import text as _text
+                    spawn_cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+                    stuck_spawn_result = await db.execute(
+                        select(WorkflowRun).where(
+                            WorkflowRun.status == "running",
+                            WorkflowRun.current_node.like("spawn_%"),
+                            WorkflowRun.updated_at < spawn_cutoff,
+                        )
+                    )
+                    stuck_spawn_runs = stuck_spawn_result.scalars().all()
+                    if stuck_spawn_runs:
+                        reset_task_ids = set()
+                        for wr in stuck_spawn_runs:
+                            wr.status = "cancelled"
+                            wr.error = "Startup recovery: spawn node stuck >15min (likely DB lock during commit). Re-queuing."
+                            wr.finished_at = datetime.now(timezone.utc)
+                            if wr.task_id:
+                                reset_task_ids.add(wr.task_id)
+                        for tid in reset_task_ids:
+                            t = await db.get(TaskModel, tid)
+                            if t and t.work_state == "in_progress" and t.status == "active":
+                                t.work_state = "not_started"
+                                t.updated_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        logger.info(
+                            "[ENGINE] Startup recovery: cancelled %d stuck spawn-node run(s), reset %d task(s)",
+                            len(stuck_spawn_runs), len(reset_task_ids),
+                        )
+                except Exception as _spawn_e:
+                    logger.warning("[ENGINE] Startup recovery spawn-node sweep failed (non-fatal): %s", _spawn_e)
+                    try: await db.rollback()
+                    except Exception: pass
 
                 # Final sweep: reset any remaining in_progress tasks with no live stub.
                 # These are orphaned — no worker is tracking them in memory or in the DB.
