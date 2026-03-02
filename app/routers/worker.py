@@ -16,17 +16,42 @@ router = APIRouter(prefix="/worker", tags=["worker"])
 async def get_worker_status(
     db: AsyncSession = Depends(get_db)
 ) -> WorkerStatus:
-    """Get current worker status (singleton)."""
-    result = await db.execute(select(WorkerStatusModel).where(WorkerStatusModel.id == 1))
-    status = result.scalar_one_or_none()
+    """Get current worker status (singleton).
     
-    if not status:
-        status = WorkerStatusModel(id=1, active=False, tasks_completed=0, input_tokens=0, output_tokens=0)
-        db.add(status)
-        await db.flush()
-        await db.refresh(status)
+    Uses retry logic to handle database locks under high concurrency.
+    """
+    import asyncio
+    import logging
     
-    return WorkerStatus.model_validate(status)
+    logger = logging.getLogger(__name__)
+    
+    # Retry with exponential backoff: helps when multiple requests hit DB simultaneously
+    for _attempt in range(5):
+        try:
+            if _attempt > 0:
+                await asyncio.sleep(_attempt * 0.5)
+            
+            result = await db.execute(select(WorkerStatusModel).where(WorkerStatusModel.id == 1))
+            status = result.scalar_one_or_none()
+            
+            if not status:
+                status = WorkerStatusModel(id=1, active=False, tasks_completed=0, input_tokens=0, output_tokens=0)
+                db.add(status)
+                await db.flush()
+                await db.refresh(status)
+            
+            return WorkerStatus.model_validate(status)
+        
+        except Exception as e:
+            if _attempt < 4:
+                logger.debug("[WORKER_STATUS] Read failed (attempt %d/5): %s, retrying...", _attempt + 1, e)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+            else:
+                logger.error("[WORKER_STATUS] Failed to get worker status after 5 attempts: %s", e, exc_info=True)
+                raise
 
 
 @router.put("/status")

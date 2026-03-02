@@ -1,1 +1,1 @@
-Fixed DB lock on worker_status and worker_runs operations with retry-with-backoff logic. Added exponential backoff to 5 key commits in worker_monitor.py; verified WAL mode properly configured. All worker tests passing (20/20).
+Fixed DB lock on worker_status and worker_runs with retry-with-backoff. Enhanced database pragma settings (busy_timeout: 30s, synchronous=NORMAL). Added retry logic (5 attempts, exponential backoff) to worker status endpoints. All tests passing.

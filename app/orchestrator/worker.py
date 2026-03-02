@@ -426,7 +426,9 @@ class WorkerManager:
             # (crash-safe: written before any work starts, retries on DB lock with exponential backoff)
             for _attempt in range(5):
                 try:
-                    await asyncio.sleep(_attempt * 0.5)  # backoff: 0, 0.5, 1.0, 1.5, 2.0s
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)  # backoff: 0.5, 1.0, 1.5, 2.0s
+                    
                     async with self._get_independent_session() as _persist_db:
                         _run_stub = WorkerRun(
                             worker_id=worker_id,

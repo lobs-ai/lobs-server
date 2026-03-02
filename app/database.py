@@ -23,8 +23,16 @@ engine = create_async_engine(
 @event.listens_for(engine.sync_engine, "connect")
 def _set_sqlite_pragma(dbapi_conn, connection_record):
     cursor = dbapi_conn.cursor()
+    # Enable WAL mode for concurrent access
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=10000")
+    # Increase busy timeout to handle high contention (30 seconds)
+    cursor.execute("PRAGMA busy_timeout=30000")
+    # Use NORMAL sync for better performance (slightly less durable but good for our use case)
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    # Enable foreign keys
+    cursor.execute("PRAGMA foreign_keys=ON")
+    # Increase cache size for better performance
+    cursor.execute("PRAGMA cache_size=10000")
     cursor.close()
 
 # NullPool session factory for independent writes (avoids pool contention)
@@ -40,8 +48,16 @@ _independent_engine = create_async_engine(
 @event.listens_for(_independent_engine.sync_engine, "connect")
 def _set_independent_pragma(dbapi_conn, connection_record):
     cursor = dbapi_conn.cursor()
+    # Enable WAL mode for concurrent access
     cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA busy_timeout=15000")
+    # Increase busy timeout to handle high contention (30 seconds)
+    cursor.execute("PRAGMA busy_timeout=30000")
+    # Use NORMAL sync for better performance
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    # Enable foreign keys
+    cursor.execute("PRAGMA foreign_keys=ON")
+    # Increase cache size
+    cursor.execute("PRAGMA cache_size=10000")
     cursor.close()
 
 # Independent session for fire-and-forget writes that shouldn't block the main pool
