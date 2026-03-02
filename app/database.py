@@ -13,8 +13,8 @@ engine = create_async_engine(
     echo=False,
     future=True,
     connect_args={"timeout": 30},
-    pool_size=5,
-    max_overflow=5,
+    pool_size=10,
+    max_overflow=10,
     pool_recycle=1800,  # Recycle connections every 30min to prevent leaks
     pool_pre_ping=True,  # Verify connections before use
 )

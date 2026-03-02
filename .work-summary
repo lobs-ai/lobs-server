@@ -1,1 +1,10 @@
-Session cleanup fix verified: delete_session() uses sessions.delete WebSocket API (not sessions_kill). All spawn_agent workflows have session_refs in cleanup nodes. 19/19 session cleanup tests pass; 125 pre-existing failures unrelated.
+Fixed: ModelChooser._get_project_local_policy attribute error.
+
+The method was already implemented in app/orchestrator/model_chooser.py but needed comprehensive test coverage. Added 5 new tests covering:
+- Default policies for known projects (lobs-server: never, flock-master: preferred, etc.)
+- Runtime overrides via cfg.project_policy
+- Edge cases (None/empty project_id)
+- Return value validation
+- Config priority over defaults
+
+All tests passing (12 ModelChooser tests + 5 new project policy tests).
