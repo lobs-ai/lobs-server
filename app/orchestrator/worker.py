@@ -1425,6 +1425,8 @@ class WorkerManager:
             commit_sha=_commit_sha,
             files_modified=_modified_files,
             session_key=worker_info.child_session_key,
+            project_id=getattr(worker_info, "project_id", None),
+            agent_type=getattr(worker_info, "agent_type", None),
         )
 
         # Update worker status (mark inactive if no other workers)
@@ -1574,6 +1576,8 @@ class WorkerManager:
         commit_sha: str | None = None,
         files_modified: list[str] | None = None,
         session_key: str | None = None,
+        project_id: str | None = None,
+        agent_type: str | None = None,
     ) -> None:
         """Record worker run to history table with actual token usage."""
         try:
@@ -1619,6 +1623,9 @@ class WorkerManager:
                 summary=summary,
                 commit_shas=[commit_sha] if commit_sha else None,
                 files_modified=files_modified,
+                project_id=project_id,
+                agent_type=agent_type,
+                duration_seconds=duration,
             )
 
             async with self._get_independent_session() as db:

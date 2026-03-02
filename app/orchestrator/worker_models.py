@@ -62,6 +62,10 @@ def classify_error_type(error_message: str, response_data: dict | None = None) -
         return "timeout"
     if any(k in error_lower for k in ("500", "502", "503", "server error", "internal error", "service unavailable")):
         return "server_error"
+    if any(k in error_lower for k in ("connection refused", "cannot connect", "connect call failed",
+                                       "connection reset", "clientconnectorerror", "networkerror",
+                                       "gateway unavailable", "econnrefused", "no route to host")):
+        return "gateway_unavailable"
     
     return "unknown"
 

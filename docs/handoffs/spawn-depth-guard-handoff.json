@@ -1,0 +1,10 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "spawn-depth-guard",
+    "title": "Add spawn depth guard to spawn_worker(): block task after N failed attempts",
+    "context": "When task.retry_count >= MAX_SPAWN_DEPTH (default 3), spawn_worker() must hard-stop: block the task, create an inbox item, and return False. This is a pre-spawn guard at the single dispatch choke point. Design doc: docs/spawn-depth-guard-design.md",
+    "acceptance": "1. Task with retry_count >= 3 never gets a worker spawned. 2. First block: work_state='blocked', failure_reason set, InboxItem created. 3. Subsequent attempts: returns False, no duplicate inbox item. 4. retry_count < 3: existing behavior unchanged. 5. Threshold readable from OrchestratorSetting key 'orchestrator.spawn.max_depth', default 3. 6. Unit tests cover retry_count = 0, 2, 3, and already-blocked cases.",
+    "files": ["docs/spawn-depth-guard-design.md", "app/orchestrator/worker.py", "app/orchestrator/escalation_enhanced.py"]
+  }
+]

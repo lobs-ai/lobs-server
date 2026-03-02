@@ -254,6 +254,8 @@ class WorkerRun(Base):
     validity_result = Column(JSON)  # RunValidityContract check result (v1)
     child_session_key = Column(String, nullable=True, index=True)  # OpenClaw session key for restart recovery
     agent_type = Column(String, nullable=True)  # agent type for restart recovery
+    project_id = Column(String, nullable=True)  # project context for analytics
+    duration_seconds = Column(Float, nullable=True)  # wall-clock duration of run
 
 
 class OrchestratorSetting(Base):
