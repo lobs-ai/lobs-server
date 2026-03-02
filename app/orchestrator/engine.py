@@ -1189,6 +1189,9 @@ class OrchestratorEngine:
                             await db.rollback()
                         except Exception:
                             pass
+                    # Yield to event loop between workflow advances to prevent
+                    # aiosqlite thread contention from deadlocking HTTP calls.
+                    await asyncio.sleep(0)
                 # Process pending workflow events
                 events_started = await workflow_executor.process_events(limit=10)
                 if events_started > 0:
