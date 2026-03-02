@@ -33,4 +33,5 @@ GATEWAY_TOKEN = os.environ.get("OPENCLAW_GATEWAY_TOKEN", "341c3e8015df9c77f6ed4c
 # Parent session used when invoking sessions_spawn over Gateway HTTP API.
 # Using main avoids sink-session child-cap exhaustion (5/5) and keeps spawn
 # permissions aligned with normal operator context.
-GATEWAY_SESSION_KEY = os.environ.get("OPENCLAW_GATEWAY_SESSION_KEY", "agent:main:main")
+# Use sink agent as parent for worker spawns — announcements go to the sink (🕳️), not main Discord DM
+GATEWAY_SESSION_KEY = os.environ.get("OPENCLAW_GATEWAY_SESSION_KEY", "agent:sink:main")
