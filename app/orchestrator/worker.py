@@ -446,7 +446,14 @@ class WorkerManager:
                         logger.debug("[WORKER] Persisted session key %s for task %s", child_session_key[:16], task_id_short)
                         break
                 except Exception as _e:
-                    if _attempt == 4:
+                    if _attempt < 4:
+                        logger.debug("[WORKER] Failed to persist session key (attempt %d/5): %s, retrying...", _attempt + 1, _e)
+                        try:
+                            async with self._get_independent_session() as _db:
+                                await _db.rollback()
+                        except Exception:
+                            pass
+                    else:
                         logger.warning("[WORKER] Failed to persist session key after 5 attempts (non-fatal): %s", _e)
 
             # Update DB: worker status
