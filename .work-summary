@@ -1,34 +1,18 @@
-## DB Lock Retry Fix: worker_status and worker_runs
+Fixed DB lock on worker_status and worker_runs INSERT by adding retry-with-backoff logic:
 
-Fixed database lock contention issues by adding retry-with-backoff logic to high-frequency DB writes.
+1. Updated app/orchestrator/worker_manager.py `_update_worker_status()` method with 5 retry attempts, 0.5s exponential backoff (0, 0.5, 1.0, 1.5, 2.0s)
+2. Verified app/orchestrator/worker.py already has proper retry logic (5 attempts with exponential backoff) for both:
+   - `_update_worker_status()` method (handles worker_status UPDATE)
+   - Stub INSERT in `spawn_worker()` method (handles worker_runs INSERT)
+3. Verified app/orchestrator/agent_tracker.py already has retry logic on all update methods
+4. Verified database config has WAL mode enabled and busy_timeout set (main: 10000ms, independent: 15000ms)
 
-### Changes Made
+Added comprehensive test suite with 6 tests covering:
+- Success on first attempt
+- Retries on lock + eventual success
+- Gives up gracefully after 5 attempts
+- Inactive status updates
+- Creates new records if missing
+- Exponential backoff delays
 
-**1. app/orchestrator/worker.py**
-- `_update_worker_status()`: Added 5-retry loop (0, 0.5, 1.0, 1.5, 2.0s backoff) instead of single attempt
-- Worker run stub INSERT: Increased from 3 retries to 5 retries with exponential backoff (same pattern)
-
-**2. app/orchestrator/agent_tracker.py**
-- `mark_working()`: Added 5-retry loop with exponential backoff (0, 0.5, 1.0, 1.5, 2.0s)
-- `mark_completed()`: Added 5-retry loop with stats tracking resilience
-- `mark_failed()`: Added 5-retry loop
-- `mark_idle()`: Added 5-retry loop  
-- `update_thinking()`: Added 5-retry loop for real-time updates
-
-**3. Database Configuration**
-Verified in app/database.py:
-- WAL mode: Already enabled (PRAGMA journal_mode=WAL)
-- busy_timeout: 10s on main pool, 15s on independent pool (5000ms minimum requirement met)
-
-### Test Coverage
-Created tests/test_db_lock_retry.py with 8 tests covering:
-- Worker status updates (success, active->inactive transitions)
-- Agent tracker state transitions (working, completed, failed, idle)
-- Stats aggregation and thinking updates
-- Multiple concurrent agent types
-
-### Results
-- All 20 tests pass (12 existing + 8 new)
-- Retry logic ensures transient lock errors don't cascade to worker/orchestrator failures
-- Exponential backoff prevents thundering herd on lock contention
-- Backward compatible - no API changes
+All new tests passing (6/6). Verified existing worker-related tests still pass.

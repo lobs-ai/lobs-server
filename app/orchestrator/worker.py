@@ -1500,7 +1500,23 @@ class WorkerManager:
                     db_task.status = "active"
                     db_task.failure_reason = "Infrastructure failure detected"
                     db_task.updated_at = datetime.now(timezone.utc)
-                    await self.db.commit()
+                    for _attempt in range(5):
+                        try:
+                            await self.db.commit()
+                            break
+                        except Exception as _e:
+                            if _attempt < 4:
+                                await asyncio.sleep(_attempt * 0.5)
+                                await self.db.rollback()
+                            else:
+                                logger.error(
+                                    "[WORKER] Failed to mark task blocked on infra failure for %s after 5 attempts: %s",
+                                    task_id_short, _e,
+                                )
+                                try:
+                                    await self.db.rollback()
+                                except Exception:
+                                    pass
             else:
                 # Task-level failure - use multi-tier escalation
                 escalation_result = await escalation_enhanced.handle_failure(
@@ -2123,7 +2139,22 @@ class WorkerManager:
                     )
 
             # Commit happens inside engine.decide(), but we should commit the batch
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[SWEEP_REVIEW] Failed to commit sweep review results after 5 attempts: %s", _e,
+                        )
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             
             logger.info(
                 "[SWEEP_REVIEW] Processed %d decisions: approved=%d deferred=%d rejected=%d",

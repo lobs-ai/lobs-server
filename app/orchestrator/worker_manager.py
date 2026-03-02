@@ -12,6 +12,7 @@ Key changes from subprocess version:
 - Keep: DB tracking, domain locks, circuit breaker, escalation
 """
 
+import asyncio
 import logging
 import time
 from datetime import datetime, timezone
@@ -384,36 +385,55 @@ class WorkerManager:
         project_id: Optional[str] = None,
         started_at: Optional[datetime] = None
     ) -> None:
-        """Update worker_status table (singleton record)."""
-        try:
-            result = await self.db.execute(
-                select(WorkerStatus).where(WorkerStatus.id == 1)
-            )
-            status = result.scalar_one_or_none()
+        """Update worker_status table (singleton record) with retry-on-lock logic."""
+        for _attempt in range(5):
+            try:
+                # Backoff on retry: 0, 0.5, 1.0, 1.5, 2.0 seconds
+                if _attempt > 0:
+                    await asyncio.sleep(_attempt * 0.5)
+                
+                result = await self.db.execute(
+                    select(WorkerStatus).where(WorkerStatus.id == 1)
+                )
+                status = result.scalar_one_or_none()
 
-            if not status:
-                status = WorkerStatus(id=1)
-                self.db.add(status)
+                if not status:
+                    status = WorkerStatus(id=1)
+                    self.db.add(status)
 
-            status.active = active
-            
-            if active:
-                status.worker_id = worker_id
-                status.current_task = task_id
-                status.current_project = project_id
-                status.started_at = started_at
-                status.last_heartbeat = datetime.now(timezone.utc)
-            else:
-                status.worker_id = None
-                status.current_task = None
-                status.current_project = None
-                status.ended_at = datetime.now(timezone.utc)
+                status.active = active
+                
+                if active:
+                    status.worker_id = worker_id
+                    status.current_task = task_id
+                    status.current_project = project_id
+                    status.started_at = started_at
+                    status.last_heartbeat = datetime.now(timezone.utc)
+                else:
+                    status.worker_id = None
+                    status.current_task = None
+                    status.current_project = None
+                    status.ended_at = datetime.now(timezone.utc)
 
-            await self.db.commit()
+                await self.db.commit()
+                return  # Success - exit the retry loop
 
-        except Exception as e:
-            logger.error(f"Failed to update worker status: {e}", exc_info=True)
-            await self.db.rollback()
+            except Exception as e:
+                if _attempt < 4:
+                    logger.debug(
+                        "[WORKER] Failed to update worker status (attempt %d/5): %s, retrying...",
+                        _attempt + 1, e
+                    )
+                    await self.db.rollback()
+                else:
+                    logger.error(
+                        "[WORKER] Failed to update worker status after 5 attempts: %s", e,
+                        exc_info=True
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
 
     async def get_worker_status(self) -> dict[str, Any]:
         """Get current worker status summary."""
