@@ -267,6 +267,99 @@ class TestNodeHandlers:
         assert result.status == "completed"
 
     @pytest.mark.asyncio
+    async def test_cleanup_session_ref_resolves_and_deletes(self):
+        """cleanup node with session_ref resolves context path and calls gateway delete_session."""
+        from unittest.mock import AsyncMock, MagicMock
+        db = FakeDB()
+        mock_gateway = MagicMock()
+        mock_gateway.delete_session = AsyncMock(return_value=True)
+        mock_wm = MagicMock()
+        mock_wm.gateway = mock_gateway
+        handlers = NodeHandlers(db, mock_wm)
+
+        context = {"spawn_agent": {"output": {"childSessionKey": "sess-abc123"}}}
+        run = FakeRun(context=context)
+        node_def = {
+            "type": "cleanup",
+            "config": {"session_ref": "spawn_agent.output.childSessionKey"},
+        }
+        result = await handlers.execute(node_def, run)
+        assert result.status == "completed"
+        assert "sess-abc123" in result.output["deleted_sessions"]
+        mock_gateway.delete_session.assert_awaited_once_with("sess-abc123")
+
+    @pytest.mark.asyncio
+    async def test_cleanup_session_refs_multiple(self):
+        """cleanup node with session_refs list deletes all resolved sessions."""
+        from unittest.mock import AsyncMock, MagicMock
+        db = FakeDB()
+        mock_gateway = MagicMock()
+        mock_gateway.delete_session = AsyncMock(return_value=True)
+        mock_wm = MagicMock()
+        mock_wm.gateway = mock_gateway
+        handlers = NodeHandlers(db, mock_wm)
+
+        context = {
+            "spawn_programmer": {"output": {"childSessionKey": "sess-prog"}},
+            "spawn_researcher": {"output": {"childSessionKey": "sess-research"}},
+        }
+        run = FakeRun(context=context)
+        node_def = {
+            "type": "cleanup",
+            "config": {
+                "session_refs": [
+                    "spawn_programmer.output.childSessionKey",
+                    "spawn_researcher.output.childSessionKey",
+                ]
+            },
+        }
+        result = await handlers.execute(node_def, run)
+        assert result.status == "completed"
+        assert set(result.output["deleted_sessions"]) == {"sess-prog", "sess-research"}
+        assert mock_gateway.delete_session.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cleanup_session_ref_missing_context_is_graceful(self):
+        """cleanup node with unresolvable session_ref should succeed gracefully."""
+        db = FakeDB()
+        handlers = NodeHandlers(db)
+        run = FakeRun(context={})
+        node_def = {
+            "type": "cleanup",
+            "config": {"session_ref": "nonexistent.output.childSessionKey"},
+        }
+        result = await handlers.execute(node_def, run)
+        assert result.status == "completed"
+        assert result.output["deleted_sessions"] == []
+
+    @pytest.mark.asyncio
+    async def test_cleanup_no_duplicate_deletes(self):
+        """session_refs with duplicate resolved keys should only delete once each."""
+        from unittest.mock import AsyncMock, MagicMock
+        db = FakeDB()
+        mock_gateway = MagicMock()
+        mock_gateway.delete_session = AsyncMock(return_value=True)
+        mock_wm = MagicMock()
+        mock_wm.gateway = mock_gateway
+        handlers = NodeHandlers(db, mock_wm)
+
+        context = {"a": {"output": {"childSessionKey": "sess-dup"}}}
+        run = FakeRun(context=context)
+        node_def = {
+            "type": "cleanup",
+            "config": {
+                "session_refs": [
+                    "a.output.childSessionKey",
+                    "a.output.childSessionKey",
+                ]
+            },
+        }
+        result = await handlers.execute(node_def, run)
+        assert result.status == "completed"
+        assert result.output["deleted_sessions"].count("sess-dup") == 1
+        mock_gateway.delete_session.assert_awaited_once_with("sess-dup")
+
+    @pytest.mark.asyncio
     async def test_delay_starts_running(self, handlers):
         node_def = {"type": "delay", "config": {"seconds": 5}}
         result = await handlers.execute(node_def, FakeRun())

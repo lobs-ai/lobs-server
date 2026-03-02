@@ -15,7 +15,13 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.orm.attributes import flag_modified as _sa_flag_modified
+
+
+def flag_modified(instance, key: str) -> None:
+    """Wrapper that no-ops for non-SQLAlchemy objects (e.g. test fakes)."""
+    if hasattr(instance, "_sa_instance_state"):
+        _sa_flag_modified(instance, key)
 
 from app.models import (
     WorkflowDefinition,

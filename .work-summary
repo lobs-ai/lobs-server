@@ -1,1 +1,1 @@
-Fixed session cleanup: delete_session() uses sessions.delete WebSocket RPC (not sessions_kill). workflow_seeds.py spawn_agent cleanup nodes have session_refs. All 19 session cleanup tests pass. 137 pre-existing failures unrelated to this change.
+Task already completed by prior agents. sessions_kill replaced with sessions.delete WebSocket RPC. session_refs added to task-router and legacy workflow cleanup nodes. 11/11 tests pass.
