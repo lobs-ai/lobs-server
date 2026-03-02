@@ -1,1 +1,1 @@
-Session cleanup fix verified: delete_session() uses Gateway WebSocket sessions.delete (not sessions_kill). All session_refs in workflow_seeds.py are correct. 17 tests pass.
+Session cleanup already fixed: sessions_kill removed, delete_session uses sessions.delete JSON-RPC via WebSocket. workflow_seeds.py task_router cleanup node has session_refs for all spawn nodes. 19/19 session/worker tests pass.
