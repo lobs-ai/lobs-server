@@ -367,6 +367,19 @@ class WorkerManager:
                         break
 
             if not spawn_result or not chosen_model:
+                # Check if all failures were gateway_unavailable (Gateway mid-restart)
+                all_gateway_errors = attempts and all(
+                    a.get("error_type") == "gateway_unavailable" for a in attempts
+                )
+                if all_gateway_errors:
+                    logger.warning(
+                        "[WORKER] Gateway unavailable for task %s — will retry on next tick (not escalating)",
+                        task_id_short,
+                    )
+                    # Release project lock so next tick can retry cleanly
+                    self.project_locks.pop(project_id, None)
+                    return False
+
                 if agent_type == "programmer" and strict_coding_tier:
                     logger.error(
                         "[MODEL_ROUTER] strict coding tier prevented model downgrade after spawn failure",
@@ -627,7 +640,11 @@ class WorkerManager:
             return None, error_msg, error_type
 
     async def check_session_alive(self, session_key: str) -> bool:
-        """Check if an OpenClaw session is still alive via sessions_history."""
+        """Check if an OpenClaw session is still alive via sessions_history.
+        
+        Returns False both when session is dead AND when Gateway is unreachable.
+        Callers that need to distinguish should check _is_gateway_available() first.
+        """
         try:
             async with aiohttp.ClientSession() as http:
                 resp = await http.post(
@@ -645,6 +662,10 @@ class WorkerManager:
                     return False
                 result = data.get("result", {})
                 return isinstance(result, (list, dict))
+        except aiohttp.ClientConnectorError:
+            # Gateway unreachable — treat as "unknown" not "dead"
+            logger.debug("[WORKER] Gateway unreachable in check_session_alive for %s", session_key[:20])
+            return True  # Optimistically assume alive; transcript check is more reliable
         except Exception as e:
             logger.debug("[WORKER] check_session_alive failed for %s: %s", session_key[:20], e)
             return False

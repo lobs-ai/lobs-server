@@ -1,0 +1,26 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "stuck-task-escalation",
+    "title": "DB migration: add stuck_alerted_at to tasks",
+    "context": "Stuck task auto-escalation feature. We need a column on Task to track when the stuck alert was first sent, so we don't create a new inbox item on every engine tick. See design: docs/stuck-task-escalation-design.md",
+    "acceptance": "Alembic migration adds `stuck_alerted_at` DateTime nullable column to `tasks` table. SQLAlchemy model updated. Migration runs cleanly on existing DB.",
+    "files": ["docs/stuck-task-escalation-design.md", "app/models.py"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "stuck-task-escalation",
+    "title": "Implement check_stuck_tasks_2h() in MonitorEnhanced",
+    "context": "Core detection logic for stuck task escalation. Depends on DB migration (stuck_alerted_at column). See design: docs/stuck-task-escalation-design.md. The existing check_stuck_tasks() at 15min stays unchanged — this is a separate method for the 2h human-facing alert.",
+    "acceptance": "1. `MonitorEnhanced.check_stuck_tasks_2h()` queries tasks in_progress > 2h with stuck_alerted_at IS NULL. 2. Skips tasks with title 'Strategic reflection cycle', titles starting with [reflection]/[sweep]/[internal], or agent in ['reflection_cycle', 'sweep']. 3. Creates inbox item with title format: '⏰ Task stuck: {title} (in_progress for Xh Ym)'. 4. Sets task.stuck_alerted_at = now. 5. Returns count of alerts created. 6. Method is called from run_full_check(), result included as 'stuck_escalated' key. Unit tests cover: 2h+ task triggers alert, <2h doesn't, dedup works, reflection skipped.",
+    "files": ["docs/stuck-task-escalation-design.md", "app/orchestrator/monitor_enhanced.py", "app/models.py"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "stuck-task-escalation",
+    "title": "Implement optional auto-reset (stuck_task_auto_reset_hours setting)",
+    "context": "Optional 4h auto-reset to not_started for tasks that remain stuck after the initial 2h alert. Configurable via OrchestratorSetting key 'stuck_task_auto_reset_hours'. Default: null (disabled). See design: docs/stuck-task-escalation-design.md. Depends on check_stuck_tasks_2h() being implemented.",
+    "acceptance": "1. MonitorEnhanced reads OrchestratorSetting 'stuck_task_auto_reset_hours' on each full check. 2. If set, queries tasks in_progress with updated_at older than that many hours AND stuck_alerted_at IS NOT NULL. 3. Resets work_state to 'not_started', clears stuck_alerted_at. 4. Logs '[MONITOR] Auto-reset stuck task {id}' for each. 5. Unit test: task >4h stuck with setting enabled → reset; same task with setting disabled → not reset.",
+    "files": ["docs/stuck-task-escalation-design.md", "app/orchestrator/monitor_enhanced.py", "app/models.py"]
+  }
+]
