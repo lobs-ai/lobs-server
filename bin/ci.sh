@@ -84,6 +84,7 @@ elif ls *.xcodeproj &>/dev/null || ls *.xcworkspace &>/dev/null; then
 # ── Python ────────────────────────────────────────────────────────────
 elif [[ -f "pyproject.toml" ]] || [[ -f "setup.py" ]] || [[ -f "requirements.txt" ]]; then
     DETECTED="python"
+    export ORCHESTRATOR_ENABLED=false  # prevent test DB contention with live server
     echo "=== CI: detected Python project ==="
     [[ -d ".venv/bin" ]] && source .venv/bin/activate
     echo "--- TEST ---"
