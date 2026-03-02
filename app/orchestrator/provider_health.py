@@ -490,7 +490,23 @@ class ProviderHealthRegistry:
                     )
                     db.add(row)
                 
-                await db.commit()
+                # Commit with retry-on-lock (exponential backoff: 0.5, 1.0, 1.5, 2.0s)
+                for _attempt in range(5):
+                    try:
+                        if _attempt > 0:
+                            await asyncio.sleep(min(_attempt * 0.5, 2.0))
+                        await db.commit()
+                        break  # Success - exit retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await db.rollback()
+                        else:
+                            logger.error(f"[PROVIDER_HEALTH] Failed to persist state after 5 attempts: {_e}")
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                            raise
             self.last_persist = time.time()
             
             logger.debug("[PROVIDER_HEALTH] Persisted state to DB")

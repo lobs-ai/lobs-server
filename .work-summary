@@ -1,1 +1,1 @@
-Verified DB lock fix is fully implemented: WAL mode enabled, busy_timeout=30000ms (30s), retry-with-exponential-backoff on all critical writes (worker.py, agent_tracker.py, routers). All 49 related tests pass.
+Fixed DB lock on worker_status and worker_runs writes: Added retry-with-backoff logic to provider_health persistence (5x attempts, 0.5-2.0s exponential backoff). Worker status updates, worker_runs inserts, and task status updates already had retry logic with exponential backoff. All 35 worker tests pass.
