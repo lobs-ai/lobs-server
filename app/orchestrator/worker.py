@@ -1151,7 +1151,7 @@ class WorkerManager:
                 f"(task={task_id_short}, duration={int(duration)}s)"
             )
 
-            # Update task
+            # Update task — retry commit on DB lock (prevents orphaned workers)
             db_task = await self.db.get(Task, task_id)
             if db_task:
                 db_task.work_state = "completed"
@@ -1161,7 +1161,17 @@ class WorkerManager:
                 # Reset escalation on success
                 db_task.escalation_tier = 0
                 db_task.retry_count = 0
-                await self.db.commit()
+                for _attempt in range(5):
+                    try:
+                        await self.db.commit()
+                        break
+                    except Exception as _ce:
+                        if _attempt < 4:
+                            await asyncio.sleep(0.5 * (_attempt + 1))
+                        else:
+                            logger.error("[WORKER] Failed to persist task completion for %s after 5 attempts: %s", task_id_short, _ce)
+                            try: await self.db.rollback()
+                            except Exception: pass
 
             # Update agent tracker
             await AgentTracker(self.db).mark_completed(

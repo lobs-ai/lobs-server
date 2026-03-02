@@ -27,9 +27,16 @@ async def require_auth(
     if not api_token:
         raise HTTPException(status_code=401, detail="Invalid or inactive token")
     
-    # Update last_used_at
+    # Update last_used_at — best-effort, non-blocking.
+    # This must never block a request or cascade into DB lock contention.
     from datetime import timezone
-    api_token.last_used_at = datetime.now(timezone.utc)
-    await db.commit()
+    try:
+        api_token.last_used_at = datetime.now(timezone.utc)
+        await db.commit()
+    except Exception:
+        try:
+            await db.rollback()
+        except Exception:
+            pass
     
     return api_token
