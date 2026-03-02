@@ -63,7 +63,12 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 async def get_db() -> AsyncSession:
-    """Dependency for getting async database sessions."""
+    """Dependency for getting async database sessions.
+    
+    The async context manager (AsyncSessionLocal()) automatically closes the session,
+    so we don't need to explicitly call session.close(). This prevents double-close
+    errors that occur when the session is in an invalid state (e.g., after DB lock errors).
+    """
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -71,5 +76,4 @@ async def get_db() -> AsyncSession:
         except Exception:
             await session.rollback()
             raise
-        finally:
-            await session.close()
+        # The context manager automatically closes the session when exiting the with block

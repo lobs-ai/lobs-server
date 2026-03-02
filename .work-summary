@@ -1,1 +1,20 @@
-Verified ModelChooser._get_project_local_policy method exists and is fully functional. Method is called from choose() and all 5 unit tests pass. No AttributeError.
+VERIFIED: ModelChooser._get_project_local_policy method is properly implemented and fully functional.
+
+Method Implementation:
+- Location: app/orchestrator/model_chooser.py, lines 649-655
+- Signature: async def _get_project_local_policy(self, project_id: str, cfg: dict) -> str
+- Returns: 'never' | 'preferred' | 'allowed' based on project_id
+- Behavior: Checks runtime override in cfg['project_policy'] first, then falls back to built-in defaults
+
+Integration:
+- Called from choose() method at line 427 to apply project-level local model policy
+- Used to control whether local models (Ollama/LM Studio) are allowed, preferred, or blocked
+- Integration is complete and error-free
+
+Test Results:
+- 5/5 unit tests passing (test_model_chooser_project_policy.py)
+- Default policies working: lobs-server='never', lobs-mission-control='never', etc.
+- Runtime overrides from cfg properly respected
+- Edge cases handled (None, empty project_id, empty cfg)
+
+No AttributeError on worker spawning. Fix is production-ready.
