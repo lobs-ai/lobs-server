@@ -1,18 +1,1 @@
-Fixed DB lock on worker_status and worker_runs INSERT by adding retry-with-backoff logic:
-
-1. Updated app/orchestrator/worker_manager.py `_update_worker_status()` method with 5 retry attempts, 0.5s exponential backoff (0, 0.5, 1.0, 1.5, 2.0s)
-2. Verified app/orchestrator/worker.py already has proper retry logic (5 attempts with exponential backoff) for both:
-   - `_update_worker_status()` method (handles worker_status UPDATE)
-   - Stub INSERT in `spawn_worker()` method (handles worker_runs INSERT)
-3. Verified app/orchestrator/agent_tracker.py already has retry logic on all update methods
-4. Verified database config has WAL mode enabled and busy_timeout set (main: 10000ms, independent: 15000ms)
-
-Added comprehensive test suite with 6 tests covering:
-- Success on first attempt
-- Retries on lock + eventual success
-- Gives up gracefully after 5 attempts
-- Inactive status updates
-- Creates new records if missing
-- Exponential backoff delays
-
-All new tests passing (6/6). Verified existing worker-related tests still pass.
+Fixed DB lock contention on worker_status and worker_runs by adding retry-with-backoff to all unguarded commits. Updated monitor_enhanced.py with 5 retry attempts and exponential backoff (0, 0.5, 1.0, 1.5, 2.0s) on all 5 db.commit() calls. Verified WAL mode is enabled and busy_timeout set to 10000ms/15000ms. All worker status and monitor enhanced retry tests passing.

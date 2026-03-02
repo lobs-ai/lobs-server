@@ -4,6 +4,7 @@ Port of ~/lobs-orchestrator/orchestrator/core/monitor.py enhanced features.
 Replaces file reads with DB queries, stores monitoring state in DB.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Any, Optional
@@ -120,7 +121,30 @@ class MonitorEnhanced:
                     # For high severity (30-60min), reset and log warning
                     task.work_state = "not_started"
                     task.updated_at = datetime.now(timezone.utc)
-                    await self.db.commit()
+                    
+                    # Commit with retry-on-lock logic
+                    for _attempt in range(5):
+                        try:
+                            if _attempt > 0:
+                                await asyncio.sleep(_attempt * 0.5)
+                            await self.db.commit()
+                            break
+                        except Exception as _e:
+                            if _attempt < 4:
+                                logger.debug(
+                                    "[MONITOR] Failed to commit task reset (attempt %d/5): %s, retrying...",
+                                    _attempt + 1, _e
+                                )
+                                await self.db.rollback()
+                            else:
+                                logger.error(
+                                    "[MONITOR] Failed to commit task reset after 5 attempts: %s", _e
+                                )
+                                try:
+                                    await self.db.rollback()
+                                except Exception:
+                                    pass
+                    
                     logger.info(
                         f"[MONITOR] Reset stuck task {task.id[:8]} to not_started "
                         f"(was in_progress for {int(age_seconds/60)}m, no worker/workflow)"
@@ -179,7 +203,29 @@ class MonitorEnhanced:
             task.work_state = "blocked"
             task.failure_reason = f"Stuck - no progress for {int(age_seconds/60)} minutes"
             task.updated_at = datetime.now(timezone.utc)
-            await self.db.commit()
+            
+            # Commit with retry-on-lock logic
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[MONITOR] Failed to commit task stuck mark (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[MONITOR] Failed to commit task stuck mark after 5 attempts: %s", _e
+                        )
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             
             # Create inbox alert
             alert_id = f"stuck_{task.id}_{int(datetime.now(timezone.utc).timestamp())}"
@@ -205,7 +251,29 @@ class MonitorEnhanced:
             )
             
             self.db.add(alert)
-            await self.db.commit()
+            
+            # Commit with retry-on-lock logic
+            for _attempt in range(5):
+                try:
+                    if _attempt > 0:
+                        await asyncio.sleep(_attempt * 0.5)
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        logger.debug(
+                            "[MONITOR] Failed to commit alert creation (attempt %d/5): %s, retrying...",
+                            _attempt + 1, _e
+                        )
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[MONITOR] Failed to commit alert creation after 5 attempts: %s", _e
+                        )
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             
             logger.info(f"[MONITOR] Created stuck task alert {alert_id}")
         
@@ -255,7 +323,29 @@ class MonitorEnhanced:
                     )
                     task.notes = (task.notes or "") + unblock_note
                     
-                    await self.db.commit()
+                    # Commit with retry-on-lock logic
+                    for _attempt in range(5):
+                        try:
+                            if _attempt > 0:
+                                await asyncio.sleep(_attempt * 0.5)
+                            await self.db.commit()
+                            break
+                        except Exception as _e:
+                            if _attempt < 4:
+                                logger.debug(
+                                    "[MONITOR] Failed to commit unblock (attempt %d/5): %s, retrying...",
+                                    _attempt + 1, _e
+                                )
+                                await self.db.rollback()
+                            else:
+                                logger.error(
+                                    "[MONITOR] Failed to commit unblock after 5 attempts: %s", _e
+                                )
+                                try:
+                                    await self.db.rollback()
+                                except Exception:
+                                    pass
+                    
                     unblocked_count += 1
                     
                     logger.info(
@@ -315,7 +405,29 @@ class MonitorEnhanced:
                 )
 
             if recovered > 0:
-                await self.db.commit()
+                # Commit with retry-on-lock logic
+                for _attempt in range(5):
+                    try:
+                        if _attempt > 0:
+                            await asyncio.sleep(_attempt * 0.5)
+                        await self.db.commit()
+                        break
+                    except Exception as _e:
+                        if _attempt < 4:
+                            logger.debug(
+                                "[MONITOR] Failed to commit recovery (attempt %d/5): %s, retrying...",
+                                _attempt + 1, _e
+                            )
+                            await self.db.rollback()
+                        else:
+                            logger.error(
+                                "[MONITOR] Failed to commit recovery after 5 attempts: %s", _e
+                            )
+                            try:
+                                await self.db.rollback()
+                            except Exception:
+                                pass
+                
                 logger.info("[MONITOR] Recovered %d escalation-blocked task(s)", recovered)
 
             return recovered
