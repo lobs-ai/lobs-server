@@ -77,7 +77,21 @@ class WorkflowExecutor:
                     return True
                 run.current_node = entry
                 run.updated_at = datetime.now(timezone.utc)
-                await self.db.commit()
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await self.db.commit()
+                        break  # Success - exit the retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await self.db.rollback()
+                        else:
+                            logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                            try:
+                                await self.db.rollback()
+                            except Exception:
+                                pass
                 return True
 
             # ── Main step ────────────────────────────────────────────
@@ -155,7 +169,21 @@ class WorkflowExecutor:
                         if db_task and db_task.work_state == "not_started":
                             db_task.work_state = "in_progress"
                             db_task.updated_at = datetime.now(timezone.utc)
-                            await self.db.commit()
+                            # Commit with retry-on-lock logic (exponential backoff)
+                            for _attempt in range(5):
+                                try:
+                                    await self.db.commit()
+                                    break  # Success - exit the retry loop
+                                except Exception as _e:
+                                    if _attempt < 4:
+                                        await asyncio.sleep(_attempt * 0.5)
+                                        await self.db.rollback()
+                                    else:
+                                        logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                                        try:
+                                            await self.db.rollback()
+                                        except Exception:
+                                            pass
                             logger.info(
                                 "[WORKFLOW] Fixed work_state for task %s (run already exists)",
                                 task_id[:8],
@@ -199,7 +227,21 @@ class WorkflowExecutor:
                 db_task.work_state = "in_progress"
                 db_task.updated_at = datetime.now(timezone.utc)
 
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         logger.info(
             "[WORKFLOW] Started run %s for workflow '%s' (trigger=%s, task=%s)",
             run.id[:8], workflow.name, trigger_type, (task_id or "none")[:8],
@@ -250,7 +292,21 @@ class WorkflowExecutor:
             event.processed = True
 
         if started:
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
         return started
 
     async def process_schedules(self) -> int:
@@ -348,7 +404,21 @@ class WorkflowExecutor:
             source=source,
         )
         self.db.add(event)
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         return event.id
 
     # ── Internal ─────────────────────────────────────────────────────
@@ -387,7 +457,21 @@ class WorkflowExecutor:
         node_states[node_id] = ns
         run.node_states = node_states
         run.updated_at = datetime.now(timezone.utc)
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         return True
 
     async def _check_node(self, run: WorkflowRun, node_def: dict, node_states: dict) -> bool:
@@ -435,7 +519,21 @@ class WorkflowExecutor:
         node_states[node_id] = ns
         run.node_states = node_states
         run.updated_at = datetime.now(timezone.utc)
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         return True
 
     async def _transition(self, run: WorkflowRun, node_def: dict, node_states: dict, workflow: WorkflowDefinition) -> bool:
@@ -471,7 +569,21 @@ class WorkflowExecutor:
         if goto:
             run.current_node = goto
             run.updated_at = datetime.now(timezone.utc)
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             return True
 
         # No next node — workflow complete
@@ -502,7 +614,21 @@ class WorkflowExecutor:
             node_states[node_id] = ns
             run.node_states = node_states
             run.updated_at = datetime.now(timezone.utc)
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             return True
 
         # Fallback node
@@ -512,7 +638,21 @@ class WorkflowExecutor:
             logger.info("[WORKFLOW] Falling back from %s to %s", node_id, fallback)
             run.current_node = fallback
             run.updated_at = datetime.now(timezone.utc)
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             return True
 
         # Escalate — finish as failed, create inbox item
@@ -549,7 +689,21 @@ class WorkflowExecutor:
             source="workflow_executor",
         ))
 
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[WORKFLOW] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         logger.info("[WORKFLOW] Run %s finished: %s%s", run.id[:8], status, f" ({error[:80]})" if error else "")
 
         # Cleanup session if present

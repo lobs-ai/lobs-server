@@ -108,7 +108,21 @@ class SweepArbitrator:
                 sweep_id, start, len(initiatives), 0, 0, rejected, budgets, usage
             )
             self.db.add(sweep)
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             return {"proposed": len(initiatives), "approved": 0, "deferred": 0, "rejected": rejected}
 
         # --- Mark all remaining as "lobs_review" ---
@@ -143,7 +157,21 @@ class SweepArbitrator:
             sweep_id, start, len(initiatives), approved, deferred, rejected, budgets, usage
         )
         self.db.add(sweep)
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
 
         return {
             "proposed": len(initiatives),

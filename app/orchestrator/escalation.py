@@ -73,7 +73,21 @@ class EscalationManager:
             )
 
             self.db.add(alert)
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
 
             logger.info(
                 f"[ESCALATION] Created alert {alert_id} for task {task_id[:8]} "
@@ -130,7 +144,21 @@ class EscalationManager:
             )
 
             self.db.add(alert)
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
 
             logger.info(
                 f"[ESCALATION] Escalated stuck task {task_id[:8]} "
@@ -172,7 +200,21 @@ class EscalationManager:
             task.notes = (task.notes or "") + failure_note
             task.updated_at = datetime.now(timezone.utc)
 
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
 
             logger.info(
                 f"[ESCALATION] Recorded failure for task {task_id[:8]} "

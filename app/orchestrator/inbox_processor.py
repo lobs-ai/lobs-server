@@ -151,7 +151,21 @@ class InboxProcessor:
                     logger.error(f"[INBOX] Failed to execute action for thread {thread_id[:8]}: {e}", exc_info=True)
                     stats["errors"] += 1
 
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
 
             if stats["threads_processed"] > 0:
                 logger.info(

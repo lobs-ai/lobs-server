@@ -99,7 +99,21 @@ class ReflectionCycleManager:
             completed_at=datetime.now(timezone.utc),
         )
         self.db.add(sweep)
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
 
         return {"agents": len(agents), "spawned": spawned, "sweep_id": sweep.id}
 
@@ -227,7 +241,21 @@ class ReflectionCycleManager:
             completed_at=now,
         )
         self.db.add(sweep)
-        await self.db.commit()
+        # Commit with retry-on-lock logic (exponential backoff)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break  # Success - exit the retry loop
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error("[ORCHESTRATOR] Failed to commit after 5 attempts: %s", _e, exc_info=True)
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
 
         return {
             "agents": len(agents),
