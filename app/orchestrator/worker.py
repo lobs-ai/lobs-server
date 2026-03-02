@@ -324,6 +324,7 @@ class WorkerManager:
             strict_coding_tier = bool(choice.strict_coding_tier)
 
             # Call Gateway API: sessions_spawn with fallback chain
+            logger.info("[WORKER] About to spawn, candidates=%s", candidate_models)
             for idx, candidate in enumerate(candidate_models):
                 spawn_result, err, err_type = await self._spawn_session(
                     task_prompt=prompt_content,
