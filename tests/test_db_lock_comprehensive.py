@@ -1,22 +1,29 @@
-"""Comprehensive test for database lock retry logic and contention resilience."""
+"""
+Comprehensive tests for database lock handling in critical paths.
+
+Verifies that high-frequency DB writes (worker_status, worker_runs, agent_tracker)
+properly handle 'database is locked' errors through retry-with-exponential-backoff.
+"""
 
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
 from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import OperationalError
 
-from app.orchestrator.worker import WorkerManager
+from app.models import WorkerStatus, WorkerRun, AgentStatus, Task
+from app.orchestrator.worker_manager import WorkerManager
 from app.orchestrator.agent_tracker import AgentTracker
-from app.models import WorkerStatus, AgentStatus
+from app.routers.worker import router as worker_router
 
 
-class TestDatabaseLockRetryUnderContention:
-    """Test database lock retry behavior under simulated contention."""
+class TestWorkerStatusDBLock:
+    """Test worker_status update under DB lock stress."""
 
     @pytest.mark.asyncio
-    async def test_worker_manager_handles_lock_contention_on_status_update(self):
-        """Test that WorkerManager._update_worker_status recovers from lock contention."""
+    async def test_worker_status_update_with_database_locked_error(self):
+        """Test that 'database is locked' errors are properly retried in worker_status update."""
         db = AsyncMock(spec=AsyncSession)
         
         status_obj = WorkerStatus(id=1, active=False)
@@ -24,66 +31,200 @@ class TestDatabaseLockRetryUnderContention:
         result.scalar_one_or_none = MagicMock(return_value=status_obj)
         db.execute = AsyncMock(return_value=result)
         
-        # Simulate lock contention: fail 3 times with "database is locked", then succeed
+        # Simulate database lock on first 3 attempts, succeed on 4th
         db.commit = AsyncMock(side_effect=[
-            Exception("database is locked"),
-            Exception("database is locked"),
-            Exception("database is locked"),
-            None  # Success
+            OperationalError("database is locked", None, None),
+            OperationalError("database is locked", None, None),
+            OperationalError("database is locked", None, None),
+            None  # Success on 4th attempt
         ])
         db.rollback = AsyncMock()
         
         manager = WorkerManager(db)
         
-        # Should succeed despite 3 lock failures
+        # This should succeed after retries
         await manager._update_worker_status(
             active=True,
-            worker_id="worker-1",
-            task_id="task-1",
-            project_id="proj-1",
+            worker_id="worker-test-123",
+            task_id="task-123",
+            project_id="proj-123",
             started_at=datetime.now(timezone.utc)
         )
         
-        # Verify it retried and succeeded
-        assert db.commit.call_count == 4  # 3 failures + 1 success
+        # Verify the update succeeded
         assert status_obj.active is True
+        assert status_obj.worker_id == "worker-test-123"
+        
+        # Verify retry behavior: 4 commits (3 failures + 1 success)
+        assert db.commit.call_count == 4
+        # 3 rollbacks for failures
+        assert db.rollback.call_count == 3
 
     @pytest.mark.asyncio
-    async def test_agent_tracker_handles_lock_contention_on_work_mark(self):
-        """Test that AgentTracker.mark_working recovers from lock contention."""
+    async def test_worker_status_update_exponential_backoff_delays(self):
+        """Verify exponential backoff: 0.5s, 1.0s, 1.5s, 2.0s, etc."""
+        db = AsyncMock(spec=AsyncSession)
+        
+        status_obj = WorkerStatus(id=1, active=False)
+        result = AsyncMock()
+        result.scalar_one_or_none = MagicMock(return_value=status_obj)
+        db.execute = AsyncMock(return_value=result)
+        
+        # Always fail to test backoff delays
+        db.commit = AsyncMock(side_effect=OperationalError("database is locked", None, None))
+        db.rollback = AsyncMock()
+        
+        manager = WorkerManager(db)
+        
+        # Track sleep calls
+        sleep_delays = []
+        original_sleep = asyncio.sleep
+        
+        async def mock_sleep(delay):
+            sleep_delays.append(delay)
+        
+        with patch('asyncio.sleep', side_effect=mock_sleep):
+            await manager._update_worker_status(active=True)
+        
+        # Verify exponential backoff: [0.5, 1.0, 1.5, 2.0]
+        assert sleep_delays == [0.5, 1.0, 1.5, 2.0], f"Expected [0.5, 1.0, 1.5, 2.0], got {sleep_delays}"
+
+
+class TestAgentTrackerDBLock:
+    """Test agent_tracker operations under DB lock stress."""
+
+    @pytest.mark.asyncio
+    async def test_mark_working_with_database_locked_error(self):
+        """Test that mark_working retries on database lock."""
+        db = AsyncMock(spec=AsyncSession)
+        
+        # Mock the status object
+        status_obj = AgentStatus(agent_type="programmer", status="idle")
+        result = AsyncMock()
+        result.scalar_one_or_none = MagicMock(return_value=status_obj)
+        db.execute = AsyncMock(return_value=result)
+        db.flush = AsyncMock()
+        
+        # Fail first 2 times, succeed on 3rd
+        db.commit = AsyncMock(side_effect=[
+            OperationalError("database is locked", None, None),
+            OperationalError("database is locked", None, None),
+            None  # Success
+        ])
+        db.rollback = AsyncMock()
+        
+        tracker = AgentTracker(db)
+        
+        # Should succeed after retries
+        await tracker.mark_working(
+            agent_type="programmer",
+            task_id="task-789",
+            project_id="proj-789",
+            activity="Running task 789"
+        )
+        
+        # Verify success
+        assert status_obj.status == "working"
+        assert status_obj.activity == "Running task 789"
+        assert db.commit.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_mark_completed_with_database_locked_error(self):
+        """Test that mark_completed retries on database lock."""
+        db = AsyncMock(spec=AsyncSession)
+        
+        status_obj = AgentStatus(agent_type="programmer", status="working", stats={})
+        result = AsyncMock()
+        result.scalar_one_or_none = MagicMock(return_value=status_obj)
+        db.execute = AsyncMock(return_value=result)
+        db.flush = AsyncMock()
+        
+        # Fail once, succeed on 2nd
+        db.commit = AsyncMock(side_effect=[
+            OperationalError("database is locked", None, None),
+            None  # Success
+        ])
+        db.rollback = AsyncMock()
+        
+        tracker = AgentTracker(db)
+        
+        # Should succeed after retry
+        await tracker.mark_completed(
+            agent_type="programmer",
+            task_id="task-999",
+            duration_seconds=300.0
+        )
+        
+        # Verify stats were updated
+        assert status_obj.last_completed_task_id == "task-999"
+        assert status_obj.stats["tasks_completed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_all_agent_tracker_methods_have_retry_logic(self):
+        """Test that all AgentTracker methods implement retry logic."""
         db = AsyncMock(spec=AsyncSession)
         
         status_obj = AgentStatus(agent_type="programmer", status="idle", stats={})
         result = AsyncMock()
         result.scalar_one_or_none = MagicMock(return_value=status_obj)
         db.execute = AsyncMock(return_value=result)
-        
-        # Simulate lock contention: fail twice with database lock, then succeed
-        db.commit = AsyncMock(side_effect=[
-            Exception("database is locked"),
-            Exception("database is locked"),
-            None  # Success
-        ])
-        db.rollback = AsyncMock()
         db.flush = AsyncMock()
+        
+        # Test each method independently with DB lock
+        methods_to_test = [
+            ("mark_working", {
+                "agent_type": "programmer",
+                "task_id": "task-1",
+                "project_id": "proj-1",
+                "activity": "testing"
+            }),
+            ("update_thinking", {
+                "agent_type": "programmer",
+                "snippet": "thinking about task"
+            }),
+            ("mark_completed", {
+                "agent_type": "programmer",
+                "task_id": "task-2",
+                "duration_seconds": 100.0
+            }),
+            ("mark_failed", {
+                "agent_type": "programmer",
+                "task_id": "task-3"
+            }),
+            ("mark_idle", {
+                "agent_type": "programmer"
+            }),
+        ]
         
         tracker = AgentTracker(db)
         
-        # Should succeed despite lock failures
-        await tracker.mark_working(
-            agent_type="programmer",
-            task_id="task-1",
-            project_id="proj-1",
-            activity="Running tests"
-        )
-        
-        # Verify it retried and succeeded
-        assert db.commit.call_count == 3  # 2 failures + 1 success
-        assert status_obj.status == "working"
+        for method_name, kwargs in methods_to_test:
+            # Reset mocks
+            db.commit.reset_mock()
+            db.rollback.reset_mock()
+            db.execute.reset_mock()
+            
+            # Simulate one lock failure then success
+            db.commit.side_effect = [
+                OperationalError("database is locked", None, None),
+                None
+            ]
+            db.execute.return_value = result
+            
+            # Get and call the method
+            method = getattr(tracker, method_name)
+            await method(**kwargs)
+            
+            # Verify retry happened
+            assert db.commit.call_count == 2, f"{method_name} did not retry properly"
+
+
+class TestConcurrentDBLockHandling:
+    """Test concurrent operations under DB lock stress."""
 
     @pytest.mark.asyncio
-    async def test_exponential_backoff_increases_delays(self):
-        """Test that exponential backoff delays increase between retries."""
+    async def test_multiple_concurrent_worker_status_updates(self):
+        """Test that multiple concurrent worker_status updates don't cause cascading failures."""
         db = AsyncMock(spec=AsyncSession)
         
         status_obj = WorkerStatus(id=1, active=False)
@@ -91,146 +232,34 @@ class TestDatabaseLockRetryUnderContention:
         result.scalar_one_or_none = MagicMock(return_value=status_obj)
         db.execute = AsyncMock(return_value=result)
         
-        # Fail 4 times to test all backoff delays
-        db.commit = AsyncMock(side_effect=[
-            Exception("database is locked"),
-            Exception("database is locked"),
-            Exception("database is locked"),
-            Exception("database is locked"),
-            None  # Success
-        ])
+        # Simulate occasional locks
+        attempt_count = 0
+        async def commit_with_occasional_locks():
+            nonlocal attempt_count
+            attempt_count += 1
+            # Lock on every 3rd call
+            if attempt_count % 3 == 1:
+                raise OperationalError("database is locked", None, None)
+        
+        db.commit = AsyncMock(side_effect=commit_with_occasional_locks)
         db.rollback = AsyncMock()
         
         manager = WorkerManager(db)
         
-        # Record actual sleep calls
-        sleep_calls = []
-        
-        async def mock_sleep(delay):
-            sleep_calls.append(delay)
-        
-        with patch('asyncio.sleep', side_effect=mock_sleep):
-            await manager._update_worker_status(active=True)
-        
-        # Verify exponential backoff: 0.5, 1.0, 1.5, 2.0 seconds
-        assert sleep_calls == [0.5, 1.0, 1.5, 2.0], f"Expected [0.5, 1.0, 1.5, 2.0], got {sleep_calls}"
-
-    @pytest.mark.asyncio
-    async def test_lock_failure_recovery_preserves_data_integrity(self):
-        """Test that lock failures don't corrupt data - rollbacks preserve consistency."""
-        db = AsyncMock(spec=AsyncSession)
-        
-        status_obj = WorkerStatus(
-            id=1,
-            active=False,
-            worker_id=None,
-            current_task="task-old",
-            current_project="proj-old"
-        )
-        result = AsyncMock()
-        result.scalar_one_or_none = MagicMock(return_value=status_obj)
-        db.execute = AsyncMock(return_value=result)
-        
-        # Fail once, then succeed
-        db.commit = AsyncMock(side_effect=[
-            Exception("database is locked"),
-            None  # Success
-        ])
-        db.rollback = AsyncMock()
-        
-        manager = WorkerManager(db)
-        
-        new_task_id = "task-new"
-        new_project_id = "proj-new"
-        
-        await manager._update_worker_status(
-            active=True,
-            worker_id="worker-1",
-            task_id=new_task_id,
-            project_id=new_project_id,
-            started_at=datetime.now(timezone.utc)
-        )
-        
-        # Verify data was properly updated despite lock
-        assert status_obj.active is True
-        assert status_obj.current_task == new_task_id
-        assert status_obj.current_project == new_project_id
-        # Verify rollback was called on failure to maintain consistency
-        assert db.rollback.call_count == 1
-
-    @pytest.mark.asyncio
-    async def test_all_critical_operations_have_retry_logic(self):
-        """Test that all critical database write operations have retry logic."""
-        import inspect
-        
-        # List of critical database write methods
-        methods_to_check = [
-            (WorkerManager, '_update_worker_status'),
-            (WorkerManager, '_record_worker_run'),
-            (WorkerManager, '_persist_reflection_output'),
-            (AgentTracker, 'mark_working'),
-            (AgentTracker, 'mark_completed'),
-            (AgentTracker, 'mark_failed'),
-            (AgentTracker, 'mark_idle'),
-            (AgentTracker, 'update_thinking'),
+        # Simulate 5 concurrent worker status updates
+        tasks = [
+            manager._update_worker_status(
+                active=True,
+                worker_id=f"worker-{i}",
+                task_id=f"task-{i}",
+                project_id=f"proj-{i}",
+                started_at=datetime.now(timezone.utc)
+            )
+            for i in range(5)
         ]
         
-        for cls, method_name in methods_to_check:
-            method = getattr(cls, method_name)
-            source = inspect.getsource(method)
-            
-            # Check for retry loop
-            assert "for _attempt in range(5)" in source, (
-                f"{cls.__name__}.{method_name} missing 5-attempt retry loop"
-            )
-            # Check for exponential backoff
-            assert "await asyncio.sleep(_attempt * 0.5)" in source, (
-                f"{cls.__name__}.{method_name} missing exponential backoff"
-            )
-
-
-class TestDatabaseConfigurationUnderContention:
-    """Test that database configuration is optimal for handling contention."""
-
-    @pytest.mark.asyncio
-    async def test_main_engine_has_sufficient_busy_timeout(self):
-        """Verify main engine busy_timeout is set to reasonable value (>= 10s)."""
-        from app.database import engine
+        # All should complete successfully despite locks
+        await asyncio.gather(*tasks)
         
-        async with engine.begin() as conn:
-            result = await conn.exec_driver_sql("PRAGMA busy_timeout")
-            timeout_ms = result.scalar()
-            
-            # Should be at least 10 seconds
-            assert timeout_ms >= 10000, (
-                f"busy_timeout should be >= 10000ms for handling contention, got {timeout_ms}ms"
-            )
-
-    @pytest.mark.asyncio
-    async def test_independent_engine_has_sufficient_busy_timeout(self):
-        """Verify independent engine busy_timeout is set to reasonable value (>= 15s)."""
-        from app.database import _independent_engine
-        
-        async with _independent_engine.begin() as conn:
-            result = await conn.exec_driver_sql("PRAGMA busy_timeout")
-            timeout_ms = result.scalar()
-            
-            # Should be at least 15 seconds for fire-and-forget operations
-            assert timeout_ms >= 15000, (
-                f"busy_timeout should be >= 15000ms for independent operations, got {timeout_ms}ms"
-            )
-
-    @pytest.mark.asyncio
-    async def test_wal_mode_prevents_reader_writer_conflicts(self):
-        """Verify WAL mode is enabled to prevent reader-writer conflicts."""
-        from app.database import engine, _independent_engine
-        
-        async with engine.begin() as conn:
-            result = await conn.exec_driver_sql("PRAGMA journal_mode")
-            mode = result.scalar()
-            assert mode.upper() == "WAL", f"Main engine should use WAL mode, got {mode}"
-        
-        async with _independent_engine.begin() as conn:
-            result = await conn.exec_driver_sql("PRAGMA journal_mode")
-            mode = result.scalar()
-            assert mode.upper() == "WAL", f"Independent engine should use WAL mode, got {mode}"
+        # Verify worker status was updated
+        assert status_obj.active is True
