@@ -83,13 +83,23 @@ async def test_token(db_session):
 
 
 @pytest_asyncio.fixture
-async def client(test_token):
+async def client(test_token, monkeypatch):
     """Provide an async HTTP client for testing."""
     # Override the database dependency
     app.dependency_overrides[get_db] = get_test_db
     
     # Disable orchestrator for tests
     settings.ORCHESTRATOR_ENABLED = False
+    
+    # Mock task tier classification so tests never hit LM Studio
+    async def _mock_classify(task, db):
+        return task.model_tier if task.model_tier else "standard"
+    monkeypatch.setattr("app.services.task_tier.classify_task_tier", _mock_classify)
+    
+    # Mock llm_direct.complete so tests never hit LM Studio / Gemini / Anthropic
+    async def _mock_llm_complete(**kwargs):
+        return '{"agent": "programmer", "model_tier": "standard", "reasoning": "test mock"}'
+    monkeypatch.setattr("app.orchestrator.llm_direct.complete", _mock_llm_complete)
     
     async with AsyncClient(
         transport=ASGITransport(app=app),
