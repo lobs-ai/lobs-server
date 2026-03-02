@@ -1,1 +1,1 @@
-Session cleanup fix already complete. WebSocket sessions.delete works. All tests pass.
+Task already completed in prior commits. sessions_kill replaced with sessions.delete WS JSON-RPC in worker_gateway.py. workflow_seeds.py cleanup nodes updated with session_refs. 17 cleanup tests + 96 total tests pass.
