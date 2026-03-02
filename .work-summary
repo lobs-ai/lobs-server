@@ -1,1 +1,1 @@
-Session cleanup fix already implemented correctly: workflow_nodes.py delegates to worker_gateway.py which uses sessions.delete WS JSON-RPC. workflow_seeds.py task-router cleanup has session_refs for all spawn nodes. All 4 gateway delete_session tests pass.
+Session cleanup fix already in place: delete_session() uses sessions.delete JSON-RPC (not sessions_kill), task-router cleanup node has all session_refs. 19 tests pass.
