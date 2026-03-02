@@ -1,1 +1,1 @@
-Session cleanup fix already fully implemented and verified. All 11 session cleanup tests pass (test_session_cleanup.py + test_gateway_delete_session.py). The pre-existing test_api_contract_swift failure (missing 'content' field in memories) is unrelated to this task.
+Fixed session cleanup: sessions.delete WebSocket JSON-RPC impl in worker_gateway.py was already in place (prior agent fixed sessions_kill). Verified workflow_nodes.py cleanup logic correct, workflow_seeds.py has session_refs for all spawn nodes. All 11 session cleanup tests pass.
