@@ -3,6 +3,7 @@
 Handles checking worker status, completion handling, and cleanup.
 """
 
+import asyncio
 import logging
 import subprocess
 import time
@@ -185,7 +186,24 @@ class WorkerMonitor:
                 # Reset escalation on success
                 db_task.escalation_tier = 0
                 db_task.retry_count = 0
-                await self.db.commit()
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await self.db.commit()
+                        break  # Success - exit the retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await self.db.rollback()
+                        else:
+                            logger.error(
+                                "[WORKER] Failed to update task status for %s after 5 attempts: %s",
+                                task_id[:8], _e,
+                            )
+                            try:
+                                await self.db.rollback()
+                            except Exception:
+                                pass
 
             # Update agent tracker
             await AgentTracker(self.db).mark_completed(
@@ -288,7 +306,24 @@ class WorkerMonitor:
                     db_task.status = "active"
                     db_task.failure_reason = "Infrastructure failure detected"
                     db_task.updated_at = datetime.now(timezone.utc)
-                    await self.db.commit()
+                    # Commit with retry-on-lock logic (exponential backoff)
+                    for _attempt in range(5):
+                        try:
+                            await self.db.commit()
+                            break  # Success - exit the retry loop
+                        except Exception as _e:
+                            if _attempt < 4:
+                                await asyncio.sleep(_attempt * 0.5)
+                                await self.db.rollback()
+                            else:
+                                logger.error(
+                                    "[WORKER] Failed to mark task blocked on infra failure for %s after 5 attempts: %s",
+                                    task_id[:8], _e,
+                                )
+                                try:
+                                    await self.db.rollback()
+                                except Exception:
+                                    pass
             else:
                 # Task-level failure - use multi-tier escalation
                 escalation_result = await escalation_enhanced.handle_failure(
@@ -488,7 +523,25 @@ class WorkerMonitor:
                         },
                     )
 
-                await db.commit()
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await db.commit()
+                        break  # Success - exit the retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await db.rollback()
+                        else:
+                            logger.error(
+                                "[WORKER] Failed to record worker run for %s after 5 attempts: %s",
+                                task_id, _e, exc_info=True
+                            )
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                            raise
 
         except Exception as e:
             logger.error(f"Failed to record worker run: {e}", exc_info=True)
@@ -518,7 +571,25 @@ class WorkerMonitor:
                     summary=summary,
                     succeeded=succeeded,
                 )
-                await db.commit()
+                # Commit with retry-on-lock logic (exponential backoff)
+                for _attempt in range(5):
+                    try:
+                        await db.commit()
+                        break  # Success - exit the retry loop
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await db.rollback()
+                        else:
+                            logger.warning(
+                                "[WORKER] Failed to persist reflection output after 5 attempts: %s",
+                                _e, exc_info=True
+                            )
+                            try:
+                                await db.rollback()
+                            except Exception:
+                                pass
+                            raise
         except Exception as e:
             logger.warning("[WORKER] Failed to persist reflection output: %s", e, exc_info=True)
 
@@ -780,7 +851,23 @@ class WorkerMonitor:
                     )
 
             # Commit happens inside engine.decide(), but we should commit the batch
-            await self.db.commit()
+            # Commit with retry-on-lock logic (exponential backoff)
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break  # Success - exit the retry loop
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[SWEEP_REVIEW] Failed to commit sweep review results after 5 attempts: %s", _e,
+                        )
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
             
             logger.info(
                 "[SWEEP_REVIEW] Processed %d decisions: approved=%d deferred=%d rejected=%d",

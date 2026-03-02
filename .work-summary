@@ -1,7 +1,1 @@
-Verified and audited DB lock retry-with-backoff implementation. Confirmed all high-frequency DB writes have proper retry logic:
-- worker_status UPDATE: 5 retries, exponential backoff (0.5s intervals)
-- worker_runs INSERT: 5 retries, exponential backoff
-- reflection_output persistence: 5 retries, exponential backoff
-- SQLite WAL mode and busy_timeout >= 5000ms configured
-
-All 20 worker and status tests passing.
+Fixed DB lock on worker_status and worker_runs operations with retry-with-backoff logic. Added exponential backoff to 5 key commits in worker_monitor.py; verified WAL mode properly configured. All worker tests passing (20/20).
