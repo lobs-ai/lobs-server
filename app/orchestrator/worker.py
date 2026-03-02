@@ -456,13 +456,29 @@ class WorkerManager:
                 started_at=datetime.fromtimestamp(start_time, tz=timezone.utc)
             )
 
-            # Update DB: task status
+            # Update DB: task status (with retry-on-lock)
             db_task = await self.db.get(Task, task_id)
             if db_task:
                 db_task.work_state = "in_progress"
                 db_task.started_at = datetime.now(timezone.utc)
                 db_task.updated_at = datetime.now(timezone.utc)
-                await self.db.commit()
+                for _attempt in range(5):
+                    try:
+                        await self.db.commit()
+                        break
+                    except Exception as _e:
+                        if _attempt < 4:
+                            await asyncio.sleep(_attempt * 0.5)
+                            await self.db.rollback()
+                        else:
+                            logger.error(
+                                "[WORKER] Failed to update task status for %s after 5 attempts: %s",
+                                task_id_short, _e,
+                            )
+                            try:
+                                await self.db.rollback()
+                            except Exception:
+                                pass
 
             # Best-effort: persist applied learnings to TaskOutcome
             if applied_learning_ids or learning_disabled:
@@ -479,7 +495,23 @@ class WorkerManager:
                         outcome.applied_learnings = applied_learning_ids
                         outcome.learning_disabled = learning_disabled
                         outcome.updated_at = datetime.now(timezone.utc)
-                        await self.db.commit()
+                        for _attempt in range(5):
+                            try:
+                                await self.db.commit()
+                                break
+                            except Exception as _e:
+                                if _attempt < 4:
+                                    await asyncio.sleep(_attempt * 0.5)
+                                    await self.db.rollback()
+                                else:
+                                    logger.warning(
+                                        "[WORKER] Failed to persist TaskOutcome for %s after 5 attempts: %s",
+                                        task_id_short, _e,
+                                    )
+                                    try:
+                                        await self.db.rollback()
+                                    except Exception:
+                                        pass
                         logger.debug(
                             f"[LEARNING] Updated TaskOutcome for task {task_id_short} "
                             f"(learnings={len(applied_learning_ids)}, control_group={learning_disabled})"
@@ -1121,7 +1153,23 @@ class WorkerManager:
             db_task.model_tier = "standard"
             db_task.failure_reason = f"Escalated by local model: {reason}"
             db_task.updated_at = datetime.now(timezone.utc)
-            await self.db.commit()
+            for _attempt in range(5):
+                try:
+                    await self.db.commit()
+                    break
+                except Exception as _e:
+                    if _attempt < 4:
+                        await asyncio.sleep(_attempt * 0.5)
+                        await self.db.rollback()
+                    else:
+                        logger.error(
+                            "[WORKER] Failed to escalate task %s after 5 attempts: %s",
+                            task_id[:8], _e,
+                        )
+                        try:
+                            await self.db.rollback()
+                        except Exception:
+                            pass
         
         # Record the escalation in worker_runs
         await self._record_worker_run(
@@ -1142,7 +1190,23 @@ class WorkerManager:
             sa_text("UPDATE workflow_runs SET status = 'cancelled', finished_at = :now WHERE task_id = :tid AND status IN ('running', 'pending')"),
             {"now": now, "tid": task_id}
         )
-        await self.db.commit()
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error(
+                        "[WORKER] Failed to update workflow_runs for %s after 5 attempts: %s",
+                        task_id[:8], _e,
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
         
         logger.info("[WORKER] Task %s ready for re-pickup at standard tier", task_id[:8])
 
@@ -1264,7 +1328,23 @@ class WorkerManager:
                             db_task_for_title.finished_at = None
                             db_task_for_title.updated_at = datetime.now(timezone.utc)
                             db_task_for_title.failure_reason = f"No file changes after {retry_count} retries"
-                            await self.db.commit()
+                            for _attempt in range(5):
+                                try:
+                                    await self.db.commit()
+                                    break
+                                except Exception as _e:
+                                    if _attempt < 4:
+                                        await asyncio.sleep(_attempt * 0.5)
+                                        await self.db.rollback()
+                                    else:
+                                        logger.error(
+                                            "[WORKER] Failed to mark task blocked for %s after 5 attempts: %s",
+                                            task_id_short, _e,
+                                        )
+                                        try:
+                                            await self.db.rollback()
+                                        except Exception:
+                                            pass
                     else:
                         logger.warning(
                             "[WORKER] Worker %s completed but produced no file changes "
@@ -1278,7 +1358,23 @@ class WorkerManager:
                             db_task_for_title.updated_at = datetime.now(timezone.utc)
                             db_task_for_title.failure_reason = "No file changes produced"
                             db_task_for_title.retry_count = retry_count + 1
-                            await self.db.commit()
+                            for _attempt in range(5):
+                                try:
+                                    await self.db.commit()
+                                    break
+                                except Exception as _e:
+                                    if _attempt < 4:
+                                        await asyncio.sleep(_attempt * 0.5)
+                                        await self.db.rollback()
+                                    else:
+                                        logger.error(
+                                            "[WORKER] Failed to queue retry for %s after 5 attempts: %s",
+                                            task_id_short, _e,
+                                        )
+                                        try:
+                                            await self.db.rollback()
+                                        except Exception:
+                                            pass
                     succeeded = False
 
             # ── Run Validity Contract check ───────────────────────────────────────
@@ -1322,7 +1418,23 @@ class WorkerManager:
                         db_task_for_title.failure_reason = (
                             f"Run validity contract failed: {', '.join(violation_codes)}"
                         )
-                        await self.db.commit()
+                        for _attempt in range(5):
+                            try:
+                                await self.db.commit()
+                                break
+                            except Exception as _e:
+                                if _attempt < 4:
+                                    await asyncio.sleep(_attempt * 0.5)
+                                    await self.db.rollback()
+                                else:
+                                    logger.error(
+                                        "[WORKER] Failed to revert task on RVC failure for %s after 5 attempts: %s",
+                                        task_id_short, _e,
+                                    )
+                                    try:
+                                        await self.db.rollback()
+                                    except Exception:
+                                        pass
                     succeeded = False
                 else:
                     logger.info(
