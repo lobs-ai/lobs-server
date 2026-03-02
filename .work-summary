@@ -1,6 +1,1 @@
-Verified: ModelChooser._get_project_local_policy fix complete and working.
-
-The missing method is now properly implemented at line 649 of app/orchestrator/model_chooser.py. 
-It returns local model policies ('never'|'preferred'|'allowed') based on project_id, with fallback 
-to built-in defaults. Called correctly in choose() at line 427. All 9 ModelChooser tests passing 
-(5 project policy tests + 4 budget integration tests). No AttributeError on worker spawning.
+Verified ModelChooser._get_project_local_policy method exists and is fully functional. Method is called from choose() and all 5 unit tests pass. No AttributeError.
