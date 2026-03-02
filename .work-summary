@@ -1,1 +1,1 @@
-Verified comprehensive DB lock fix with retry-with-backoff. 20 retry loops across worker.py and agent_tracker.py. WAL mode enabled with 30s busy_timeout. All 14 critical retry tests passing.
+DB lock retry-with-backoff fixes verified complete. All retry logic is in place: worker_status UPDATE (5 retries, exponential backoff), worker_runs INSERT (5 retries), agent_tracker methods (5 retries), WAL mode enabled, busy_timeout=30000ms. 53 related tests all passing.
