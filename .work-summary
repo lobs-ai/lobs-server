@@ -1,1 +1,1 @@
-Session cleanup fix verified: sessions_kill removed, sessions.delete JSON-RPC used correctly, workflow_seeds.py cleanup nodes have proper session_refs. All 19 session/worker tests passing.
+This task was already completed by a prior programmer agent (commits ea225f5, fb1ef4e). Session cleanup uses sessions.delete via WebSocket WS API (not sessions_kill). All session_refs are properly set in workflow_seeds.py. 19 session tests pass.
