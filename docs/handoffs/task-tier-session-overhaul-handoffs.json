@@ -1,0 +1,41 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "task-tier-session-overhaul",
+    "title": "Fix 1: Make task tier classification synchronous at creation",
+    "context": "Currently app/routers/tasks.py fires tier classification as a background asyncio task and returns immediately. This causes a race: the orchestrator can pick up the task before model_tier is set, so spawn_agent falls back to heuristics. The classify_task_tier() service already exists in app/services/task_tier.py — it just needs to run synchronously before db.commit(). Design doc: docs/task-tier-session-overhaul-design.md",
+    "spec": {
+      "file": "app/routers/tasks.py",
+      "change": "In create_task(), after db.flush() + db.refresh(db_task) and before db.commit(), await classify_task_tier(db_task, db) and set db_task.model_tier = tier. Then db.commit(). Remove the _classify_and_update inner function and the asyncio.create_task(...) call entirely.",
+      "constraint": "classify_task_tier() already handles: (1) caller-set model_tier (returns it unchanged), (2) LM Studio down (returns 'standard' within 2s timeout), (3) project hard minimums. No changes to task_tier.py needed."
+    },
+    "acceptance": "POST /api/tasks returns a task with model_tier set to small|standard|strong (not null). With LM Studio down, model_tier is 'standard'. If caller sends model_tier in request body, it is preserved as-is.",
+    "files": ["app/routers/tasks.py", "app/services/task_tier.py", "docs/task-tier-session-overhaul-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "task-tier-session-overhaul",
+    "title": "Fix 2: Correct session_ref paths in programmer-task fix loop nodes",
+    "context": "The fix_tests and fix_lint nodes in workflow_seeds.py use session_ref: 'write_code.session_key' which does not exist in workflow context. The correct path is 'write_code.output.childSessionKey' — this is where spawn_agent stores the child session key. As a result, any test failure in the programmer workflow causes the fix loop to fail with 'Session ref not found' instead of sending the fix message to the agent. Design doc: docs/task-tier-session-overhaul-design.md",
+    "spec": {
+      "file": "app/orchestrator/workflow_seeds.py",
+      "change": "Find the two send_to_session nodes with id 'fix_tests' and 'fix_lint' in the programmer-task workflow. Change their config.session_ref from 'write_code.session_key' to 'write_code.output.childSessionKey'. That's the only change — two string replacements.",
+      "why": "spawn_agent returns NodeResult(output={'childSessionKey': key}). The workflow context stores node outputs under {node_id}.output.*. So the correct dotted path is 'write_code.output.childSessionKey'. The broken path 'write_code.session_key' has no corresponding context entry."
+    },
+    "acceptance": "workflow_seeds.py fix_tests node has session_ref = 'write_code.output.childSessionKey'. Same for fix_lint node. Grep confirms no remaining uses of 'write_code.session_key' in session_ref configs.",
+    "files": ["app/orchestrator/workflow_seeds.py", "docs/task-tier-session-overhaul-design.md"]
+  },
+  {
+    "to": "programmer",
+    "initiative": "task-tier-session-overhaul",
+    "title": "Fix 3: Implement delete_session() with bulk openclaw cleanup",
+    "context": "NodeHandlers.delete_session() in workflow_nodes.py is currently a no-op (logs only). Gateway has no per-session delete API — confirmed by testing sessions_kill, sessions_delete, sessions_remove, etc., all return 'Tool not available'. However, `openclaw sessions cleanup --enforce` runs maintenance on the session store. The session store currently has 1274+ entries and growing. Design doc: docs/task-tier-session-overhaul-design.md",
+    "spec": {
+      "file": "app/orchestrator/workflow_nodes.py",
+      "change": "Replace the no-op delete_session() method body with logic that: (1) calls sessions_list via Gateway to get current count, (2) if count > 100, runs `openclaw sessions cleanup --enforce` as a subprocess via asyncio.to_thread, (3) logs the action, (4) catches all exceptions as non-fatal. See design doc for full code pattern.",
+      "imports_needed": "aiohttp (already imported), asyncio (already imported), subprocess (already imported), json (standard lib), app.orchestrator.config.GATEWAY_URL/GATEWAY_TOKEN/GATEWAY_SESSION_KEY (already imported at top of file)"
+    },
+    "acceptance": "delete_session() does not raise. With >100 sessions in store, calling it triggers 'openclaw sessions cleanup --enforce'. Session count decreases over time after tasks complete. With <=100 sessions, it's a quick no-op.",
+    "files": ["app/orchestrator/workflow_nodes.py", "docs/task-tier-session-overhaul-design.md"]
+  }
+]

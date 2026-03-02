@@ -1,5 +1,6 @@
 """Task API endpoints."""
 
+import asyncio
 import os
 import uuid
 import logging
@@ -178,7 +179,27 @@ async def create_task(
 
     await db.flush()
     await db.refresh(db_task)
-    return Task.model_validate(db_task)
+
+    # Classify model tier in background (LM Studio inference can be slow)
+    # Return response immediately; model_tier will be updated async
+    task_result = Task.model_validate(db_task)
+    task_id_for_bg = db_task.id
+
+    async def _classify_and_update() -> None:
+        from app.database import AsyncSessionLocal
+        try:
+            async with AsyncSessionLocal() as bg_db:
+                row = await bg_db.execute(select(TaskModel).where(TaskModel.id == task_id_for_bg))
+                bg_task = row.scalar_one_or_none()
+                if bg_task and not bg_task.model_tier:
+                    tier = await classify_task_tier(bg_task, bg_db)
+                    bg_task.model_tier = tier
+                    await bg_db.commit()
+        except Exception as exc:
+            logger.warning("[TASKS] Background tier classification failed for %s: %s", task_id_for_bg, exc)
+
+    asyncio.create_task(_classify_and_update())
+    return task_result
 
 
 @router.get("/{task_id}")

@@ -1,141 +1,178 @@
-# Design: Task Tier Classification + Session Cleanup + ModelChooser Overhaul
+# Design: Task Tier Classification + ModelChooser Simplification + Session Cleanup Fix
 
 **Task ID:** FAD05A1F-5D54-4B27-A89B-BA876BF4AA4C  
-**Date:** 2026-03-01  
-**Author:** Architect
+**Status:** Approved for implementation  
+**Date:** 2026-03-01
 
 ---
 
 ## Problem Statement
 
-Three interconnected gaps in the current system:
+Three interconnected issues with the orchestrator workflow:
 
-1. **Tier classification happens mid-workflow** — `model_tier` is null at task creation. `spawn_agent` may pick wrong model because tier isn't known yet.
+1. **Task model_tier is not set at creation** — tier classification happens mid-workflow via a `classify_model_tier` node, but this node is NOT wired into workflow_seeds.py (not present in any workflow). So tasks run without model_tier set at all — ModelChooser uses complex fallback logic every time.
 
-2. **ModelChooser complexity** — When `task.model_tier` is already set, `decide_models()` already uses it. The primary issue was tier was never set at creation. No major ModelChooser rewrite needed.
+2. **ModelChooser is over-complex** — doesn't cleanly use task.model_tier as the primary signal. Intent is: tier → model list (from DB settings) → pick first healthy one. The current code buries this.
 
-3. **Session cleanup is a no-op** — `NodeHandlers.delete_session()` in `workflow_nodes.py` is a placeholder. The real implementation exists in `worker_gateway.py` (`sessions.delete` WebSocket JSON-RPC) but is not wired to cleanup nodes.
+3. **Session cleanup paths are wrong** — `session_ref` paths in workflow_seeds.py use `.output.childSessionKey` or `.session_key` which both resolve to None. Cleanup has never worked. Sessions accumulate.
 
 ---
 
-## Current State (what we found)
+## Root Cause Analysis
 
-### Tier classification
-- `task.model_tier` field exists on `TaskCreate` schema (line 64 in schemas.py) and `Task` model — nullable.
-- No classification at task creation — always null unless caller sets it.
-- `_node_classify_model_tier` in `workflow_nodes.py` exists (line ~1643) but is NOT used in task-router seeds.
+### Session ref path bug
+
+`_resolve_context_path(context, "write_code.output.childSessionKey")` fails because:
+- `context["write_code"]` = `{"runId": ..., "childSessionKey": ...}` (output stored directly)
+- There is NO nested "output" key inside the output dict
+- `.output.` in the path returns None
+
+Similarly, `"write_code.session_key"` fails:
+- context["write_code"]["session_key"] = None (key is "childSessionKey", not "session_key")
+
+**Correct path:** `"write_code.childSessionKey"` — traverses context["write_code"]["childSessionKey"] correctly.
+
+### delete_session status
+
+Already a no-op placeholder. Sessions auto-archive after archiveAfterMinutes=5. No change needed.
 
 ### ModelChooser
-- `decide_models()` in `model_router.py` reads `task.get("model_tier")` as `explicit_tier` (line ~268).
-- DB settings keys `model_router.tier.{micro,small,medium,standard,strong}` are already the source of truth for model lists.
-- When tier is set at creation, ModelChooser already routes correctly. No rewrite needed.
 
-### Session cleanup
-- `NodeHandlers.delete_session()` in `workflow_nodes.py` lines 201-211: **no-op placeholder**.
-- `WorkerGateway.delete_session()` in `worker_gateway.py` lines 382-422: **working WebSocket implementation** using `sessions.delete` JSON-RPC.
-- `worker_monitor.py` line 366 calls `gateway.delete_session()` for timeout cleanup — proven path.
-- task-router done node already has `session_refs` wired for all spawn nodes.
-- `workflow_nodes.py` cleanup node already resolves `session_refs` — only the underlying delete call is broken.
+task.model_tier is in DB schema but not populated at creation. Once populated, ModelChooser needs a fast-path that uses it directly.
 
 ---
 
 ## Proposed Solution
 
-### 1. Tier classification service (`app/services/tier_classifier.py`)
+### 1. Tier classification at task creation
 
-New function `classify_task_tier(task_dict, db) -> str`:
+**New service:** `app/services/tier_classifier.py`
 
-```
-1. If task.model_tier already set → return it (caller override wins)
-2. Compute project minimum:
-   - project_id contains 'lobs-server', 'lobs-mission-control', 'lobs-mobile' → min 'standard'
-   - else: min None (no floor)
-3. LLM classification via llm_direct (local qwen):
-   - Prompt includes: title, notes, project_id, agent_type
-   - System prompt defines tiers: small/standard/strong with examples
-   - Timeout: 8s
-   - Parse first word of response, validate against known tiers
-   - On failure/timeout → fallback to 'standard'
-4. Apply project minimum: if project_min='standard' and result='small' → return 'standard'
-5. Return tier string
-```
+Logic (first match wins):
+1. If task.model_tier already set → return it (caller override)
+2. Project hard minimums (lobs-server, lobs-mission-control, lobs-mobile → min "standard")
+3. LLM classification via local LM Studio (title + notes + project_id → small|standard|strong)
+   - 3s timeout, fallback to "standard" on error/unavailability
+4. Default: "standard"
 
-Wire in `create_task()` in `app/routers/tasks.py`:
-- After `await db.flush()` / `await db.refresh(db_task)`
-- Before return
-- Wrap in try/except: any exception → log warning, keep model_tier as-is (null is fine, ModelChooser handles it)
+Tier definitions for LLM prompt:
+- small: boilerplate, docs, simple CRUD, config, scripts, drafts, obvious trivial bugs
+- standard: production features, API endpoints, real bug fixes, research, integrations
+- strong: architecture, security, complex debugging, system design, prod DB migrations
 
-### 2. ModelChooser — fast-path when tier is set
+**Hook in task creation** (app/routers/tasks.py):
+After db.flush(), before db.commit(), call classifier and write back to db_task.model_tier.
 
-`decide_models()` already reads task.model_tier but passes through fuzzy catalog derivation and agent-type heuristics. Add a fast-path in `ModelChooser.choose()`: when `task.model_tier` is a known tier (micro/small/medium/standard/strong), skip `decide_models()` and read directly from `cfg["tiers"][tier]` (DB settings keys already store these). Budget guards and health ranking still apply. Fall through to `decide_models()` when tier is null (backwards compat).
+### 2. ModelChooser — tier fast-path
 
-Also remove `_node_classify_model_tier` dead code from `workflow_nodes.py` (no workflow uses it).
-
-### 3. Fix NodeHandlers.delete_session()
-
-Replace no-op with gateway call:
+Add fast-path at top of `choose()`:
 
 ```python
-async def delete_session(self, session_key: str) -> None:
-    if not session_key:
-        return
-    if self.worker_manager and hasattr(self.worker_manager, 'gateway'):
-        success = await self.worker_manager.gateway.delete_session(session_key)
-        if not success:
-            logger.warning("[NODE] Failed to delete session %s via gateway", session_key)
-    else:
-        logger.warning("[NODE] No gateway available for session delete: %s", session_key)
+tier = (task or {}).get("model_tier", "").strip().lower()
+if tier in {"micro", "small", "medium", "standard", "strong"}:
+    candidates = await self._tier_to_models(tier)
+    if candidates:
+        # Apply project local policy, health ranking
+        candidates = await self._rank_by_health_and_cost(candidates, ...)
+        local_policy = await self._get_project_local_policy(...)
+        # Apply local policy filtering
+        return ModelChoice(model=candidates[0], ...)
+# Fallback: existing complex logic unchanged
 ```
 
-Check: `NodeHandlers.__init__` takes `worker_manager` — verify it has `.gateway` attribute (it does: `WorkerManager` instantiates `WorkerGateway`).
+`_tier_to_models(tier)` reads directly from DB settings (MODEL_ROUTER_TIER_SMALL_KEY etc.).
+Reads same keys as existing `_load_runtime_config()` — no new DB queries.
+
+Keep existing complex path as fallback. Don't remove it.
+
+### 3. Fix session_ref paths in workflow_seeds.py
+
+All session_ref paths that use `.output.childSessionKey` must be changed to `.childSessionKey`.
+Paths that use `.session_key` for session targeting must also change to `.childSessionKey`.
+
+Affected paths:
+- "write_code.output.childSessionKey" → "write_code.childSessionKey"
+- "write_code.session_key" (in send_to_session) → "write_code.childSessionKey"  
+- "research.output.childSessionKey" → "research.childSessionKey"
+- "spawn_programmer.output.childSessionKey" → "spawn_programmer.childSessionKey"
+- "spawn_programmer_fix_1.output.childSessionKey" → "spawn_programmer_fix_1.childSessionKey"
+- "spawn_programmer_fix_2.output.childSessionKey" → "spawn_programmer_fix_2.childSessionKey"
+- "spawn_researcher.output.childSessionKey" → "spawn_researcher.childSessionKey"
+- "spawn_writer.output.childSessionKey" → "spawn_writer.childSessionKey"
+- "spawn_architect.output.childSessionKey" → "spawn_architect.childSessionKey"
+- "spawn_reviewer.output.childSessionKey" → "spawn_reviewer.childSessionKey"
+- "spawn_inbox.output.childSessionKey" → "spawn_inbox.childSessionKey"
+
+Also fix the docstring in cleanup node in workflow_nodes.py.
 
 ---
 
-## Implementation Plan
+## Implementation Handoffs
 
-### Handoff 1: Tier classifier service + wire to task creation
-**Files:** `app/services/tier_classifier.py` (new), `app/routers/tasks.py` (edit)
+### Handoff 1: Tier Classifier Service + Task Creation Hook
 
-Acceptance criteria:
-- POST /api/tasks with no model_tier → response has model_tier set
-- POST /api/tasks with model_tier="strong" → keeps "strong" (no override)
-- Task in project "lobs-server" gets minimum "standard" even if LLM says "small"
-- LLM unavailable → task gets "standard", no error thrown
-- Write unit tests: `tests/test_tier_classifier.py` — mock llm_direct, test project minimums, test fallback
-
-### Handoff 2: Fix NodeHandlers.delete_session()
-**File:** `app/orchestrator/workflow_nodes.py`
+File: app/services/tier_classifier.py (new)
+File: app/routers/tasks.py (modify create_task)
 
 Acceptance criteria:
-- Replace no-op with call to `self.worker_manager.gateway.delete_session(key)`
-- No crash when gateway unavailable (log + continue)
-- After programmer task completes, run `openclaw sessions list` — worker sessions are gone
-- Write unit test: mock worker_manager.gateway, assert delete_session called
+- POST /api/tasks with no model_tier → response has model_tier populated
+- POST /api/tasks with model_tier="strong" → preserved unchanged
+- Tasks for lobs-server project → tier is "standard" or "strong", never "small"
+- LLM unavailable → defaults to "standard" without error
 
-### Handoff 3: Remove classify_model_tier dead code (cleanup, can be deferred)
-**File:** `app/orchestrator/workflow_nodes.py`
+### Handoff 2: ModelChooser Tier Fast-Path
 
-- Remove `@register_node("classify_model_tier")` and `_node_classify_model_tier` function
-- No workflow uses it; removing prevents confusion
+File: app/orchestrator/model_chooser.py
+
+Acceptance criteria:
+- task with model_tier="small" → choose() returns model from MODEL_ROUTER_TIER_SMALL_KEY list
+- task with model_tier="strong" → choose() returns model from MODEL_ROUTER_TIER_STRONG_KEY list
+- task with no model_tier → existing logic applies (no regression)
+- No LLM calls in model selection path
+
+### Handoff 3: Fix Session Ref Paths
+
+File: app/orchestrator/workflow_seeds.py
+File: app/orchestrator/workflow_nodes.py (docstring fix)
+
+Acceptance criteria:
+- All session_ref values use .childSessionKey (not .output.childSessionKey or .session_key)
+- python -c "from app.orchestrator.workflow_seeds import WORKFLOW_SEEDS; print('OK')" passes
+- After a programmer task completes, cleanup node logs deleted_sessions with actual key (not empty)
 
 ---
 
 ## Testing Strategy
 
-**Unit:**
-- `tests/test_tier_classifier.py`: mock `llm_direct`, test all 4 paths (caller override, project min, LLM result, fallback)
-- Extend `tests/test_workflow_nodes.py`: mock `worker_manager.gateway`, assert delete_session invoked
+### Tier classification
+- Unit: classify_task_tier with "fix typo in README" → "small"
+- Unit: classify_task_tier with lobs-server project → >= "standard"
+- Integration: POST /api/tasks → verify model_tier in response
 
-**Integration (manual):**
-1. POST task → check model_tier in response
-2. Run a task cycle → check session count via `openclaw sessions list` before and after
+### ModelChooser fast-path
+- Unit: task with model_tier="small" → returns small-tier model
+- Unit: task with model_tier="strong" → returns strong-tier model
+
+### Session cleanup
+- After fix: context["write_code"]["childSessionKey"] resolves correctly
+- Cleanup node logs actual session key, not empty list
 
 ---
 
-## Risks
+## Tradeoffs
 
-1. **LLM call adds latency to task creation** (~2s typical for local qwen). Acceptable because workers don't start for ≥30s. If latency becomes a problem, can defer to background after creation.
+**Keep existing ModelChooser** vs rewrite: Keeping. Budget guards and health ranking work. Fast-path is additive. Rewrite risk is too high.
 
-2. **worker_manager.gateway access** — if worker_manager is None in some code paths, guard with hasattr check avoids crash.
+**LLM at task creation**: Adds ~1-2s latency. Acceptable because classification is deterministic-first. 3s timeout prevents blocking.
 
-3. **session_refs resolve to None** when a branch skips a spawn node — already handled gracefully in cleanup node (logs debug, skips). No new risk.
+**No Gateway session deletion**: auto-archive at 5min is sufficient.
+
+---
+
+## Files Affected
+
+- app/services/tier_classifier.py — NEW
+- app/routers/tasks.py — add classification after flush
+- app/orchestrator/model_chooser.py — add tier fast-path
+- app/orchestrator/workflow_seeds.py — fix all session_ref paths
+- app/orchestrator/workflow_nodes.py — fix cleanup docstring

@@ -1,0 +1,14 @@
+[
+  {
+    "to": "programmer",
+    "initiative": "tier-classification-at-creation",
+    "title": "Fix race condition: make task tier classification synchronous at creation",
+    "context": "In app/routers/tasks.py, create_task() currently classifies model_tier using asyncio.create_task() (background). This means the orchestrator can pick up the task before model_tier is set. All other work (task_tier.py service, ModelChooser short-circuit, workflow session_refs) is already done.\n\nFix: move tier classification to be synchronous (inline await) in create_task(), before the response is returned.\n\nIn create_task() in app/routers/tasks.py:\n1. Remove the _classify_and_update() inner function and its asyncio.create_task() call\n2. After 'await db.flush()' and 'await db.refresh(db_task)', add:\n   if not db_task.model_tier:\n       tier = await classify_task_tier(db_task, db)\n       db_task.model_tier = tier\n       await db.commit()\n       await db.refresh(db_task)\n3. Build task_result AFTER the classification, so the response includes the tier\n\nThe classify_task_tier function already has a 2s timeout and safe fallback to 'standard'. Import already exists at the top of tasks.py.\n\nNote: db.commit() inside create_task may conflict with the outer commit. Check if tasks.py uses an explicit commit at the end or relies on middleware. If it uses middleware commit, just set db_task.model_tier = tier without calling db.commit() — the middleware will commit it with the rest of the transaction.",
+    "acceptance": "1. POST /api/tasks with no model_tier -> task in response has model_tier set (not null)\n2. POST /api/tasks with model_tier='strong' -> task keeps 'strong', not overwritten\n3. When LM Studio is unreachable, task creation still succeeds within 3s with model_tier='standard'\n4. Task creation response includes the classified model_tier field\n5. No asyncio.create_task background calls remain for tier classification\n6. Existing task creation tests still pass",
+    "files": [
+      "docs/tier-classification-and-session-cleanup-status.md",
+      "app/routers/tasks.py",
+      "app/services/task_tier.py"
+    ]
+  }
+]

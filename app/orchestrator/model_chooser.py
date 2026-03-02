@@ -341,15 +341,52 @@ class ModelChooser:
                     existing = list(tiers.get(tier_name) or [])
                     tiers[tier_name] = local_models + [m for m in existing if m not in local_models]
         
-        decision = decide_models(
-            agent_type,
-            task,
-            tier_overrides=tiers,
-            available_models=cfg.get("available_models"),
-            purpose=purpose,
-        )
-
-        candidates = list(decision.models)
+        # --- Explicit tier short-circuit ---
+        # If task has model_tier already set (classified at creation time),
+        # skip decide_models() heuristics and use the tier directly.
+        explicit_tier = (task or {}).get("model_tier")
+        tier_source = "heuristic"
+        if explicit_tier and explicit_tier in TIER_ORDER:
+            tier_candidates = list(tiers.get(explicit_tier) or [])
+            if tier_candidates:
+                # Use explicit tier; still run all downstream guards + ranking
+                decision = decide_models(
+                    agent_type,
+                    task,
+                    tier_overrides=tiers,
+                    available_models=cfg.get("available_models"),
+                    purpose=purpose,
+                )
+                candidates = tier_candidates[:]
+                tier_source = "explicit"
+                logger.debug(
+                    "[MODEL_CHOOSER] explicit tier=%s candidates=%s",
+                    explicit_tier,
+                    candidates,
+                )
+            else:
+                # Tier set but list empty in DB — fall through to heuristic
+                logger.debug(
+                    "[MODEL_CHOOSER] explicit tier=%s but tier list empty in DB, falling back to heuristic",
+                    explicit_tier,
+                )
+                decision = decide_models(
+                    agent_type,
+                    task,
+                    tier_overrides=tiers,
+                    available_models=cfg.get("available_models"),
+                    purpose=purpose,
+                )
+                candidates = list(decision.models)
+        else:
+            decision = decide_models(
+                agent_type,
+                task,
+                tier_overrides=tiers,
+                available_models=cfg.get("available_models"),
+                purpose=purpose,
+            )
+            candidates = list(decision.models)
         candidates = self._apply_routing_policy(candidates=candidates, task=task, policy=cfg["routing_policy"])
         candidates = await self._apply_budget_guards(candidates=candidates, budgets=cfg["budgets"])
 
@@ -428,6 +465,7 @@ class ModelChooser:
                 "budgets_present": bool(cfg["budgets"]),
                 "lane_guard": lane_guard_decision,
                 "hard_cap_guard": hard_cap_decision,
+                "tier_source": tier_source,
             },
         )
 
