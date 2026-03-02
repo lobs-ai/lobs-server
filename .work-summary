@@ -1,1 +1,1 @@
-Verified database lock fixes: worker_status UPDATE and worker_runs INSERT both have 5-attempt retry-with-exponential-backoff. WAL mode + busy_timeout=30000ms configured. All 37 lock-related tests passing.
+Verified and validated database lock retry logic on all high-frequency DB writes. Added comprehensive test coverage for agent_tracker retry behavior. All 22 retry tests passing (worker_status, worker_manager, agent_tracker).
