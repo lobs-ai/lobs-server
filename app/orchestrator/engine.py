@@ -97,7 +97,19 @@ class OrchestratorEngine:
             return
 
         # Check if OpenClaw is available
-        self._openclaw_available = shutil.which("openclaw") is not None
+        # Check common install paths in addition to PATH (nohup may not inherit full PATH)
+        _openclaw_path = (
+            shutil.which("openclaw") or
+            shutil.which("openclaw", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin") or
+            (None if not __import__('os').path.isfile("/opt/homebrew/bin/openclaw") else "/opt/homebrew/bin/openclaw")
+        )
+        self._openclaw_available = _openclaw_path is not None
+        if _openclaw_path:
+            # Ensure it's on PATH for subprocess calls
+            import os as _os
+            _brew_bin = "/opt/homebrew/bin"
+            if _brew_bin not in _os.environ.get("PATH", ""):
+                _os.environ["PATH"] = f"{_brew_bin}:{_os.environ.get('PATH', '')}"
         if not self._openclaw_available:
             logger.warning("[ENGINE] OpenClaw not found on PATH — orchestrator will run in monitoring-only mode (no worker spawning)")
         

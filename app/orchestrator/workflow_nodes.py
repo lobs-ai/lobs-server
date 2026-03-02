@@ -393,6 +393,7 @@ async def _check_spawn_agent(node_def, run, *, db, worker_manager):
         return None
 
     from app.models import Task, WorkerRun
+    from sqlalchemy import select
     db_task = await db.get(Task, task_id)
 
     if db_task and db_task.work_state == "completed":

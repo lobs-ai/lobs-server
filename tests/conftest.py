@@ -1,3 +1,12 @@
+
+import os
+# Safety guard: abort if someone tries to run tests against a live server
+if os.environ.get("LOBS_API_URL", "").startswith("http://localhost"):
+    raise RuntimeError(
+        "DANGER: tests are configured to run against the live production server! "
+        "Unset LOBS_API_URL or use ASGITransport only."
+    )
+
 """Shared test fixtures and configuration."""
 
 import pytest

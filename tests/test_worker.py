@@ -145,98 +145,220 @@ async def test_list_worker_runs_pagination(client: AsyncClient):
 
 class TestWorkerManager:
     """Tests for WorkerManager session termination."""
-    
+
+    def _make_ws_mock(self, messages):
+        """Build a mock WebSocket that yields the given list of (type, data) tuples."""
+        import aiohttp
+        ws = MagicMock()
+        ws.__aenter__ = AsyncMock(return_value=ws)
+        ws.__aexit__ = AsyncMock(return_value=False)
+        ws.send_json = AsyncMock()
+
+        async def _aiter():
+            for msg_type, msg_data in messages:
+                m = MagicMock()
+                m.type = msg_type
+                if msg_type == aiohttp.WSMsgType.TEXT:
+                    import json
+                    m.data = json.dumps(msg_data)
+                yield m
+
+        ws.__aiter__ = _aiter
+        return ws
+
     @pytest.mark.asyncio
     async def test_terminate_session_success(self, db_session: AsyncSession):
-        """Test successful session termination."""
+        """Test successful session termination via WebSocket."""
+        import aiohttp
         manager = WorkerManager(db_session)
-        
-        # Mock the Gateway API response
-        mock_response = MagicMock()
-        mock_response.json = AsyncMock(return_value={"ok": True})
-        
-        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock()
-            mock_session.post = AsyncMock(return_value=mock_response)
-            mock_session_class.return_value = mock_session
-            
+
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_cs_class:
+            http_session = MagicMock()
+            http_session.__aenter__ = AsyncMock(return_value=http_session)
+            http_session.__aexit__ = AsyncMock(return_value=False)
+            mock_cs_class.return_value = http_session
+
+            # ws_connect returns a ws mock that sends a success response
+            def make_response_ws(_url, **kwargs):
+                # We need the request_id — use a wildcard: return True for any id
+                return self._make_ws_mock([
+                    (aiohttp.WSMsgType.TEXT, {"jsonrpc": "2.0", "id": None, "result": {"deleted": True}}),
+                ])
+
+            # Patch ws_connect to intercept and inject the correct request_id
+            real_send = None
+            captured_id = []
+
+            class FakeWS:
+                def __init__(self, msgs_fn):
+                    self._msgs_fn = msgs_fn
+                async def __aenter__(self):
+                    return self
+                async def __aexit__(self, *a):
+                    return False
+                async def send_json(self, payload):
+                    captured_id.append(payload.get("id"))
+                def __aiter__(self):
+                    return self._gen()
+                async def _gen(self):
+                    rid = captured_id[0] if captured_id else "x"
+                    import json, aiohttp
+                    m = MagicMock()
+                    m.type = aiohttp.WSMsgType.TEXT
+                    m.data = json.dumps({"jsonrpc": "2.0", "id": rid, "result": {"deleted": True}})
+                    yield m
+
+            http_session.ws_connect = MagicMock(return_value=FakeWS(None))
+
             result = await manager._terminate_session(
                 "agent:programmer:subagent:test-123",
-                "timeout"
+                "timeout",
             )
-            
+
             assert result is True
-            mock_session.post.assert_called_once()
-    
+
     @pytest.mark.asyncio
     async def test_terminate_session_not_found(self, db_session: AsyncSession):
         """Test session termination when session not found (treat as success)."""
         manager = WorkerManager(db_session)
-        
-        # Mock the Gateway API response - session not found
-        mock_response = MagicMock()
-        mock_response.json = AsyncMock(return_value={
-            "ok": False,
-            "error": {"message": "Session not found"}
-        })
-        
-        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock()
-            mock_session.post = AsyncMock(return_value=mock_response)
-            mock_session_class.return_value = mock_session
-            
+
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_cs_class:
+            http_session = MagicMock()
+            http_session.__aenter__ = AsyncMock(return_value=http_session)
+            http_session.__aexit__ = AsyncMock(return_value=False)
+            mock_cs_class.return_value = http_session
+
+            captured_id = []
+
+            class FakeWS:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): return False
+                async def send_json(self, payload): captured_id.append(payload.get("id"))
+                def __aiter__(self): return self._gen()
+                async def _gen(self):
+                    import json, aiohttp
+                    rid = captured_id[0] if captured_id else "x"
+                    m = MagicMock()
+                    m.type = aiohttp.WSMsgType.TEXT
+                    m.data = json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"message": "session not found"}})
+                    yield m
+
+            http_session.ws_connect = MagicMock(return_value=FakeWS())
+
             result = await manager._terminate_session(
                 "agent:programmer:subagent:test-123",
-                "cleanup"
+                "cleanup",
             )
-            
+
             assert result is True  # Not found treated as success
-    
+
     @pytest.mark.asyncio
     async def test_terminate_session_api_error(self, db_session: AsyncSession):
-        """Test session termination when API returns error."""
+        """Test session termination when API returns a non-not-found error."""
         manager = WorkerManager(db_session)
-        
-        # Mock the Gateway API response - other error
-        mock_response = MagicMock()
-        mock_response.json = AsyncMock(return_value={
-            "ok": False,
-            "error": {"message": "Internal server error"}
-        })
-        
-        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock()
-            mock_session.post = AsyncMock(return_value=mock_response)
-            mock_session_class.return_value = mock_session
-            
+
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_cs_class:
+            http_session = MagicMock()
+            http_session.__aenter__ = AsyncMock(return_value=http_session)
+            http_session.__aexit__ = AsyncMock(return_value=False)
+            mock_cs_class.return_value = http_session
+
+            captured_id = []
+
+            class FakeWS:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): return False
+                async def send_json(self, payload): captured_id.append(payload.get("id"))
+                def __aiter__(self): return self._gen()
+                async def _gen(self):
+                    import json, aiohttp
+                    rid = captured_id[0] if captured_id else "x"
+                    m = MagicMock()
+                    m.type = aiohttp.WSMsgType.TEXT
+                    m.data = json.dumps({"jsonrpc": "2.0", "id": rid, "error": {"message": "Internal server error"}})
+                    yield m
+
+            http_session.ws_connect = MagicMock(return_value=FakeWS())
+
             result = await manager._terminate_session(
                 "agent:programmer:subagent:test-123",
-                "timeout"
+                "timeout",
             )
-            
+
             assert result is False
-    
+
     @pytest.mark.asyncio
     async def test_terminate_session_network_error(self, db_session: AsyncSession):
         """Test session termination when network error occurs."""
         manager = WorkerManager(db_session)
-        
-        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_session_class:
-            mock_session = MagicMock()
-            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
-            mock_session.__aexit__ = AsyncMock(return_value=False)
-            mock_session.post = AsyncMock(side_effect=Exception("Network error"))
-            mock_session_class.return_value = mock_session
-            
+
+        with patch("app.orchestrator.worker.aiohttp.ClientSession") as mock_cs_class:
+            http_session = MagicMock()
+            http_session.__aenter__ = AsyncMock(return_value=http_session)
+            http_session.__aexit__ = AsyncMock(return_value=False)
+            mock_cs_class.return_value = http_session
+            http_session.ws_connect = MagicMock(side_effect=Exception("Network error"))
+
             result = await manager._terminate_session(
                 "agent:programmer:subagent:test-123",
-                "timeout"
+                "timeout",
             )
-            
+
             assert result is False
+
+
+# ── _terminate_session uses sessions.delete WebSocket RPC ────────────────────
+
+@pytest.mark.asyncio
+async def test_terminate_session_uses_websocket_delete(monkeypatch):
+    """_terminate_session must use sessions.delete JSON-RPC, not sessions_kill."""
+    import json
+    import aiohttp as _aiohttp
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    sent_messages = []
+
+    class FakeWS:
+        async def send_json(self, data):
+            sent_messages.append(data)
+        def __aiter__(self):
+            return self
+        async def __anext__(self):
+            # Return a success response for the last sent message
+            if sent_messages:
+                msg = MagicMock()
+                msg.type = _aiohttp.WSMsgType.TEXT
+                msg.data = json.dumps({"id": sent_messages[-1]["id"], "result": {"deleted": True}})
+                sent_messages.clear()  # prevent infinite loop
+                return msg
+            raise StopAsyncIteration
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+
+    class FakeSession:
+        def ws_connect(self, url, **kwargs):
+            return FakeWS()
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            pass
+
+    with patch("app.orchestrator.worker.aiohttp.ClientSession", return_value=FakeSession()):
+        from app.orchestrator.worker import WorkerManager
+        import sqlalchemy
+        # Create a minimal WorkerManager-like object to test just _terminate_session
+        db_mock = AsyncMock()
+        wm = WorkerManager.__new__(WorkerManager)
+        result = await wm._terminate_session("test-session-key-123", "task_complete")
+
+    assert result is True
+    # Verify it used sessions.delete and not sessions_kill
+    # (sent_messages was cleared on success, but we can verify no REST call was made)
+    # The key check: no sessions_kill in the source
+    import inspect
+    import app.orchestrator.worker as wmod
+    src = inspect.getsource(wmod.WorkerManager._terminate_session)
+    assert "sessions_kill" not in src, "sessions_kill must not be used in _terminate_session"
+    assert "sessions.delete" in src, "sessions.delete must be used in _terminate_session"
