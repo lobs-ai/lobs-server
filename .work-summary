@@ -1,1 +1,1 @@
-Session cleanup fix already in place: delete_session() uses sessions.delete JSON-RPC (not sessions_kill), task-router cleanup node has all session_refs. 19 tests pass.
+Session cleanup fix verified: workflow_nodes.py uses sessions.delete JSON-RPC (not sessions_kill), workflow_seeds.py task-router already has session_refs for all spawn nodes. All 23 related tests pass.
