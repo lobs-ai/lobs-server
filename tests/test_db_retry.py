@@ -187,4 +187,5 @@ class TestCommitWithRetry:
             await commit_with_retry(db_session, commit_name="test commit", max_attempts=3)
         
         assert db_session.commit.call_count == 3
-        assert db_session.rollback.call_count == 3  # Each failure triggers rollback
+        # Rollback is called on each failure BEFORE the final attempt, so 2 rollbacks for 3 attempts
+        assert db_session.rollback.call_count == 2
