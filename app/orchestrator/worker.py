@@ -607,6 +607,7 @@ class WorkerManager:
                     )
                     return r.json()
             data = await asyncio.get_event_loop().run_in_executor(None, _do_spawn)
+            logger.info("[WORKER] Gateway responded: ok=%s", data.get("ok"))
                 
             if not data.get("ok"):
                 error_msg = f"sessions_spawn_failed: {data}"
