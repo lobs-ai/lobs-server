@@ -1,1 +1,1 @@
-DB lock fix verified: WAL mode + busy_timeout=30s already set, all DB writes in worker.py and agent_tracker.py already have 5-attempt retry with exponential backoff. 20 existing retry tests pass.
+Verified DB lock fix is fully implemented: WAL mode enabled, busy_timeout=30000ms (30s), retry-with-exponential-backoff on all critical writes (worker.py, agent_tracker.py, routers). All 49 related tests pass.
