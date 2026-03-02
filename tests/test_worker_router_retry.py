@@ -99,7 +99,12 @@ class TestWorkerRouterRetry:
         db.add = MagicMock()
         db.commit = AsyncMock()
         db.rollback = AsyncMock()
-        db.refresh = AsyncMock()
+        
+        # Mock refresh to simulate auto-increment id assignment
+        async def mock_refresh(obj):
+            obj.id = 1
+        
+        db.refresh = mock_refresh
         
         run_create = WorkerRunCreate(
             worker_id="worker-123",
@@ -133,7 +138,12 @@ class TestWorkerRouterRetry:
             None  # Success
         ])
         db.rollback = AsyncMock()
-        db.refresh = AsyncMock()
+        
+        # Mock refresh to simulate auto-increment id assignment
+        async def mock_refresh(obj):
+            obj.id = 1
+        
+        db.refresh = mock_refresh
         
         run_create = WorkerRunCreate(
             worker_id="worker-123",
@@ -205,7 +215,12 @@ class TestWorkerRouterRetry:
             None  # Success
         ])
         db.rollback = AsyncMock()
-        db.refresh = AsyncMock()
+        
+        # Mock refresh to simulate auto-increment id assignment
+        async def mock_refresh(obj):
+            obj.id = 1
+        
+        db.refresh = mock_refresh
         
         run_create = WorkerRunCreate(
             worker_id="worker-123",
