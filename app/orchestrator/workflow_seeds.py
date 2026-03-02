@@ -253,7 +253,7 @@ DEFAULT_WORKFLOWS = [
             {
                 "id": "spawn_writer",
                 "type": "spawn_agent",
-                "config": {"agent_type": "writer"},
+                "config": {"agent_type": "writer", "model_tier": "small"},
                 "on_success": "done",
                 "on_failure": {"retry": 1, "abort_on": ["spawn_error"]},
             },
