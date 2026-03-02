@@ -613,17 +613,20 @@ class WorkerManager:
                 error_msg = f"sessions_spawn_failed: {data}"
                 error_type = classify_error_type(error_msg, data)
                 
-                await _safe_log_usage_event(
-                    self.db,
-                    source="orchestrator-spawn",
-                    model=model,
-                    route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                    task_type="inbox" if "inbox" in label else "task_execution",
-                    budget_lane=budget_lane,
-                    status="error",
-                    error_code="sessions_spawn_failed",
-                    metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
-                )
+                try:
+                    await asyncio.wait_for(_safe_log_usage_event(
+                        self.db,
+                        source="orchestrator-spawn",
+                        model=model,
+                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
+                        task_type="inbox" if "inbox" in label else "task_execution",
+                        budget_lane=budget_lane,
+                        status="error",
+                        error_code="sessions_spawn_failed",
+                        metadata={"label": label, "agent_id": agent_id, "error_type": error_type},
+                    ), timeout=5.0)
+                except Exception:
+                    pass
                 logger.error(
                     "[GATEWAY] sessions_spawn failed",
                     extra={"gateway": {"model": model, "response": data, "error_type": error_type}},
@@ -637,17 +640,20 @@ class WorkerManager:
                 error_msg = f"sessions_spawn_not_accepted: {result}"
                 error_type = classify_error_type(error_msg, result)
                 
-                await _safe_log_usage_event(
-                    self.db,
-                    source="orchestrator-spawn",
-                    model=model,
-                    route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                    task_type="inbox" if "inbox" in label else "task_execution",
-                    budget_lane=budget_lane,
-                    status="error",
-                    error_code="sessions_spawn_not_accepted",
-                    metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
-                )
+                try:
+                    await asyncio.wait_for(_safe_log_usage_event(
+                        self.db,
+                        source="orchestrator-spawn",
+                        model=model,
+                        route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
+                        task_type="inbox" if "inbox" in label else "task_execution",
+                        budget_lane=budget_lane,
+                        status="error",
+                        error_code="sessions_spawn_not_accepted",
+                        metadata={"label": label, "agent_id": agent_id, "details": details, "error_type": error_type},
+                    ), timeout=5.0)
+                except Exception:
+                    pass
                 logger.error(
                     "[GATEWAY] sessions_spawn not accepted",
                     extra={"gateway": {"model": model, "result": result, "error_type": error_type}},
