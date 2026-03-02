@@ -73,6 +73,7 @@ _DEFAULT_PROJECT_POLICY: dict[str, str] = {
     # App projects — allow local but not pinned first (cloud preferred for iOS code quality)
     "grandmas-stories": "allowed",
     "flock-master": "preferred",
+    "apps": "preferred",
 }
 
 # Name-based parameter size hints for LM Studio models (no metadata from API).
