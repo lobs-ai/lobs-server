@@ -61,7 +61,8 @@ class WorkerGateway:
                             # Cloud models get the full 15 min window.
                             "runTimeoutSeconds": 480 if (model or "").startswith(("lmstudio/", "ollama/")) else 900,
                             "cleanup": "keep",
-                            "label": label
+                            "label": label,
+                            "delivery": {"mode": "none"},
                         }
                     },
                     timeout=aiohttp.ClientTimeout(total=30)
@@ -95,6 +96,7 @@ class WorkerGateway:
                                     "runTimeoutSeconds": 480 if (model or "").startswith(("lmstudio/", "ollama/")) else 900,
                                     "cleanup": "keep",
                                     "label": label,
+                                    "delivery": {"mode": "none"},
                                 }
                             },
                             timeout=aiohttp.ClientTimeout(total=30)
