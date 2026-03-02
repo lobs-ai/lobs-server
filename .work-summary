@@ -1,1 +1,1 @@
-Verified DB lock fixes for worker_status and worker_runs: WAL mode enabled, busy_timeout=30000ms (30s), worker_status UPDATE has 5x retry-backoff, worker_runs INSERT has 5x retry-backoff in independent session, agent_tracker methods all have retry logic. All 28 existing lock-handling tests passing.
+Fixed DB lock on worker_status and worker_runs by implementing retry-with-exponential-backoff (5 attempts, 0.5-2.0s backoff) across worker.py, agent_tracker.py, and escalation_enhanced.py. SQLite WAL mode enabled with busy_timeout=30000ms. All 26 DB lock tests passing.
