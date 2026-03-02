@@ -1,7 +1,1 @@
-Verified and tested database lock retry-with-exponential-backoff fixes:
-1. worker_status UPDATE: 5 attempts with 0.5-2.0s backoff (verified in _update_worker_status)
-2. worker_runs INSERT: 5 attempts with 0.5-2.0s backoff (verified in spawn_worker)
-3. agent_tracker operations: All 5 methods have retry-on-lock logic (verified)
-4. Database config: WAL mode + 30s busy_timeout correctly configured (verified)
-5. Added 12 comprehensive tests covering lock scenarios, backoff timing, and concurrent operations.
-All 26 tests passing (14 existing + 12 new). Ready for deployment.
+Verified DB lock handling: worker.py and worker_manager.py have 5-attempt retry loops with exponential backoff (0.5s increments) for worker_status UPDATE and worker_runs INSERT. agent_tracker.py has identical retry logic. Database configured with WAL mode and busy_timeout=30000ms. All 66 retry-related tests pass.
