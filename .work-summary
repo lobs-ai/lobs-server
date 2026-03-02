@@ -1,1 +1,1 @@
-Session cleanup fix verified: sessions_kill replaced with sessions.delete WebSocket API in prior commits. All 19 session cleanup tests pass. task-router and code-task/research-task cleanup nodes have correct session_refs. No further changes needed.
+Session cleanup fix verified: delete_session() uses Gateway WebSocket sessions.delete (not sessions_kill). All session_refs in workflow_seeds.py are correct. 17 tests pass.
