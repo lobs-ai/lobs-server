@@ -7,6 +7,10 @@ if os.environ.get("LOBS_API_URL", "").startswith("http://localhost"):
         "Unset LOBS_API_URL or use ASGITransport only."
     )
 
+# Disable orchestrator BEFORE any app imports — prevents background engine
+# from starting during lifespan and hitting the real DB / causing mock leaks.
+os.environ["ORCHESTRATOR_ENABLED"] = "false"
+
 """Shared test fixtures and configuration."""
 
 import pytest

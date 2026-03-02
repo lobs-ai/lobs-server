@@ -1,1 +1,1 @@
-Fixed session cleanup: delete_session() uses Gateway WebSocket sessions.delete API (not non-existent sessions_kill). workflow_seeds.py cleanup nodes include session_refs. All 19 session/worker tests pass.
+Task already complete from prior run. sessions_kill removed, delete_session() uses Gateway WebSocket sessions.delete API, workflow_seeds cleanup nodes have session_refs. All 19 tests pass.
