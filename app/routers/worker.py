@@ -59,21 +59,43 @@ async def update_worker_status(
     status_update: WorkerStatusUpdate,
     db: AsyncSession = Depends(get_db)
 ) -> WorkerStatus:
-    """Update worker status."""
-    result = await db.execute(select(WorkerStatusModel).where(WorkerStatusModel.id == 1))
-    status = result.scalar_one_or_none()
+    """Update worker status with retry-on-lock logic."""
+    import asyncio
+    import logging
     
-    if not status:
-        status = WorkerStatusModel(id=1, **status_update.model_dump(exclude_unset=True))
-        db.add(status)
-    else:
-        update_data = status_update.model_dump(exclude_unset=True)
-        for key, value in update_data.items():
-            setattr(status, key, value)
+    logger = logging.getLogger(__name__)
     
-    await db.flush()
-    await db.refresh(status)
-    return WorkerStatus.model_validate(status)
+    # Retry with exponential backoff: helps when multiple requests hit DB simultaneously
+    for _attempt in range(5):
+        try:
+            if _attempt > 0:
+                await asyncio.sleep(_attempt * 0.5)
+            
+            result = await db.execute(select(WorkerStatusModel).where(WorkerStatusModel.id == 1))
+            status = result.scalar_one_or_none()
+            
+            if not status:
+                status = WorkerStatusModel(id=1, **status_update.model_dump(exclude_unset=True))
+                db.add(status)
+            else:
+                update_data = status_update.model_dump(exclude_unset=True)
+                for key, value in update_data.items():
+                    setattr(status, key, value)
+            
+            await db.commit()
+            await db.refresh(status)
+            return WorkerStatus.model_validate(status)
+        
+        except Exception as e:
+            if _attempt < 4:
+                logger.debug("[WORKER_STATUS] Update failed (attempt %d/5): %s, retrying...", _attempt + 1, e)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+            else:
+                logger.error("[WORKER_STATUS] Failed to update worker status after 5 attempts: %s", e, exc_info=True)
+                raise
 
 
 @router.get("/history")
@@ -139,9 +161,31 @@ async def create_worker_run(
     run: WorkerRunCreate,
     db: AsyncSession = Depends(get_db)
 ) -> WorkerRun:
-    """Create a new worker run record."""
-    db_run = WorkerRunModel(**run.model_dump())
-    db.add(db_run)
-    await db.flush()
-    await db.refresh(db_run)
-    return WorkerRun.model_validate(db_run)
+    """Create a new worker run record with retry-on-lock logic."""
+    import asyncio
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    # Retry with exponential backoff: helps when multiple requests hit DB simultaneously
+    for _attempt in range(5):
+        try:
+            if _attempt > 0:
+                await asyncio.sleep(_attempt * 0.5)
+            
+            db_run = WorkerRunModel(**run.model_dump())
+            db.add(db_run)
+            await db.commit()
+            await db.refresh(db_run)
+            return WorkerRun.model_validate(db_run)
+        
+        except Exception as e:
+            if _attempt < 4:
+                logger.debug("[WORKER_RUN] Create failed (attempt %d/5): %s, retrying...", _attempt + 1, e)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+            else:
+                logger.error("[WORKER_RUN] Failed to create worker run after 5 attempts: %s", e, exc_info=True)
+                raise
