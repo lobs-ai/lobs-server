@@ -284,14 +284,14 @@ DEFAULT_WORKFLOWS = [
                 "type": "cleanup",
                 "config": {
                     "session_refs": [
-                        "spawn_programmer.output.childSessionKey",
-                        "spawn_programmer_fix_1.output.childSessionKey",
-                        "spawn_programmer_fix_2.output.childSessionKey",
-                        "spawn_researcher.output.childSessionKey",
-                        "spawn_writer.output.childSessionKey",
-                        "spawn_architect.output.childSessionKey",
-                        "spawn_reviewer.output.childSessionKey",
-                        "spawn_inbox.output.childSessionKey",
+                        "spawn_programmer.childSessionKey",
+                        "spawn_programmer_fix_1.childSessionKey",
+                        "spawn_programmer_fix_2.childSessionKey",
+                        "spawn_researcher.childSessionKey",
+                        "spawn_writer.childSessionKey",
+                        "spawn_architect.childSessionKey",
+                        "spawn_reviewer.childSessionKey",
+                        "spawn_inbox.childSessionKey",
                     ]
                 },
             },
@@ -503,7 +503,7 @@ DEFAULT_WORKFLOWS = [
                 "type": "cleanup",
                 "config": {
                     "session_refs": [
-                        "write_code.output.childSessionKey",
+                        "write_code.childSessionKey",
                     ]
                 },
             },
@@ -533,7 +533,7 @@ DEFAULT_WORKFLOWS = [
                 "type": "cleanup",
                 "config": {
                     "session_refs": [
-                        "research.output.childSessionKey",
+                        "research.childSessionKey",
                     ]
                 },
             },
