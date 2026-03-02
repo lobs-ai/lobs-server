@@ -1,153 +1,147 @@
-# Stuck Task Auto-Escalation Design
+# Design: Stuck Task Auto-Escalation
 
-**Status:** Ready for implementation  
+**Task ID:** 6538EC78-BF72-4E83-A11F-770BC51AA88B  
 **Date:** 2026-03-01  
-**Task ID:** 6538EC78-BF72-4E83-A11F-770BC51AA88B
+**Status:** Ready for implementation
 
 ---
 
-## Problem
+## Problem Statement
 
-Tasks can get stuck `in_progress` indefinitely with no signal. The monitor detects stuck tasks but:
+Tasks can enter `work_state == "in_progress"` and stay there indefinitely with no signal if a worker crashes or gets stuck. The orchestrator today (`MonitorEnhanced.check_stuck_tasks`) detects stuck tasks but has several problems:
 
-1. **Skips tasks with active workflow runs** — the incident case (gs-13-polish stuck at `spawn_programmer`) had a running WorkflowRun, so it was invisible to the existing check.
-2. **No label/prefix filtering** — reflection/sweep/internal tasks would create noisy false alerts.
-3. **Current thresholds are 15min/1h** — too aggressive for the new 2h human-review threshold.
-4. **No configurable auto-reset** — after 4h with no human action, should revert to `not_started`.
+1. **Threshold too aggressive** — fires at 15 minutes, creating noise for legitimately long tasks
+2. **Immediately moves to `blocked`** — hides the task from the active queue with no human-visible reason
+3. **No deduplication** — fires a new inbox alert every engine tick (every 10s) once a task crosses the threshold
+4. **No exclusion of internal tasks** — reflection/sweep/diagnostic/inbox-processing tasks are internal and noisy if escalated
 
----
-
-## Solution
-
-New service: `app/services/stuck_task_escalator.py` — `StuckTaskEscalator`.
-
-Called once per engine monitor cycle (same cadence as `monitor_enhanced.run_full_check()`).
-
-### Detection Logic
-
-Two stuck conditions (both require `work_state == 'in_progress'`):
-
-**Case A — No workflow run:**  
-`updated_at < now - flag_hours` AND no active WorkflowRun for the task.  
-This is the existing path (workers crash silently).
-
-**Case B — Stuck workflow run:**  
-A WorkflowRun exists in `status=running` AND `workflow_run.updated_at < now - flag_hours`.  
-This catches spawn nodes waiting forever (the gs-13-polish incident pattern).
-
-### Filtering (skip these tasks)
-
-Skip if any of:
-- `task.agent` is `"reflection"` or `"sweep"`
-- `task.title` starts with `[reflection]`, `[sweep]`, `[internal]`, or `[diagnostic]` (case-insensitive)
-- `task.project_id` in a configurable skip-list (OrchestratorSetting `stuck_escalation_skip_projects`)
-
-### Deduplication
-
-No new DB columns. Check InboxItems: if an InboxItem with `id` starting with `stuck_{task.id}_` was created within the last `flag_hours * 2` hours, skip. Query: `InboxItem.id.like(f"stuck_{task.id}_%")` with `modified_at` filter.
-
-### State Transitions
-
-**At flag_hours (default 2h):** Create InboxItem alert. Do NOT change `work_state` — leave it `in_progress`. Cancelling the workflow is too destructive without human review.
-
-**At reset_hours (default 4h):** If task is still `in_progress` AND alert was previously created → reset `work_state` to `not_started`, set `failure_reason = "Auto-reset: stuck in_progress for {N}h"`. Also cancel any active WorkflowRun (set status=`cancelled`).
-
-### Configuration
-
-Settings stored in `OrchestratorSetting` table:
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `stuck_escalation_flag_hours` | `2` | Hours before creating inbox alert |
-| `stuck_escalation_reset_hours` | `4` | Hours before auto-reset to not_started (0 = disabled) |
-| `stuck_escalation_skip_projects` | `[]` | Project IDs to exclude |
-
-### Inbox Alert Format
-
-```
-Title: "⏰ Task stuck in_progress for {Xh}: {task.title[:60]}"
-
-Body:
-Task **{task.id[:8]}** ({task.title}) has been `in_progress` for {Xh Ym} with no update.
-
-- **Project:** {project_id}
-- **Last updated:** {updated_at ISO}
-- **Stuck type:** no_worker | stuck_workflow_run
-- **Workflow run:** {run.id[:8] if applicable}
-
-If no action is taken, the task will be auto-reset to `not_started` at {reset_time}.
-```
+The incident with gs-13-polish stuck at spawn_programmer for 30+ min was detected but not escalated to human review.
 
 ---
 
-## Architecture
+## Proposed Solution
 
-```
-engine._monitor_loop()
-  ├─ monitor_enhanced.run_full_check()      ← existing
-  └─ stuck_task_escalator.check(db)         ← NEW (called after monitor)
+Enhance `MonitorEnhanced.check_stuck_tasks()` to implement a two-tier response:
 
-StuckTaskEscalator.check(db):
-  1. Load config from OrchestratorSetting (flag_hours, reset_hours, skip_projects)
-  2. Query: in_progress tasks updated > flag_hours ago
-  3. Filter: skip reflection/sweep/internal by agent field + title prefix
-  4. For each task: determine stuck_type (Case A: no run, Case B: stuck run)
-  5. Dedup: skip if InboxItem with stuck_{task.id}_ exists and is recent
-  6. Create InboxItem alert
-  7. Auto-reset: if > reset_hours AND alert exists, reset + cancel workflow run
-  8. Return {flagged: int, reset: int}
-```
+| Tier | Threshold | Action |
+|------|-----------|--------|
+| Flag | 2h in_progress with no update | Create inbox item (once, deduplicated) |
+| Auto-reset | 4h (configurable, disabled by default) | Reset to `not_started` + inbox note |
 
----
+### Key design decisions
 
-## Tradeoffs
+**Deduplication via in-memory set**: `_alerted_task_ids: set[str]` on `MonitorEnhanced`. Resets on server restart — acceptable, since a stuck task re-alerting after restart is fine.
 
-**Why not modify existing `check_stuck_tasks` in monitor_enhanced.py?**  
-The existing check (15min threshold, kill-worker behavior) serves fast worker crash recovery. The 2h human-review escalation is a different concern. Mixing them complicates the monitor. Separate service = separate concerns, easier to test.
+**Threshold change**: 15m → 2h. Explicit requirement. Old threshold was too noisy.
 
-**Why no new DB column for `stuck_flagged_at`?**  
-InboxItem dedup via `id` prefix is sufficient and avoids a migration. If we need richer state later, add the column then.
+**Auto-reset is configurable via OrchestratorSetting**: Key `stuck_task_policy`, field `auto_reset_hours` (default 0 = disabled). Operator can enable via API without code changes.
 
-**Why not change `work_state` to `blocked` at flag time?**  
-`blocked` means dependency blocking. Stuck is different — the task hasn't been explicitly blocked, just silently stalled. Leaving it `in_progress` with an alert keeps the human in control of the transition.
+**Exclusion filter**: Skip tasks where title starts with `reflection`/`sweep`/`diagnostic`/`inbox-processing`/`daily ops brief`, or `task.agent` is in `("reflection", "sweep", "diagnostic")`.
 
-**Why cancel WorkflowRun on auto-reset?**  
-A running WorkflowRun prevents re-spawn. Cancelling it enables clean re-queue. Only done at `reset_hours` after the human had `flag_hours` window to intervene.
-
----
-
-## Testing Strategy
-
-1. **Unit: filter logic** — tasks with agent=reflection/sweep, or title prefix [internal]/[sweep]/[reflection]/[diagnostic] are skipped
-2. **Unit: dedup** — second call within window doesn't create second inbox item
-3. **Unit: flag threshold** — tasks < 2h don't trigger; tasks ≥ 2h do
-4. **Unit: reset threshold** — tasks ≥ 4h get reset to not_started + WorkflowRun cancelled
-5. **Integration: Case A** — in_progress task with no WorkflowRun triggers after 2h
-6. **Integration: Case B** — in_progress task with stuck WorkflowRun (running but stale) triggers after 2h
-7. **Integration: config** — OrchestratorSetting overrides respected
+**Do NOT move to `blocked` on flag**: The current code sets `work_state = "blocked"` in `_mark_task_stuck`. This hides the task from scheduling and confuses state machines. Change: only create the inbox item, don't touch `work_state`. The human decides.
 
 ---
 
 ## Implementation Plan
 
-### Task 1 — Core service (medium)
-Create `app/services/stuck_task_escalator.py`:
-- `StuckTaskEscalator` class with `async def check(db) -> dict`
-- Config loading from OrchestratorSetting with hardcoded defaults
-- Filter, detect, dedup, alert, reset logic as specified
-- Tests in `tests/test_stuck_task_escalator.py`
+### Task 1 (Medium): Update MonitorEnhanced stuck task logic
 
-### Task 2 — Engine wiring (small)
-In `app/orchestrator/engine.py`:
-- Import `StuckTaskEscalator`, instantiate once
-- After `monitor_enhanced.run_full_check()`, call `await stuck_task_escalator.check(db)`
-- Log: `[ENGINE] Stuck escalation: flagged={n}, reset={n}`
-- Wrap in try/except (escalator errors must not kill engine loop)
+**File:** `app/orchestrator/monitor_enhanced.py`
+
+1. In `__init__`, add:
+   - `self._alerted_task_ids: set[str] = set()`
+   - `self._flag_hours: float = 2.0`
+   - `self._auto_reset_hours: float = 0.0`  (0 = disabled)
+   
+2. Change `self.stuck_timeout` from 900 to 7200 (2h)
+
+3. In `check_stuck_tasks()`, add exclusion filter:
+   ```python
+   INTERNAL_PREFIXES = ("reflection", "sweep", "diagnostic", "inbox-processing", "daily ops brief")
+   INTERNAL_AGENTS = {"reflection", "sweep", "diagnostic"}
+   
+   for task in tasks:
+       # Skip internal/system tasks
+       if any(task.title.lower().startswith(p) for p in INTERNAL_PREFIXES):
+           continue
+       if task.agent in INTERNAL_AGENTS:
+           continue
+       
+       age_seconds = (now - task.updated_at).total_seconds()
+       
+       if task.id not in self._alerted_task_ids:
+           self._alerted_task_ids.add(task.id)
+           await self._mark_task_stuck(task, age_seconds)  # inbox item only
+       elif self._auto_reset_hours > 0 and age_seconds >= self._auto_reset_hours * 3600:
+           await self._auto_reset_task(task, age_seconds)
+           # Remove from alerted so it can re-alert if stuck again
+           self._alerted_task_ids.discard(task.id)
+   ```
+
+4. Update `_mark_task_stuck()`:
+   - Remove `task.work_state = "blocked"` — do NOT change work_state
+   - Remove `task.failure_reason = ...` — do NOT modify task
+   - Keep inbox item creation, update title/content to match spec:
+     - Title: `"⏰ Task appears stuck: {task.title[:60]}"`
+     - Content: `"Task {task.id} appears stuck (in_progress for {hours:.1f}h with no update). Project: {task.project_id}. Manual review required."`
+
+5. Add `_auto_reset_task()` method:
+   ```python
+   async def _auto_reset_task(self, task: Task, age_seconds: float) -> None:
+       task.work_state = "not_started"
+       task.updated_at = datetime.now(timezone.utc)
+       hours = age_seconds / 3600
+       alert_id = f"stuck_reset_{task.id}_{int(datetime.now(timezone.utc).timestamp())}"
+       alert = InboxItem(
+           id=alert_id,
+           title=f"🔄 Task auto-reset: {task.title[:60]}",
+           content=f"Task {task.id} was automatically reset to not_started after {hours:.1f}h with no update.",
+           modified_at=datetime.now(timezone.utc),
+           is_read=False,
+           summary=f"Task {task.id[:8]} auto-reset after {int(hours)}h stuck"
+       )
+       self.db.add(alert)
+       await self.db.commit()
+       logger.warning("[MONITOR] Auto-reset stuck task %s after %.1fh", task.id[:8], hours)
+   ```
+
+6. In `run_full_check()`, before calling `check_stuck_tasks()`, load policy from DB:
+   ```python
+   policy_setting = await self.db.get(OrchestratorSetting, "stuck_task_policy")
+   policy = policy_setting.value if (policy_setting and isinstance(policy_setting.value, dict)) else {}
+   self._flag_hours = float(policy.get("flag_hours", 2.0))
+   self._auto_reset_hours = float(policy.get("auto_reset_hours", 0))
+   self.stuck_timeout = int(self._flag_hours * 3600)
+   ```
+
+### Task 2 (Small): Tests
+
+**File:** `tests/test_monitor_enhanced.py` (create or extend)
+
+Test cases:
+- Task updated 1h ago → NOT flagged
+- Task updated 3h ago → flagged, inbox item created, work_state unchanged
+- Same task checked again → NOT re-flagged (deduplication)
+- Task with title "reflection cycle" → NOT flagged (exclusion)
+- Task with agent="sweep" → NOT flagged (exclusion)
+- Task updated 5h ago with auto_reset_hours=4 → auto-reset to not_started + inbox item
+- After auto-reset, task can be re-alerted if it gets stuck again
 
 ---
 
-## Files
+## Tradeoffs
 
-- **CREATE** `app/services/stuck_task_escalator.py`
-- **CREATE** `tests/test_stuck_task_escalator.py`
-- **MODIFY** `app/orchestrator/engine.py` — wire in escalator
+**In-memory dedup vs DB-persisted**: In-memory is simpler, no schema change. Acceptable since re-alerting after restart is fine behavior. A task that was stuck before restart is still stuck — human should see it again.
+
+**Not changing work_state**: Previous code set `blocked` which removes tasks from active scheduling. That's too aggressive for what's essentially a monitoring signal. Human should decide what to do.
+
+**OrchestratorSetting for config**: Consistent with how budget-lanes and other policies are configured. No code change needed to tune behavior.
+
+---
+
+## Files Changed
+
+- `app/orchestrator/monitor_enhanced.py`
+- `tests/test_monitor_enhanced.py` (create or extend)
+
+No schema changes required.

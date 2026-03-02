@@ -1161,9 +1161,15 @@ class WorkerManager:
         agent_type = worker_info.agent_type
         task_id_short = task_id[:8]
         
-        # Remove from tracking
-        self.active_workers.pop(worker_id, None)
-        self.project_locks.pop(project_id, None)
+        # NOTE: active_workers.pop is intentionally deferred until after the DB commit
+        # so that _check_spawn_agent keeps seeing the worker as active during the
+        # commit retry window and does not falsely declare the worker lost.
+        # project_locks.pop is also deferred to match.
+
+        if not succeeded:
+            # For failures, pop immediately so _check_spawn_agent can proceed with escalation.
+            self.active_workers.pop(worker_id, None)
+            self.project_locks.pop(project_id, None)
 
         if succeeded:
             # Success
@@ -1185,12 +1191,20 @@ class WorkerManager:
                 for _attempt in range(5):
                     try:
                         await self.db.commit()
+                        # Remove from tracking only after a successful commit so that
+                        # _check_spawn_agent still sees the worker as active if the
+                        # commit is retried (prevents false-failure / infinite loop).
+                        self.active_workers.pop(worker_id, None)
+                        self.project_locks.pop(project_id, None)
                         break
                     except Exception as _ce:
                         if _attempt < 4:
                             await asyncio.sleep(0.5 * (_attempt + 1))
                         else:
                             logger.error("[WORKER] Failed to persist task completion for %s after 5 attempts: %s", task_id_short, _ce)
+                            # Give up on the commit — pop now so the worker slot is released.
+                            self.active_workers.pop(worker_id, None)
+                            self.project_locks.pop(project_id, None)
                             try: await self.db.rollback()
                             except Exception: pass
 

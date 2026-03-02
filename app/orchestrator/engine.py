@@ -333,6 +333,37 @@ class OrchestratorEngine:
                 except Exception as _e:
                     logger.warning("[ENGINE] Startup recovery: session reattach failed (non-fatal): %s", _e)
 
+                # Final sweep: reset any remaining in_progress tasks with no live stub.
+                # These are orphaned — no worker is tracking them in memory or in the DB.
+                try:
+                    from sqlalchemy import text as _text
+                    orphaned = await db.execute(_text("""
+                        SELECT id FROM tasks
+                        WHERE work_state = 'in_progress' AND status = 'active'
+                        AND id NOT IN (
+                            SELECT DISTINCT task_id FROM worker_runs
+                            WHERE succeeded IS NULL
+                            AND started_at > datetime('now', '-4 hours')
+                            AND task_id IS NOT NULL
+                        )
+                    """))
+                    orphaned_ids = [row[0] for row in orphaned.fetchall()]
+                    if orphaned_ids:
+                        for oid in orphaned_ids:
+                            t = await db.get(TaskModel, oid)
+                            if t:
+                                t.work_state = "not_started"
+                                t.updated_at = datetime.now(timezone.utc)
+                        await db.commit()
+                        logger.info(
+                            "[ENGINE] Startup recovery: reset %d orphaned in_progress task(s) with no live stub",
+                            len(orphaned_ids),
+                        )
+                except Exception as _sweep_e:
+                    logger.warning("[ENGINE] Startup recovery orphan sweep failed (non-fatal): %s", _sweep_e)
+                    try: await db.rollback()
+                    except Exception: pass
+
         except Exception as e:
             logger.error("[ENGINE] Startup recovery failed: %s", e, exc_info=True)
 

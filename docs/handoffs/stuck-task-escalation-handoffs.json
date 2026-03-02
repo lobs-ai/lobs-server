@@ -2,35 +2,9 @@
   {
     "to": "programmer",
     "initiative": "stuck-task-escalation",
-    "title": "Implement StuckTaskEscalator service",
-    "context": "Tasks can get stuck in_progress indefinitely. Need a new service that detects stuck tasks (2h threshold) and creates inbox alerts, with optional auto-reset at 4h. See design: docs/stuck-task-escalation-design.md. The existing monitor_enhanced.check_stuck_tasks() skips tasks with active WorkflowRuns — this new service needs to catch BOTH tasks with no run (Case A) and tasks with a stale running workflow run (Case B).",
-    "acceptance": [
-      "StuckTaskEscalator.check(db) queries in_progress tasks older than flag_hours (default 2h)",
-      "Skips tasks where task.agent in ['reflection','sweep'] OR title starts with [reflection],[sweep],[internal],[diagnostic] (case-insensitive)",
-      "Case A: in_progress task with no active WorkflowRun → creates InboxItem after flag_hours",
-      "Case B: in_progress task with WorkflowRun in status=running but run.updated_at > flag_hours ago → creates InboxItem",
-      "Dedup: does not create second InboxItem if one with id matching stuck_{task_id}_ exists with modified_at within last flag_hours*2 hours",
-      "InboxItem id format: stuck_{task.id}_{unix_timestamp}; title: '⏰ Task stuck in_progress for {Xh}: {title[:60]}'",
-      "Auto-reset: if reset_hours > 0 and task has been stuck > reset_hours AND a prior alert exists, set work_state=not_started, failure_reason='Auto-reset: stuck in_progress for {N}h', cancel active WorkflowRuns (status=cancelled)",
-      "Config: reads flag_hours/reset_hours/skip_projects from OrchestratorSetting; defaults to 2/4/[]",
-      "check() returns dict: {flagged: int, reset: int, skipped: int}",
-      "All exceptions caught and logged — method never raises",
-      "Unit tests cover: filter logic, dedup, threshold edge cases (just under/just over), both Case A and B, auto-reset, config override"
-    ],
-    "files": ["docs/stuck-task-escalation-design.md"]
-  },
-  {
-    "to": "programmer",
-    "initiative": "stuck-task-escalation",
-    "title": "Wire StuckTaskEscalator into engine monitor loop",
-    "context": "After the core service (task 1) is implemented, wire it into the engine. The engine monitor loop calls monitor_enhanced.run_full_check() on each cycle — call stuck_task_escalator.check(db) right after. See docs/stuck-task-escalation-design.md and app/orchestrator/engine.py lines around 649-656.",
-    "acceptance": [
-      "StuckTaskEscalator instantiated once (at engine init or first monitor call)",
-      "Called after monitor_enhanced.run_full_check() in the monitor cycle",
-      "Result logged: '[ENGINE] Stuck escalation: flagged=N, reset=N'",
-      "Wrapped in try/except so errors never crash the engine loop",
-      "No regression: existing monitor behavior unchanged"
-    ],
-    "files": ["docs/stuck-task-escalation-design.md", "app/orchestrator/engine.py"]
+    "title": "Enhance MonitorEnhanced: 2h stuck task flagging with deduplication and auto-reset",
+    "context": "Tasks can get stuck in_progress indefinitely. MonitorEnhanced already detects stuck tasks but fires at 15min threshold, immediately blocks the task, and creates duplicate inbox items every tick. See design: docs/stuck-task-escalation-design.md. The existing check_stuck_tasks() and _mark_task_stuck() in app/orchestrator/monitor_enhanced.py need updating.",
+    "acceptance": "1. Tasks in_progress <2h are NOT flagged. 2. Tasks in_progress >2h create exactly ONE inbox item (subsequent ticks don't re-create). 3. work_state is NOT changed to blocked on flag — inbox item only. 4. Tasks with title starting with reflection/sweep/diagnostic/inbox-processing are excluded. 5. Tasks with agent in (reflection, sweep, diagnostic) are excluded. 6. When OrchestratorSetting key='stuck_task_policy' has auto_reset_hours set to non-zero, tasks stuck longer than that threshold are reset to not_started with their own inbox item. 7. All above covered by tests in tests/test_monitor_enhanced.py.",
+    "files": ["docs/stuck-task-escalation-design.md", "app/orchestrator/monitor_enhanced.py"]
   }
 ]

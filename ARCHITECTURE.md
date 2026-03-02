@@ -2,7 +2,10 @@
 
 High-level overview of the backend system design, data flow, and key components.
 
-**Last Updated:** 2026-02-25
+**Last Updated:** 2026-03-01
+
+**Recent Architectural Changes (Mar 1):**
+- **Stuck Task Auto-Escalation** — Two-tier stuck task response in `MonitorEnhanced`. Tasks `in_progress` with no update for >2h (configurable via `OrchestratorSetting` key `stuck_task_policy.flag_hours`) create a single inbox item "Task X appears stuck (in_progress for Yh with no update)". Deduplication via in-memory `_alerted_task_ids` set (resets on restart — intentional). Optional auto-reset to `not_started` after 4h (`policy.auto_reset_hours`, default 0 = disabled). Internal tasks excluded by title prefix (reflection/sweep/diagnostic/inbox-processing) or `task.agent` membership. `work_state` is NOT changed on flag — human decides. Design: [docs/stuck-task-escalation-design.md](docs/stuck-task-escalation-design.md).
 
 **Recent Architectural Changes (Feb 25):**
 - **PAW 'One-Minute Value Proof' Dashboard** — User-facing ROI layer answering "What did my agents save me today?". JSON data contract defined in `schemas/value_proof_event.json` (JSON Schema draft-07); four required fields: `minutes_saved`, `tasks_completed`, `decisions_required`, `risk_prevented`. Rendering spec, metric definitions, copy blocks, and programmer telemetry-mapping handoff in `docs/product/value-proof-dashboard.md`. Planned endpoint: `GET /api/value-proof/today`. No LLM required — pure aggregation over existing `tasks`, `inbox_items`, and `orchestrator_events` tables.

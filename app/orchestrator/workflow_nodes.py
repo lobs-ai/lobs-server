@@ -432,7 +432,38 @@ async def _check_spawn_agent(node_def, run, *, db, worker_manager):
                     db_task.status = "active"
                     await db.commit()
                 return NodeResult(status="failed", error="Session dead after restart, re-queuing task")
-        # No persisted session and not in active_workers — worker is truly gone
+        # No persisted session and not in active_workers.
+        # Before declaring failure, check two safety conditions:
+
+        # 1) Recently-succeeded WorkerRun: DB commit may have finished by now
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+        succeeded_result = await db.execute(
+            select(WorkerRun).where(
+                WorkerRun.task_id == task_id,
+                WorkerRun.succeeded.is_(True),
+                WorkerRun.ended_at >= recent_cutoff,
+            )
+        )
+        succeeded_run = succeeded_result.scalars().first()
+        if succeeded_run:
+            # Worker finished successfully but task state has not been committed yet.
+            # Treat as completed so we do not trigger escalation.
+            logger.info(
+                "[NODE:spawn_agent] Found recently-succeeded WorkerRun for task %s — treating as completed",
+                task_id[:8],
+            )
+            return NodeResult(status="completed", output={"task_status": "completed", "task_id": task_id})
+
+        # 2) Grace period: task was updated very recently — DB commit may still be in flight.
+        grace_cutoff = datetime.now(timezone.utc) - timedelta(seconds=60)
+        if db_task.updated_at and db_task.updated_at >= grace_cutoff:
+            logger.info(
+                "[NODE:spawn_agent] Task %s updated_at is recent (< 60s) — waiting for DB commit to settle",
+                task_id[:8],
+            )
+            return None  # still waiting
+
+        # Worker is truly gone
         return NodeResult(
             status="failed",
             output={"task_status": "in_progress_orphaned", "task_id": task_id},
