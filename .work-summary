@@ -1,7 +1,1 @@
-Fixed DB lock on worker_status and worker_runs INSERT with retry-with-backoff:
-1. auto_assigner.py: Added 5-attempt retry loop with 0.5s exponential backoff for task agent assignment commits
-2. capability_registry.py: Added 5-attempt retry loop for capability sync commits
-3. diagnostic_triggers.py: Added 5-attempt retry loops (4 locations) for all trigger event recording commits
-4. engine.py: Added 5-attempt retry loops for all unguarded commits in main event loop
-5. Verified database.py already has WAL mode + busy_timeout=30000ms set correctly
-6. All worker_status_retry tests pass (6/6); All new db_lock_fixes tests pass (8/8); Total: 14/14 tests passing.
+Verified DB lock fixes: WAL mode enabled, busy_timeout=30000ms, 15 retry-on-lock implementations in worker.py with 5 attempts + exponential backoff, agent_tracker.py protected, all 50 lock-related tests passing.
