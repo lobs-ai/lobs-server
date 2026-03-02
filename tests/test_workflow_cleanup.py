@@ -102,3 +102,28 @@ def test_workflow_seeds_session_refs_correct_paths():
 
     good = re.findall(r'["\'](\w+\.childSessionKey)["\']', content)
     assert good, "No correct session_ref paths found"
+
+
+def test_doc_upkeep_has_session_refs():
+    """doc-upkeep cleanup node must use session_refs, not delete_session: True."""
+    import ast
+    with open("app/orchestrator/workflow_seeds.py") as f:
+        content = f.read()
+
+    # Find doc-upkeep workflow section
+    start = content.find('"name": "doc-upkeep"')
+    assert start != -1, "doc-upkeep workflow not found"
+    
+    # Get the section after doc-upkeep
+    section = content[start:start+2000]
+    
+    # Must have session_refs with spawn_writer
+    assert "spawn_writer.childSessionKey" in section, (
+        "doc-upkeep cleanup must include session_refs with spawn_writer.childSessionKey"
+    )
+    
+    # Must NOT use delete_session: True as the sole cleanup mechanism
+    # (it's OK if delete_session appears, but session_refs must be there)
+    assert '"session_refs"' in section or "'session_refs'" in section, (
+        "doc-upkeep cleanup must use session_refs"
+    )

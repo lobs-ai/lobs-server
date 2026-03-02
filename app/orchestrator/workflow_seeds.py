@@ -901,7 +901,13 @@ DEFAULT_WORKFLOWS = [
                 "on_success": "done",
                 "on_failure": {"retry": 0, "abort_on": ["spawn_error"]},
             },
-            {"id": "done", "type": "cleanup", "config": {"delete_session": True}},
+            {
+                "id": "done",
+                "type": "cleanup",
+                "config": {
+                    "session_refs": ["spawn_writer.childSessionKey"],
+                },
+            },
         ],
         "edges": [],
         "metadata": {"author": "lobs", "category": "upkeep", "system": True},

@@ -179,26 +179,25 @@ class OrchestratorEngine:
                 # workers for them on the next tick. Aggressively resetting causes
                 # tasks to be re-queued and lose progress.
 
-                # 3. Cancel truly stale workflow runs (running for > 2 hours with no update)
-                # Don't cancel recent runs — they may have been mid-execution before restart
+                # 3. Cancel ALL running/pending workflow runs — no sessions survive restart.
+                # Previous approach only cancelled >2h old runs, leaving orphaned runs
+                # that blocked dedup and caused duplicate sessions on re-trigger.
                 from app.models import WorkflowRun
-                stale_threshold = datetime.now(timezone.utc) - timedelta(hours=2)
                 wf_result = await db.execute(
                     select(WorkflowRun).where(
-                        WorkflowRun.status == "running",
-                        WorkflowRun.updated_at < stale_threshold,
+                        WorkflowRun.status.in_(["running", "pending"]),
                     )
                 )
                 stale_runs = wf_result.scalars().all()
                 if stale_runs:
                     for wf_run in stale_runs:
-                        wf_run.status = "failed"
-                        wf_run.error = "Stale: cancelled during startup recovery (>2h without update)"
+                        wf_run.status = "cancelled"
+                        wf_run.error = "Cancelled: server restart (no sessions survive restart)"
                         wf_run.finished_at = datetime.now(timezone.utc)
                         wf_run.updated_at = datetime.now(timezone.utc)
                     await db.commit()
                     logger.info(
-                        "[ENGINE] Startup recovery: cancelled %d stale workflow run(s) (>2h old)",
+                        "[ENGINE] Startup recovery: cancelled %d orphaned workflow run(s)",
                         len(stale_runs),
                     )
                 # 3b. Cancel workflow runs for tasks that are already completed/cancelled
