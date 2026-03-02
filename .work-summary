@@ -1,1 +1,1 @@
-Session cleanup already fixed: sessions_kill removed, sessions.delete WS method used in worker_gateway.py. Cleanup nodes in workflow_seeds.py already use session_refs with childSessionKey. All 19 session/worker tests pass.
+Fixed session cleanup: delete_session() uses Gateway WebSocket sessions.delete API (not non-existent sessions_kill). workflow_seeds.py cleanup nodes include session_refs. All 19 session/worker tests pass.
