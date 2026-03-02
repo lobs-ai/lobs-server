@@ -2445,40 +2445,57 @@ class WorkerManager:
             return None
 
     async def get_worker_status(self) -> dict[str, Any]:
-        """Get current worker status summary."""
-        try:
-            result = await self.db.execute(
-                select(WorkerStatus).where(WorkerStatus.id == 1)
-            )
-            status = result.scalar_one_or_none()
+        """Get current worker status summary.
+        
+        Uses retry-on-lock logic to handle database contention under high concurrency.
+        """
+        for _attempt in range(5):
+            try:
+                if _attempt > 0:
+                    await asyncio.sleep(_attempt * 0.5)
+                
+                result = await self.db.execute(
+                    select(WorkerStatus).where(WorkerStatus.id == 1)
+                )
+                status = result.scalar_one_or_none()
 
-            if not status or not status.active:
+                if not status or not status.active:
+                    return {
+                        "busy": False,
+                        "active_count": 0,
+                        "current_task": None,
+                        "state": "idle"
+                    }
+
                 return {
-                    "busy": False,
-                    "active_count": 0,
-                    "current_task": None,
-                    "state": "idle"
+                    "busy": True,
+                    "active_count": len(self.active_workers),
+                    "current_task": status.current_task,
+                    "current_project": status.current_project,
+                    "worker_id": status.worker_id,
+                    "state": "working",
+                    "started_at": (
+                        status.started_at.isoformat() if status.started_at else None
+                    )
                 }
 
-            return {
-                "busy": True,
-                "active_count": len(self.active_workers),
-                "current_task": status.current_task,
-                "current_project": status.current_project,
-                "worker_id": status.worker_id,
-                "state": "working",
-                "started_at": (
-                    status.started_at.isoformat() if status.started_at else None
-                )
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to get worker status: {e}", exc_info=True)
-            return {
-                "busy": False,
-                "active_count": 0,
-                "error": str(e)
-            }
+            except Exception as e:
+                if _attempt < 4:
+                    logger.debug(
+                        "[WORKER] Failed to get worker status (attempt %d/5): %s, retrying...",
+                        _attempt + 1, e
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
+                else:
+                    logger.error(f"Failed to get worker status after 5 attempts: {e}", exc_info=True)
+                    return {
+                        "busy": False,
+                        "active_count": 0,
+                        "error": str(e)
+                    }
 
     async def shutdown(self, timeout: float = 300.0) -> None:
         """Gracefully shutdown all workers."""
