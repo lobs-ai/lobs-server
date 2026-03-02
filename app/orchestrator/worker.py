@@ -654,16 +654,20 @@ class WorkerManager:
                 )
                 return None, error_msg, error_type
 
-            await _safe_log_usage_event(
-                self.db,
-                source="orchestrator-spawn",
-                model=model,
-                route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
-                task_type="inbox" if "inbox" in label else "task_execution",
-                budget_lane=budget_lane,
-                status="success",
-                metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
-            )
+            # Log usage event — but don't let it block the spawn
+            try:
+                await asyncio.wait_for(_safe_log_usage_event(
+                    self.db,
+                    source="orchestrator-spawn",
+                    model=model,
+                    route_type=resolve_route_type(model, subscription_models=(routing_policy or {}).get("subscription_models", []), subscription_providers=(routing_policy or {}).get("subscription_providers", [])),
+                    task_type="inbox" if "inbox" in label else "task_execution",
+                    budget_lane=budget_lane,
+                    status="success",
+                    metadata={"label": label, "agent_id": agent_id, "run_id": details.get("runId")},
+                ), timeout=5.0)
+            except Exception as log_err:
+                logger.warning("[WORKER] Usage event logging failed (non-fatal): %s", log_err)
 
             return (
                 {
