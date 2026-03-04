@@ -95,3 +95,111 @@ async def test_decision_engine_suggests_non_proposer_agent(db_session):
 
     suggested = await InitiativeDecisionEngine(db_session).suggest_agent(initiative)
     assert suggested == "writer"
+
+
+@pytest.mark.asyncio
+async def test_decision_engine_reuses_task_for_same_title_and_agent_when_completed(db_session):
+    db_session.add(Project(id="lobs-server", title="Lobs Server", type="kanban", archived=False))
+
+    existing_task = Task(
+        id=str(uuid.uuid4()),
+        title="Investigate flaky orchestrator tests",
+        status="completed",
+        work_state="completed",
+        project_id="lobs-server",
+        owner="lobs",
+        agent="reviewer",
+        notes="done already",
+    )
+    db_session.add(existing_task)
+
+    initiative = AgentInitiative(
+        id=str(uuid.uuid4()),
+        proposed_by_agent="researcher",
+        title="Investigate flaky orchestrator tests",
+        description="Repeat check to ensure dedupe by title+agent works",
+        category="light_research",
+        status="lobs_review",
+        selected_agent="reviewer",
+        selected_project_id="lobs-server",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(initiative)
+    await db_session.commit()
+
+    result = await InitiativeDecisionEngine(db_session).decide(
+        initiative,
+        decision="approve",
+    )
+
+    assert result["status"] == "approved"
+    assert result["task_id"] == existing_task.id
+
+    matching_tasks = (
+        await db_session.execute(
+            Task.__table__.select().where(Task.title == "Investigate flaky orchestrator tests")
+        )
+    ).all()
+    assert len(matching_tasks) == 1
+
+
+@pytest.mark.asyncio
+async def test_decision_engine_skips_creation_when_artifact_path_exists(db_session, tmp_path):
+    db_session.add(Project(id="lobs-server", title="Lobs Server", type="kanban", archived=False))
+
+    artifact = tmp_path / "existing-output.md"
+    artifact.write_text("already built")
+
+    initiative = AgentInitiative(
+        id=str(uuid.uuid4()),
+        proposed_by_agent="writer",
+        title="Publish summary dashboard",
+        description=f"Create summary. artifact_path: {artifact}",
+        category="docs_sync",
+        status="lobs_review",
+        selected_agent="writer",
+        selected_project_id="lobs-server",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(initiative)
+    await db_session.commit()
+
+    result = await InitiativeDecisionEngine(db_session).decide(
+        initiative,
+        decision="approve",
+    )
+
+    assert result["status"] == "approved"
+    assert result["task_id"] is None
+
+    created = (
+        await db_session.execute(
+            Task.__table__.select().where(Task.title == "Publish summary dashboard")
+        )
+    ).all()
+    assert len(created) == 0
+
+
+@pytest.mark.asyncio
+async def test_decision_engine_rejects_approve_when_title_missing(db_session):
+    db_session.add(Project(id="lobs-server", title="Lobs Server", type="kanban", archived=False))
+
+    initiative = AgentInitiative(
+        id=str(uuid.uuid4()),
+        proposed_by_agent="researcher",
+        title=None,
+        description="Has description but no title",
+        category="light_research",
+        status="lobs_review",
+        selected_agent="reviewer",
+        selected_project_id="lobs-server",
+        created_at=datetime.now(timezone.utc),
+    )
+    db_session.add(initiative)
+    await db_session.commit()
+
+    with pytest.raises(ValueError, match="initiative title is required to create a task"):
+        await InitiativeDecisionEngine(db_session).decide(
+            initiative,
+            decision="approve",
+        )

@@ -68,6 +68,8 @@ from app.orchestrator.runtime_settings import (
     DEFAULT_RUNTIME_SETTINGS,
     SETTINGS_KEY_DIAG_AUTO_REMEDIATION,
     SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS,
+    SETTINGS_KEY_SPAWN_COUNT_THRESHOLD_DEFAULT,
+    spawn_count_threshold_key,
 )
 from app.services.usage import log_usage_event, resolve_route_type, infer_provider
 
@@ -191,6 +193,14 @@ class WorkerManager:
         task_id = task.get("id")
         if not task_id:
             logger.warning("Cannot spawn worker: task missing ID")
+            return False
+
+        # Guardrail: auto-block tasks that have been spawned too many times
+        # to prevent runaway spawn loops and cascading resource waste.
+        # Derive task type from shape field (falls back to agent_type, then "default")
+        task_type = task.get("shape") or agent_type or "default"
+        can_spawn = await self._increment_spawn_count_or_block(task_id, task_type=task_type)
+        if not can_spawn:
             return False
 
         # Check capacity
@@ -561,6 +571,110 @@ class WorkerManager:
                 exc_info=True
             )
             return False
+
+    async def _increment_spawn_count_or_block(self, task_id: str, *, task_type: str = "default") -> bool:
+        """Increment task spawn_count and auto-block if threshold reached.
+
+        Returns True when spawning is allowed, False when task is auto-blocked.
+        """
+        db_task = await self.db.get(Task, task_id)
+        if not db_task:
+            return True
+
+        current_spawn_count = int(getattr(db_task, "spawn_count", 0) or 0)
+        threshold = await self._get_spawn_threshold(task_type)
+        if current_spawn_count >= threshold:
+            logger.warning(
+                "[WORKER] Task %s reached spawn_count=%d (>=%d, type=%s) — auto-blocking to prevent spawn loop",
+                task_id[:8],
+                current_spawn_count,
+                threshold,
+                task_type,
+            )
+            await self._mark_task_spawn_blocked(db_task, current_spawn_count, threshold=threshold)
+            return False
+
+        db_task.spawn_count = current_spawn_count + 1
+        db_task.updated_at = datetime.now(timezone.utc)
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error(
+                        "[WORKER] Failed to increment spawn_count for %s after 5 attempts: %s",
+                        task_id[:8], _e,
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
+                    return False
+
+        return True
+
+
+    async def _get_spawn_threshold(self, task_type: str) -> int:
+        """Look up the spawn_count threshold for a given task type.
+
+        Resolution order:
+        1. DB setting for the specific task type  (e.g. "orchestrator.spawn_count.threshold.research")
+        2. DB setting for "orchestrator.spawn_count.threshold.default"
+        3. Hardcoded fallback of 3 (preserves original behaviour)
+        """
+        from app.models import OrchestratorSetting
+        from sqlalchemy import select as sa_select
+
+        specific_key = spawn_count_threshold_key(task_type)
+        default_key = SETTINGS_KEY_SPAWN_COUNT_THRESHOLD_DEFAULT
+
+        try:
+            result = await self.db.execute(
+                sa_select(OrchestratorSetting).where(
+                    OrchestratorSetting.key.in_([specific_key, default_key])
+                )
+            )
+            rows = {row.key: row.value for row in result.scalars().all()}
+            raw = rows.get(specific_key) or rows.get(default_key)
+            if raw is not None:
+                return int(raw)
+        except Exception as _e:
+            logger.debug("[WORKER] Could not read spawn threshold setting: %s", _e)
+
+        # Fallback: use in-memory default (avoids DB dependency on cold path)
+        return int(DEFAULT_RUNTIME_SETTINGS.get(default_key, 3))
+
+    async def _mark_task_spawn_blocked(self, db_task: Task, spawn_count: int, *, threshold: int = 3) -> None:
+        """Mark task blocked after excessive spawn attempts."""
+        db_task.work_state = "blocked"
+        db_task.status = "active"
+        db_task.finished_at = None
+        db_task.updated_at = datetime.now(timezone.utc)
+        db_task.failure_reason = (
+            f"Auto-blocked: spawn_count reached {spawn_count} (threshold: {threshold})"
+        )
+
+        for _attempt in range(5):
+            try:
+                await self.db.commit()
+                break
+            except Exception as _e:
+                if _attempt < 4:
+                    await asyncio.sleep(_attempt * 0.5)
+                    await self.db.rollback()
+                else:
+                    logger.error(
+                        "[WORKER] Failed to auto-block task %s after 5 attempts: %s",
+                        db_task.id[:8], _e,
+                    )
+                    try:
+                        await self.db.rollback()
+                    except Exception:
+                        pass
 
     async def _spawn_session(
         self,
@@ -1240,6 +1354,7 @@ class WorkerManager:
                 # Reset escalation on success
                 db_task.escalation_tier = 0
                 db_task.retry_count = 0
+                db_task.spawn_count = 0
                 for _attempt in range(5):
                     try:
                         await self.db.commit()
@@ -1986,13 +2101,20 @@ class WorkerManager:
                 decision = policy.decide(category, estimated_effort=effort_int)
 
                 proposed_owner = raw.get("owner_agent") or raw.get("suggested_owner_agent")
+                initiative_title = str(raw.get("title") or "").strip()
+                if not initiative_title:
+                    logger.warning(
+                        "[REFLECTION] Skipping initiative with blank title from agent=%s reflection=%s",
+                        agent_type, reflection.id,
+                    )
+                    continue
                 db.add(
                     AgentInitiative(
                         id=str(uuid.uuid4()),
                         proposed_by_agent=agent_type,
                         source_reflection_id=reflection.id,
                         owner_agent=(str(proposed_owner).strip().lower() if proposed_owner else None),
-                        title=str(raw.get("title") or "Untitled initiative"),
+                        title=initiative_title,
                         description=str(raw.get("description") or ""),
                         category=category or "unknown",
                         risk_tier=decision.risk_tier,

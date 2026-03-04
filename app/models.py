@@ -61,6 +61,7 @@ class Task(Base):
     # Escalation fields
     escalation_tier = Column(Integer, default=0)  # 0=none, 1=retry, 2=agent_switch, 3=diagnostic, 4=human
     retry_count = Column(Integer, default=0)
+    spawn_count = Column(Integer, default=0)
     failure_reason = Column(Text)
     last_retry_reason = Column(String)
 
@@ -318,6 +319,9 @@ class AgentReflection(Base):
     identity_adjustments = Column(JSON)
     created_at = Column(DateTime, default=func.now(), nullable=False)
     completed_at = Column(DateTime)
+    summary = Column(Text)
+    approved_by = Column(String)
+    feedback = Column(Text)
 
 
 class DiagnosticTriggerEvent(Base):

@@ -32,6 +32,19 @@ SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS = "orchestrator.diagnostics.auto_remedia
 SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER = "model_router.strict_coding_tier"
 SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA = "model_router.degrade_on_quota"
 
+# Spawn count guard thresholds — configurable per task type (shape/agent).
+# Default threshold applies when no task-type-specific key is set.
+# Per-type key format: "orchestrator.spawn_count.threshold.<task_type>"
+# Example: set "orchestrator.spawn_count.threshold.research" = 5 to allow
+# research tasks to spawn up to 5 times before being auto-blocked.
+SETTINGS_KEY_SPAWN_COUNT_THRESHOLD_DEFAULT = "orchestrator.spawn_count.threshold.default"
+
+
+def spawn_count_threshold_key(task_type: str) -> str:
+    """Return the runtime-settings key for a task-type-specific spawn threshold."""
+    return f"orchestrator.spawn_count.threshold.{task_type}"
+
+
 DEFAULT_RUNTIME_SETTINGS: dict[str, object] = {
     SETTINGS_KEY_REFLECTION_INTERVAL_SECONDS: 10800,
     SETTINGS_KEY_SWEEP_INTERVAL_SECONDS: 900,
@@ -54,4 +67,5 @@ DEFAULT_RUNTIME_SETTINGS: dict[str, object] = {
     SETTINGS_KEY_DIAG_REMEDIATION_MAX_TASKS: 3,
     SETTINGS_KEY_MODEL_ROUTER_STRICT_CODING_TIER: True,
     SETTINGS_KEY_MODEL_ROUTER_DEGRADE_ON_QUOTA: False,
+    SETTINGS_KEY_SPAWN_COUNT_THRESHOLD_DEFAULT: 3,
 }

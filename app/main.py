@@ -33,6 +33,7 @@ from app.routers import (
     calendar,
     agents,
     orchestrator_reflections,
+    reflections,
     orchestrator_admin,
     orchestrator_workers,
     backup,
@@ -177,6 +178,7 @@ app.include_router(calendar.router, prefix=settings.API_PREFIX, dependencies=[De
 app.include_router(text_dumps.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(agents.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(orchestrator_reflections.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
+app.include_router(reflections.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(orchestrator_admin.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(orchestrator_workers.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])
 app.include_router(backup.router, prefix=settings.API_PREFIX, dependencies=[Depends(require_auth)])

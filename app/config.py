@@ -8,7 +8,10 @@ class Settings:
     
     # Database
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "./data/lobs.db")
-    DATABASE_URL: str = f"sqlite+aiosqlite:///{DATABASE_PATH}"
+    DATABASE_URL: str = os.getenv(
+        "DATABASE_URL",
+        f"sqlite+aiosqlite:///{DATABASE_PATH}",
+    )
     
     # API
     API_PREFIX: str = "/api"

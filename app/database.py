@@ -3,74 +3,74 @@
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import declarative_base
+from sqlalchemy.pool import NullPool as _NullPool
 
 from app.config import settings
 
-# Create async engine
-# WAL mode allows concurrent reads during writes (prevents "database is locked")
-engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    future=True,
-    connect_args={"timeout": 30},
-    pool_size=10,
-    max_overflow=10,
-    pool_recycle=1800,  # Recycle connections every 30min to prevent leaks
-    pool_pre_ping=True,  # Verify connections before use
-)
+_is_sqlite = settings.DATABASE_URL.startswith("sqlite")
 
+# Engine kwargs differ between SQLite and PostgreSQL
+_common_kwargs = dict(echo=False, future=True)
 
-@event.listens_for(engine.sync_engine, "connect")
-def _set_sqlite_pragma(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    # Enable WAL mode for concurrent access
-    cursor.execute("PRAGMA journal_mode=WAL")
-    # Increase busy timeout to handle high contention (30 seconds)
-    cursor.execute("PRAGMA busy_timeout=30000")
-    # Use NORMAL sync for better performance (slightly less durable but good for our use case)
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    # Enable foreign keys
-    cursor.execute("PRAGMA foreign_keys=ON")
-    # Increase cache size for better performance
-    cursor.execute("PRAGMA cache_size=10000")
-    cursor.close()
+if _is_sqlite:
+    _engine_kwargs = {
+        **_common_kwargs,
+        "connect_args": {"timeout": 30},
+        "pool_size": 10,
+        "max_overflow": 10,
+        "pool_recycle": 1800,
+        "pool_pre_ping": True,
+    }
+else:
+    _engine_kwargs = {
+        **_common_kwargs,
+        "pool_size": 20,
+        "max_overflow": 20,
+        "pool_recycle": 1800,
+        "pool_pre_ping": True,
+    }
 
-# NullPool session factory for independent writes (avoids pool contention)
-from sqlalchemy.pool import NullPool as _NullPool
-_independent_engine = create_async_engine(
-    settings.DATABASE_URL,
-    echo=False,
-    future=True,
-    connect_args={"timeout": 30},
-    poolclass=_NullPool,
-)
+engine = create_async_engine(settings.DATABASE_URL, **_engine_kwargs)
 
-@event.listens_for(_independent_engine.sync_engine, "connect")
-def _set_independent_pragma(dbapi_conn, connection_record):
-    cursor = dbapi_conn.cursor()
-    # Enable WAL mode for concurrent access
-    cursor.execute("PRAGMA journal_mode=WAL")
-    # Increase busy timeout to handle high contention (30 seconds)
-    cursor.execute("PRAGMA busy_timeout=30000")
-    # Use NORMAL sync for better performance
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    # Enable foreign keys
-    cursor.execute("PRAGMA foreign_keys=ON")
-    # Increase cache size
-    cursor.execute("PRAGMA cache_size=10000")
-    cursor.close()
+if _is_sqlite:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA cache_size=10000")
+        cursor.close()
 
-# Independent session for fire-and-forget writes that shouldn't block the main pool
+# Independent engine for orchestrator (NullPool avoids contention)
+if _is_sqlite:
+    _independent_engine = create_async_engine(
+        settings.DATABASE_URL, echo=False, future=True,
+        connect_args={"timeout": 30}, poolclass=_NullPool,
+    )
+    @event.listens_for(_independent_engine.sync_engine, "connect")
+    def _set_independent_pragma(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.execute("PRAGMA cache_size=10000")
+        cursor.close()
+else:
+    # PostgreSQL: just use a separate small pool for orchestrator
+    _independent_engine = create_async_engine(
+        settings.DATABASE_URL, echo=False, future=True,
+        pool_size=5, max_overflow=5, pool_pre_ping=True,
+    )
+
 IndependentSessionLocal = async_sessionmaker(_independent_engine, expire_on_commit=False)
 
-# Create async session factory
 AsyncSessionLocal = async_sessionmaker(
-    engine,
-    class_=AsyncSession,
-    expire_on_commit=False,
+    engine, class_=AsyncSession, expire_on_commit=False,
 )
 
-# Base class for models
 Base = declarative_base()
 
 async def init_db():
@@ -79,12 +79,7 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 async def get_db() -> AsyncSession:
-    """Dependency for getting async database sessions.
-    
-    The async context manager (AsyncSessionLocal()) automatically closes the session,
-    so we don't need to explicitly call session.close(). This prevents double-close
-    errors that occur when the session is in an invalid state (e.g., after DB lock errors).
-    """
+    """Dependency for getting async database sessions."""
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -92,4 +87,3 @@ async def get_db() -> AsyncSession:
         except Exception:
             await session.rollback()
             raise
-        # The context manager automatically closes the session when exiting the with block

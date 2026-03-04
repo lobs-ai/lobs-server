@@ -9,13 +9,16 @@ Tier C: Lobs should escalate to Rafe (instruction-based, not enforced in code).
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
+import re
 import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AgentCapability, AgentInitiative, AgentReflection, InboxItem, InitiativeDecisionRecord, Project, Task
@@ -177,8 +180,11 @@ class InitiativeDecisionEngine:
             if initiative.status == "awaiting_rafe" and decided_by != "rafe":
                 raise PermissionError("only rafe can approve tier-C initiatives in awaiting_rafe status")
 
-        title = (revised_title or initiative.title or "Untitled initiative").strip()
+        title = (revised_title or initiative.title or "").strip()
         description = (revised_description or initiative.description or "").strip()
+
+        if decision == "approve" and not title:
+            raise ValueError("initiative title is required to create a task")
 
         initiative.selected_agent = selected_agent or await self.suggest_agent(initiative)
         initiative.selected_project_id = selected_project_id or await self._default_project_id()
@@ -186,14 +192,43 @@ class InitiativeDecisionEngine:
         initiative.decision_summary = decision_summary
         initiative.learning_feedback = learning_feedback
 
+        duplicate_task_id: str | None = None
+        skipped_due_to_artifact: str | None = None
         if decision == "approve":
-            task = await self._create_task_from_initiative(
-                initiative,
+            artifact_path = self._extract_artifact_path(description)
+            existing_task = await self._find_existing_task(
                 title=title,
-                description=description,
+                agent=initiative.selected_agent,
+                artifact_path=artifact_path,
             )
-            initiative.task_id = task.id
-            initiative.status = "approved"
+            if existing_task:
+                duplicate_task_id = existing_task.id
+                initiative.task_id = existing_task.id
+                initiative.status = "approved"
+                logger.info(
+                    "[DECISION] Skipping duplicate reflection-originated task creation for initiative %s; reusing task %s (%s, agent=%s)",
+                    initiative.id[:8],
+                    existing_task.id[:8],
+                    title,
+                    initiative.selected_agent,
+                )
+            elif artifact_path and os.path.exists(artifact_path):
+                skipped_due_to_artifact = artifact_path
+                initiative.task_id = None
+                initiative.status = "approved"
+                logger.info(
+                    "[DECISION] Skipping reflection-originated task creation for initiative %s; artifact already exists at %s",
+                    initiative.id[:8],
+                    artifact_path,
+                )
+            else:
+                task = await self._create_task_from_initiative(
+                    initiative,
+                    title=title,
+                    description=description,
+                )
+                initiative.task_id = task.id
+                initiative.status = "approved"
         elif decision == "defer":
             initiative.status = "deferred"
         else:
@@ -223,6 +258,8 @@ class InitiativeDecisionEngine:
             learning_feedback=learning_feedback,
             decision_summary=decision_summary,
             decided_by=decided_by,
+            duplicate_task_id=duplicate_task_id,
+            skipped_due_to_artifact=skipped_due_to_artifact,
         )
 
         # Commit with retry-on-lock logic (exponential backoff)
@@ -256,6 +293,10 @@ class InitiativeDecisionEngine:
         title: str,
         description: str,
     ) -> Task:
+        normalized_title = (title or "").strip()
+        if not normalized_title:
+            raise ValueError("initiative title is required to create a task")
+
         project_id = initiative.selected_project_id or await self._default_project_id()
         if not project_id:
             raise ValueError("No project available for initiative task creation")
@@ -272,7 +313,7 @@ class InitiativeDecisionEngine:
 
         task = Task(
             id=str(uuid.uuid4()),
-            title=title,
+            title=normalized_title,
             status="active",
             work_state="not_started",
             project_id=project_id,
@@ -282,6 +323,61 @@ class InitiativeDecisionEngine:
         )
         self.db.add(task)
         return task
+
+    async def _find_existing_task(
+        self,
+        *,
+        title: str,
+        agent: str | None,
+        artifact_path: str | None = None,
+    ) -> Task | None:
+        normalized = (title or "").strip().lower()
+        if not normalized:
+            return None
+
+        normalized_agent = (agent or "").strip().lower()
+        if not normalized_agent:
+            return None
+
+        result = await self.db.execute(
+            select(Task)
+            .where(
+                Task.status.in_(["active", "completed"]),
+                func.lower(func.trim(Task.title)) == normalized,
+                func.lower(func.trim(func.coalesce(Task.agent, ""))) == normalized_agent,
+            )
+            .order_by(Task.created_at.desc())
+            .limit(1)
+        )
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+
+        if artifact_path:
+            artifact_result = await self.db.execute(
+                select(Task)
+                .where(
+                    Task.status.in_(["active", "completed"]),
+                    Task.artifact_path == artifact_path,
+                )
+                .order_by(Task.created_at.desc())
+                .limit(1)
+            )
+            return artifact_result.scalar_one_or_none()
+
+        return None
+
+    @staticmethod
+    def _extract_artifact_path(description: str) -> str | None:
+        """Best-effort parse for artifact_path from initiative descriptions."""
+        text = (description or "").strip()
+        if not text:
+            return None
+
+        match = re.search(r"artifact[_\s-]*path\s*[:=]\s*(\S+)", text, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).strip().strip("\"'")
 
     async def _create_rafe_inbox_item(
         self,
@@ -345,6 +441,8 @@ class InitiativeDecisionEngine:
         learning_feedback: str | None,
         decision_summary: str | None,
         decided_by: str,
+        duplicate_task_id: str | None = None,
+        skipped_due_to_artifact: str | None = None,
     ) -> None:
         feedback_payload = {
             "initiative_id": initiative.id,
@@ -357,6 +455,13 @@ class InitiativeDecisionEngine:
             "decision_summary": decision_summary,
             "learning_feedback": learning_feedback,
             "decided_by": decided_by,
+            "task_creation": (
+                "skipped_duplicate"
+                if duplicate_task_id
+                else ("skipped_artifact_exists" if skipped_due_to_artifact else "created")
+            ),
+            "duplicate_task_id": duplicate_task_id,
+            "artifact_path_skipped": skipped_due_to_artifact,
         }
 
         self.db.add(

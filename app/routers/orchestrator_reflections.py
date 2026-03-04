@@ -375,10 +375,16 @@ async def batch_decide_initiatives(
     created_tasks: list[dict[str, Any]] = []
 
     for new_task in payload.new_tasks:
+        task_title = (new_task.title or "").strip()
+        if not task_title:
+            errors.append({"error": "Task title is required", "task_title": new_task.title})
+            failed += 1
+            continue
+
         if new_task.project_id:
             proj = await db.get(ProjectModel, new_task.project_id)
             if not proj:
-                errors.append({"error": f"Project not found: {new_task.project_id}", "task_title": new_task.title})
+                errors.append({"error": f"Project not found: {new_task.project_id}", "task_title": task_title})
                 failed += 1
                 continue
 
@@ -391,7 +397,7 @@ async def batch_decide_initiatives(
 
         task = TaskModel(
             id=task_id,
-            title=new_task.title,
+            title=task_title,
             status=new_task.status,
             work_state=new_task.work_state,
             owner=new_task.owner,
@@ -408,7 +414,7 @@ async def batch_decide_initiatives(
             payload={
                 "task_id": task_id,
                 "project_id": new_task.project_id,
-                "title": new_task.title,
+                "title": task_title,
                 "agent": new_task.agent,
                 "source": "lobs_batch_review",
                 "created_at": _dt.now(_tz.utc).isoformat(),
@@ -417,7 +423,7 @@ async def batch_decide_initiatives(
 
         created_tasks.append({
             "task_id": task_id,
-            "title": new_task.title,
+            "title": task_title,
             "project_id": new_task.project_id,
             "agent": new_task.agent,
         })
